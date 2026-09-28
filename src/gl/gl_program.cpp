@@ -88,6 +88,12 @@ void glLinkProgram(GLuint p) {
     if (pr.shaders.empty()) { pr.infoLog = "error: no shaders attached"; return; }
     if (!pr.computeMSL.empty()) { pr.linked = true; return; } // compute program
     if (!hasV) { pr.infoLog = "error: graphics program needs vertex shader"; return; }
+    // Snapshot conv: Blaze3D gắn CÙNG ShaderObject vào NHIỀU program (và có thể
+    // relink). Link cũ mutate vs->conv/fs->conv tại chỗ (900→0) trong khi MSL
+    // copy lại từ vs->msl gốc mỗi lần → link thứ 2 thấy location đã 0 nên bỏ
+    // rewrite, Metal nhận attribute(900) out-of-bounds → 1282 → crash game.
+    // Từ đây chỉ làm việc trên bản copy, link idempotent, shader gốc giữ nguyên.
+    GLSLConvertResult vsC = vs->conv, fsC = fs ? fs->conv : GLSLConvertResult{};
     // Không có fragment: GL cho phép (chỉ depth/raster discard)? — yêu cầu FS để đơn giản
     // và trung thực với M5b (pipeline cần fragment fn). Ghi rõ thay vì im lặng.
     if (vs && !fs) {
@@ -98,9 +104,9 @@ void glLinkProgram(GLuint p) {
     }
     // 1. Varying matching: mọi fs.in phải có vs.out cùng tên (đúng GL: thiếu → link lỗi).
     //    vs.out thừa không ai đọc: cho phép (GL cho phép).
-    for (auto& fi : fs->conv.inputs) {
+    for (auto& fi : fsC.inputs) {
         bool found = false;
-        for (auto& vo : vs->conv.outputs)
+        for (auto& vo : vsC.outputs)
             if (vo.name == fi.name) {
                 if (vo.mslType != fi.mslType) {
                     pr.infoLog = "error: varying type mismatch: " + fi.name;
@@ -115,13 +121,13 @@ void glLinkProgram(GLuint p) {
     //    explicit vs tạm → theo explicit; cả 2 tạm → số mới. Explicit khác nhau → link lỗi.
     {
         int next = 0;
-        for (auto& vo : vs->conv.outputs)
+        for (auto& vo : vsC.outputs)
             if (vo.location < kTempLocBase) next = std::max(next, vo.location + 1);
-        for (auto& fi : fs->conv.inputs)
+        for (auto& fi : fsC.inputs)
             if (fi.location < kTempLocBase) next = std::max(next, fi.location + 1);
-        for (auto& vo : vs->conv.outputs) {
+        for (auto& vo : vsC.outputs) {
             GLSLVar* fi = nullptr;
-            for (auto& f : fs->conv.inputs)
+            for (auto& f : fsC.inputs)
                 if (f.name == vo.name) { fi = &f; break; }
             bool voExp = vo.location < kTempLocBase;
             bool fiExp = fi && fi->location < kTempLocBase;
@@ -143,9 +149,9 @@ void glLinkProgram(GLuint p) {
     // 3. Attribute locations: glBindAttribLocation honoured, explicit giữ, còn lại gán tiếp.
     {
         int next = 0;
-        for (auto& a : vs->conv.inputs)
+        for (auto& a : vsC.inputs)
             if (a.location < kTempLocBase) next = std::max(next, a.location + 1);
-        for (auto& a : vs->conv.inputs) {
+        for (auto& a : vsC.inputs) {
             auto bit = pr.attribBind.find(a.name);
             int assigned = a.location;
             if (bit != pr.attribBind.end()) {
@@ -164,26 +170,26 @@ void glLinkProgram(GLuint p) {
     // Lưu ý: offset gộp để tương thích cũ; AppleDrawGL chuyển về stage-local khi upload.
     {
         size_t off = 0;
-        for (auto& u : vs->conv.uniforms) {
+        for (auto& u : vsC.uniforms) {
             if (u.isSampler) continue;
             pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, true});
         }
-        pr.vsUBSize = vs->conv.uniformBufferSize;
+        pr.vsUBSize = vsC.uniformBufferSize;
         off = (pr.vsUBSize + 15) & ~((size_t)15);
-        for (auto& u : fs->conv.uniforms) {
+        for (auto& u : fsC.uniforms) {
             if (u.isSampler) continue;
             pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, false});
         }
-        pr.fsUBSize = fs->conv.uniformBufferSize;
+        pr.fsUBSize = fsC.uniformBufferSize;
     }
     // 4b. Sampler lists + units mặc định 0 (đúng GL) cho AppleDrawGL slot mapping.
     {
         pr.vsSamplers.clear(); pr.fsSamplers.clear();
-        for (auto& s : vs->conv.samplers) {
+        for (auto& s : vsC.samplers) {
             pr.vsSamplers.push_back(s.name);
             if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
         }
-        for (auto& s : fs->conv.samplers) {
+        for (auto& s : fsC.samplers) {
             pr.fsSamplers.push_back(s.name);
             if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
         }
@@ -199,8 +205,8 @@ void glLinkProgram(GLuint p) {
             // giữ binding đã gọi glUniformBlockBinding trước link (nếu có)
             pr.uniformBlocks.push_back(ub);
         };
-        for (auto& b : vs->conv.blocks) addBlock(b.name, true);
-        for (auto& b : fs->conv.blocks) addBlock(b.name, false);
+        for (auto& b : vsC.blocks) addBlock(b.name, true);
+        for (auto& b : fsC.blocks) addBlock(b.name, false);
         // ZERO_TO_ONE cảnh báo: shader đã bake z-convert mặc định; app đổi ClipControl
         // depth cần relink (hiện log, M5c recompile tự động).
         if (c.state.ClipDepth() == 0x935F)

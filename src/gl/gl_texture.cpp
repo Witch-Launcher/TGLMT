@@ -74,13 +74,19 @@ void glActiveTexture(GLenum tex) {
 }
 // Spec §8.1: mọi lệnh Tex* (không DSA) tác động lên texture đang bind tại
 // active unit. Kiểm tra target khớp; sai → INVALID_OPERATION (core profile).
+// Ngoại lệ: face cubemap (POSITIVE_X..NEGATIVE_Z) thuộc texture CUBE đã bind.
+static bool IsCubeFace(GLenum t) { return t >= 0x8515 && t <= 0x851A; }
 static TextureObject* BoundTex(Context& c, GLenum target) {
     GLuint unit = c.state.ActiveTexture();
     GLuint id = c.state.BoundTexture(unit);
     if (!id) { c.errors.Record(0x0502); return nullptr; }
     auto it = c.textures.find(id);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return nullptr; }
-    if (it->second.target != target) { c.errors.Record(0x0502); return nullptr; }
+    if (it->second.target != target) {
+        if (!(it->second.target == 0x8513 && IsCubeFace(target))) {
+            c.errors.Record(0x0502); return nullptr;
+        }
+    }
     return &it->second;
 }
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void* pixels) {
@@ -96,6 +102,40 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     TextureObject* tp = BoundTex(c, target);
     if (!tp) return; // lỗi đã record trong BoundTex
     auto& tx = *tp;
+    // Upload face cubemap: mỗi face shadow riêng, GPU placeholder = face 0.
+    // (Cube Metal thật + sample vec3 là P1.) Không lỗi để GlDevice qua được.
+    if (IsCubeFace(target) && tx.target == 0x8513) {
+        int face = (int)(target - 0x8515);
+        size_t bpp = Bpp(format, type);
+        if (tx.isCube && (tx.w != (uint32_t)w || tx.h != (uint32_t)h)) {
+            c.errors.Record(0x0501); return; // face lệch size (spec §8.5)
+        }
+        tx.isCube = true;
+        tx.w = w; tx.h = h; tx.internalFormat = internalformat; tx.levels = level + 1;
+        tx.faces[face].assign((size_t)w * h * bpp, 0);
+        if (pixels) {
+            GLint align = c.state.PixelStore().unpackAlignment;
+            size_t rowLen = (((size_t)w * bpp + (size_t)align - 1) / (size_t)align) * (size_t)align;
+            const uint8_t* src = (const uint8_t*)pixels;
+            for (GLsizei r = 0; r < h; ++r)
+                memcpy(tx.faces[face].data() + (size_t)r * w * bpp, src + r * rowLen, (size_t)w * bpp);
+        }
+        if (face == 0) { // mirror face 0 cho GetTexImage + GPU placeholder
+            tx.pixels = tx.faces[0];
+            tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
+            if (tx.gpu && pixels && format == 0x1908 && type == 0x1401 && w > 0 && h > 0)
+                c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
+                                        tx.pixels.data(), (size_t)w * 4);
+        } else if (!tx.gpu) {
+            tx.pixels = tx.faces[face]; // chưa có face 0: mirror tạm để không đọc rác
+            tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
+        }
+        if (face != 0)
+            c.LogDebug(0, 0, 0, 0, "glTexImage2D cubemap face: shadow only, GPU placeholder face 0 (P1 cube)");
+        (void)border; (void)level;
+        return;
+    }
+    tx.isCube = false;
     tx.w = w; tx.h = h; tx.internalFormat = internalformat; tx.levels = level + 1;
     size_t n = (size_t)w * h * Bpp(format, type);
     tx.pixels.assign(n, 0);
@@ -132,6 +172,14 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     TextureObject* tp = BoundTex(c, target);
     if (!tp || !pixels) { if (!pixels) c.errors.Record(0x0501); return; }
     auto& t = *tp;
+    // SubImage lên face cubemap: ghi vào face slot, sync GPU chỉ khi face 0.
+    std::vector<uint8_t>* dstPix = &t.pixels;
+    bool syncGPU = true;
+    if (IsCubeFace(target) && t.target == 0x8513 && t.isCube) {
+        int face = (int)(target - 0x8515);
+        dstPix = &t.faces[face];
+        syncGPU = (face == 0);
+    }
     size_t bpp = Bpp(format, type);
     // Copy đúng vùng (xoff,yoff), kẹp biên theo spec §8.5 (lệch biên → INVALID_VALUE)
     if (xoff < 0 || yoff < 0 || w < 0 || h < 0 ||
@@ -141,12 +189,14 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     GLint align = c.state.PixelStore().unpackAlignment;
     size_t rowLen = ((size_t)w * bpp + (size_t)align - 1) / (size_t)align * (size_t)align;
     const uint8_t* src = (const uint8_t*)pixels;
+    if (dstPix->size() < (size_t)t.w * t.h * bpp) dstPix->resize((size_t)t.w * t.h * bpp, 0);
     for (GLsizei r = 0; r < h; ++r) {
-        uint8_t* dst = t.pixels.data() + ((size_t)(yoff + r) * t.w + (size_t)xoff) * bpp;
+        uint8_t* dst = dstPix->data() + ((size_t)(yoff + r) * t.w + (size_t)xoff) * bpp;
         memcpy(dst, src + r * rowLen, (size_t)w * bpp);
     }
+    if (dstPix != &t.pixels && !t.faces[0].empty()) t.pixels = t.faces[0]; // mirror face 0
     // Sync GPU vùng đã đổi (chunk atlas streaming mỗi frame) — A11 Shared coherent
-    if (t.gpu && bpp == 4) {
+    if (syncGPU && t.gpu && bpp == 4) {
         // pack thành tight rows cho replaceRegion
         std::vector<uint8_t> tight((size_t)w * h * 4);
         for (GLsizei r = 0; r < h; ++r)

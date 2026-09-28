@@ -56,6 +56,10 @@ struct TextureObject {
     GLenum internalFormat = 0x8058; // RGBA8
     uint32_t w = 0, h = 0, d = 0;
     std::vector<uint8_t> pixels;    // base level shadow (đủ cho unit test readback)
+    // Cubemap (panorama menu): 6 faces shadow riêng. GPU hiện dùng face 0 làm
+    // placeholder 2D (cube Metal + sample vec3 là P1, xem limits.md).
+    bool isCube = false;
+    std::vector<uint8_t> faces[6];
     std::unordered_map<GLenum, GLint> params; // MIN_FILTER/WRAP_S/...
     std::shared_ptr<metal::ITexture> gpu;
 };
