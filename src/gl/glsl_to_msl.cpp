@@ -1,8 +1,11 @@
 // GLSLConverter.cpp — xem GLSLConverter.h về subset được hỗ trợ.
 // Mọi thứ ngoài subset → ok=false + log rõ ràng (không đoán mò sinh code sai).
 #include "tglmt/GLSLConverter.h"
+#include <algorithm>
 #include <cctype>
 #include <sstream>
+#include <unordered_map>
+#include <utility>
 
 namespace tglmt {
 namespace {
@@ -263,15 +266,57 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     auto fail = [&](const std::string& m) { R.ok = false; R.log = m; return R; };
 
     std::string src = StripComments(glsl);
-    // Tiền xử lý: kiểm tra #version, bỏ precision, cấm directive khác.
+    // Tiền xử lý: #version, #define/#undef (object-like, kiểu Blaze3D prepend),
+    // #ifdef/#ifndef/#else/#endif, #line (bỏ), #pragma/#extension (bỏ), precision (bỏ).
+    // Blaze3D tiền tố mọi shader vanilla bằng defines biến thể + #line nên thiếu
+    // bước này là fail hàng loạt (đã quan sát trên máy).
     {
         std::istringstream iss(src);
         std::string line, kept;
         bool sawVersion = false;
+        std::unordered_map<std::string, std::string> macros;
+        std::vector<bool> activeStack; // nhánh hiện tại có emit không
+        std::vector<bool> takenStack;  // level này đã chạy nhánh nào chưa (cho elif/else)
+        auto active = [&]() {
+            for (bool b : activeStack) if (!b) return false;
+            return true;
+        };
+        auto evalIf = [&](const std::string& expr) -> std::pair<bool, bool> {
+            std::string e = Trim(expr);
+            if (e.rfind("defined", 0) == 0) {
+                size_t lp = e.find('('), rp = e.find(')');
+                std::string nm = (lp != std::string::npos && rp != std::string::npos && rp > lp)
+                    ? Trim(e.substr(lp + 1, rp - lp - 1)) : Trim(e.substr(7));
+                return {macros.count(nm) > 0, true};
+            }
+            if (e.rfind("!defined", 0) == 0) {
+                size_t lp = e.find('('), rp = e.find(')');
+                std::string nm = (lp != std::string::npos && rp != std::string::npos && rp > lp)
+                    ? Trim(e.substr(lp + 1, rp - lp - 1)) : Trim(e.substr(8));
+                return {macros.count(nm) == 0, true};
+            }
+            // số nguyên trần: #if 0 / #if 1
+            if (!e.empty() && (isdigit((unsigned char)e[0]) || e[0] == '-')) {
+                return {atoi(e.c_str()) != 0, true};
+            }
+            // macro đơn trị số: #if ALPHA_CUTOUT (sau define số)
+            auto it = macros.find(e);
+            if (it != macros.end() && !it->second.empty()) {
+                const std::string& v = Trim(it->second);
+                if (!v.empty() && (isdigit((unsigned char)v[0]) || v[0] == '-' || v[0] == '.'))
+                    return {atof(v.c_str()) != 0.0, true};
+            }
+            return {false, false}; // biểu thức lạ → fail trung thực ở caller
+        };
         while (std::getline(iss, line)) {
             std::string t = Trim(line);
             if (!t.empty() && t[0] == '#') {
-                if (t.rfind("#version", 0) == 0) {
+                std::istringstream ds(t.substr(1));
+                std::string dir; ds >> dir;
+                std::string restLine;
+                std::getline(ds, restLine);
+                restLine = Trim(restLine);
+                if (dir == "version") {
                     sawVersion = true;
                     if (t.find("300") == std::string::npos && t.find("460") == std::string::npos &&
                         t.find("450") == std::string::npos && t.find("440") == std::string::npos &&
@@ -282,12 +327,110 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                         return fail("phiên bản GLSL không nhận diện: " + t);
                     continue; // bỏ dòng version
                 }
+                if (dir == "line" || dir == "pragma" || dir == "extension") continue; // bỏ
+                if (dir == "define") {
+                    if (!active()) continue;
+                    std::istringstream ms(restLine);
+                    std::string nm; ms >> nm;
+                    std::string val; std::getline(ms, val); val = Trim(val);
+                    if (nm.empty()) return fail("define thiếu tên: " + t);
+                    if (nm.find('(') != std::string::npos)
+                        return fail("define hàm ngoài subset: " + t);
+                    macros[nm] = val; // val rỗng = flag (dùng với ifdef)
+                    continue;
+                }
+                if (dir == "undef") {
+                    if (active()) macros.erase(restLine);
+                    continue;
+                }
+                if (dir == "ifdef" || dir == "ifndef") {
+                    bool parent = active();
+                    bool cond = dir == "ifdef" ? (macros.count(restLine) > 0)
+                                               : (macros.count(restLine) == 0);
+                    activeStack.push_back(parent && cond);
+                    takenStack.push_back(parent && cond);
+                    continue;
+                }
+                if (dir == "if") {
+                    bool parent = active();
+                    auto [v, ok] = evalIf(restLine);
+                    if (!ok) return fail("#if ngoài subset: " + t);
+                    activeStack.push_back(parent && v);
+                    takenStack.push_back(parent && v);
+                    continue;
+                }
+                if (dir == "elif") {
+                    if (activeStack.empty()) return fail("#elif lạc: " + t);
+                    bool parent = true;
+                    for (size_t k = 0; k + 1 < activeStack.size(); ++k)
+                        if (!activeStack[k]) parent = false;
+                    if (takenStack.back()) {
+                        activeStack.back() = false; // nhánh trước đã chạy
+                    } else if (parent) {
+                        auto [v, ok] = evalIf(restLine);
+                        if (!ok) return fail("#elif ngoài subset: " + t);
+                        activeStack.back() = v;
+                        takenStack.back() = v;
+                    } else {
+                        activeStack.back() = false;
+                    }
+                    continue;
+                }
+                if (dir == "else") {
+                    if (activeStack.empty()) return fail("#else lạc: " + t);
+                    bool parent = true;
+                    for (size_t k = 0; k + 1 < activeStack.size(); ++k)
+                        if (!activeStack[k]) parent = false;
+                    activeStack.back() = parent && !takenStack.back();
+                    takenStack.back() = true;
+                    continue;
+                }
+                if (dir == "endif") {
+                    if (activeStack.empty()) return fail("#endif lạc: " + t);
+                    activeStack.pop_back();
+                    takenStack.pop_back();
+                    continue;
+                }
                 return fail("directive không hỗ trợ: " + t);
             }
+            if (!active()) continue; // nhánh ifdef tắt
             if (t.rfind("precision", 0) == 0) continue; // MSL bỏ qua precision
             kept += line + "\n";
         }
+        if (!activeStack.empty()) return fail("#ifdef/#if không đóng");
         if (!sawVersion) return fail("thiếu '#version' (GLSL yêu cầu)");
+        // Thay macro (tên dài trước để tránh tiền tố, theo word-boundary).
+        if (!macros.empty()) {
+            std::vector<std::pair<std::string, std::string>> ms(macros.begin(), macros.end());
+            std::sort(ms.begin(), ms.end(),
+                      [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+            std::string out;
+            size_t i = 0;
+            while (i < kept.size()) {
+                char ch = kept[i];
+                if (ch == '"') { // giữ string literal
+                    size_t j = kept.find('"', i + 1);
+                    if (j == std::string::npos) j = kept.size() - 1;
+                    out += kept.substr(i, j - i + 1);
+                    i = j + 1;
+                    continue;
+                }
+                if (IsIdentChar(ch, true)) {
+                    size_t j = i + 1;
+                    while (j < kept.size() && IsIdentChar(kept[j], false)) ++j;
+                    std::string w = kept.substr(i, j - i);
+                    bool hit = false;
+                    for (auto& kv : ms)
+                        if (kv.first == w) { out += kv.second; hit = true; break; }
+                    if (!hit) out += w;
+                    i = j;
+                    continue;
+                }
+                out += ch;
+                ++i;
+            }
+            kept = out;
+        }
         src = kept;
     }
     // Quét khai báo top-level (bao gồm UBO blocks cho vanilla 1.17+/Sodium read-only)
@@ -528,6 +671,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         mp.emplace_back("gl_Position", "_out.position");
         mp.emplace_back("gl_PointSize", "_out.pointSize");
         if (body.find("gl_PointSize") != std::string::npos) R.usesPointSize = true;
+        // screenquad (lightmap/blit): đỉnh suy từ index, không cần attribute.
+        // GLSL int → MSL uint (bitwise tương đương).
+        mp.emplace_back("gl_VertexID", "tglmt_vertexID");
+        if (body.find("gl_VertexID") != std::string::npos) R.usesVertexID = true;
+        mp.emplace_back("gl_InstanceID", "tglmt_instanceID");
+        if (body.find("gl_InstanceID") != std::string::npos) R.usesInstanceID = true;
     } else {
         for (auto& v : ins) mp.emplace_back(v.name, "_in." + v.name);
         mp.emplace_back("gl_PointCoord", "tglmt_pointCoord");
@@ -770,6 +919,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         for (size_t bi = 0; bi < blocks.size(); ++bi)
             msl_out << ",\n    constant TGLMTUBO_" << blocks[bi].name << "& ubo_" << blocks[bi].name
                     << " [[buffer(" << (17 + bi) << ")]]";
+        if (R.usesVertexID) msl_out << ",\n    uint tglmt_vertexID [[vertex_id]]";
+        if (R.usesInstanceID) msl_out << ",\n    uint tglmt_instanceID [[instance_id]]";
         msl_out << texParams << ") {\n  TGLMT_VOut _out = {};\n" << body << "\n" << kZConv << "\n  return _out;\n}\n";
     } else if (isMRT) {
         msl_out << "struct TGLMT_FOut {\n";

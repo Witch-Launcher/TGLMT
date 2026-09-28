@@ -61,6 +61,9 @@ struct GLSLConvertResult {
     bool usesPointSize = false;
     bool usesPointCoord = false;
     bool usesFragCoord = false;
+    // screenquad vanilla không attribute, dựng đỉnh từ gl_VertexID/gl_InstanceID.
+    bool usesVertexID = false;
+    bool usesInstanceID = false;
     bool isVertex = true;
 };
 

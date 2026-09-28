@@ -205,7 +205,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (!bindMap.count(a.binding))
             bindMap[a.binding] = {bit->second.gpu, (size_t)a.offset};
     }
-    if (cas.empty()) return false;
+    if (cas.empty()) {
+        // Draw không attribute (screenquad suy từ vertex_id): pipeline descriptor
+        // rỗng, không bind vertex buffer. Không phải lỗi (trước đây noPipeline oan).
+        c.LogDebug(0, 0, 0, 0, "AppleDrawGL: attributeless draw (vertex_id)");
+    }
     for (auto& ca : cas) {
         if (ca.stride == 0) ca.stride = ca.offset + ca.size * GLTypeSize(ca.type);
     }
@@ -246,8 +250,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     auto pipe = c.device->makeCustomPipeline(pr.appleVS.get(), "TGLMT_vs", pr.appleFS.get(),
                                              "TGLMT_fs", target->pixelFormat(),
-                                             cas.data(), (uint32_t)cas.size(),
-                                             cas[0].stride, &opts);
+                                             cas.empty() ? nullptr : cas.data(), (uint32_t)cas.size(),
+                                             cas.empty() ? 0 : cas[0].stride, &opts);
     if (!pipe) {
         c.appleStats.noPipeline++;
         c.LogDebug(0, 0, 0, 0, "AppleDrawGL: pipeline nil (format attrib chưa hỗ trợ?)");

@@ -880,7 +880,9 @@ public:
             const PipelineOpts* opts = nullptr) override {
         AppleLibrary* alVs = dynamic_cast<AppleLibrary*>(vsLib);
         AppleLibrary* alFs = dynamic_cast<AppleLibrary*>(fsLib);
-        if (!alVs || !alFs || !vsFn || !fsFn || !attribs || !nAttribs) return nullptr;
+        if (!alVs || !alFs || !vsFn || !fsFn) return nullptr;
+        // nAttribs==0: draw suy đỉnh từ vertex_id (screenquad), descriptor rỗng hợp lệ.
+        if (nAttribs > 0 && !attribs) return nullptr;
         MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
         bool layoutSeen[31] = {false};
         uint32_t layoutDivisor[31] = {0};
