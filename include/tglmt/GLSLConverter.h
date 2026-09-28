@@ -9,7 +9,8 @@
 //  - `uniform` float/vec/mat + sampler2D (uniform block KHÔNG hỗ trợ → lỗi rõ)
 //  - varyings in/out khớp location 2 stage; gl_Position/gl_PointSize (vertex),
 //    gl_PointCoord (fragment → param [[point_coord]]),
-//    gl_FragCoord (fragment → param [[position]])
+//    gl_FragCoord (fragment → param [[position]]),
+//    gl_FrontFacing (fragment → param [[front_facing]], entity PER_FACE_LIGHTING)
 //  - `texture(sampler, uv)` [, bias] → .sample(); texelFetch → LỖI rõ
 //  - `discard;` → `discard_fragment();`
 //  - hàm/thân lệnh/biểu thức: pass-through (MSL tương thích C-like), trừ tên
@@ -66,6 +67,7 @@ struct GLSLConvertResult {
     bool usesPointSize = false;
     bool usesPointCoord = false;
     bool usesFragCoord = false;
+    bool usesFrontFacing = false;
     // screenquad vanilla không attribute, dựng đỉnh từ gl_VertexID/gl_InstanceID.
     bool usesVertexID = false;
     bool usesInstanceID = false;

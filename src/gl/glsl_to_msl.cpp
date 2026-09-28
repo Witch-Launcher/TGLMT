@@ -1089,7 +1089,7 @@ static bool ThreadHelpersMSL(
             }
         }
         for (const char* vw : {"_in", "_out", "tglmt_vertexID", "tglmt_instanceID",
-                               "tglmt_pointCoord", "tglmt_fragCoord"}) {
+                               "tglmt_pointCoord", "tglmt_fragCoord", "gl_FrontFacing"}) {
             if (hasWordIn(helpersMSL, d.bodyStart, d.bodyEnd + 1, vw)) {
                 err = std::string("helper ") + d.name + " dùng " + vw + " trực tiếp (phải truyền param)";
                 return false;
@@ -2537,6 +2537,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (body.find("gl_PointCoord") != std::string::npos) R.usesPointCoord = true;
         mpVary.emplace_back("gl_FragCoord", "tglmt_fragCoord");
         if (body.find("gl_FragCoord") != std::string::npos) R.usesFragCoord = true;
+        // gl_FrontFacing (entity.fsh nhánh PER_FACE_LIGHTING): Metal không có
+        // builtin tương ứng trong body — phải là param [[front_facing]].
+        // Không map là `use of undeclared identifier` trên máy (crash 26.1.2
+        // 2026-09-28: 8 pipeline entity_*). Chỉ fragment mới có front-facing.
+        mpVary.emplace_back("gl_FrontFacing", "tglmt_frontFacing");
+        if (body.find("gl_FrontFacing") != std::string::npos) R.usesFrontFacing = true;
         if (isMRT) {
             for (auto& o : outs) mpVary.emplace_back(o.name, "_out.mrt" + std::to_string(o.location));
         } else if (legacyFrag) {
@@ -2660,6 +2666,32 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         body = nb;
     }
     body = RewriteIdents(RewriteArrayCtors(body), mp);
+    // Chỉ attribute ACTIVE (đọc trong main) mới vào TGLMT_VIn.
+    // Desktop GL: attribute khai báo nhưng không dùng là inactive — không tốn
+    // location, GetAttribLocation → -1. Blaze3D (GlProgram.link, kiểm chứng bằng
+    // javap trên client.jar 26.1.2) bind attribute theo tên element của
+    // VertexFormat cho MỌI program, kể cả attribute shader đó không dùng
+    // (crumbling.vsh không đọc Normal nhưng game vẫn bind "Normal"→0 trong khi
+    // Position auto→0). Giữ lại là Metal `attribute index used more than once`
+    // → crash khởi động (2026-09-28). Strip theo `_in.NAME` trong body.
+    // Fragment inputs là varyings (link kiểm khớp) — KHÔNG strip.
+    if (R.isVertex && !ins.empty()) {
+        auto usesAttr = [&](const std::string& nm) {
+            std::string key = "_in." + nm;
+            size_t p = 0;
+            while ((p = body.find(key, p)) != std::string::npos) {
+                size_t e = p + key.size();
+                if (e >= body.size() || !IsIdentChar(body[e], false)) return true;
+                p = e;
+            }
+            return false;
+        };
+        std::vector<GLSLVar> active;
+        for (auto& a : ins)
+            if (usesAttr(a.name)) active.push_back(a);
+        ins.swap(active);
+        R.inputs = ins; // conv mang đi link dùng bản đã strip (struct MSL dưới cũng dùng ins)
+    }
     // GLSL implicit int→float (sample_lightmap/terrain) + mat4(mat2) + shadowing:
     // chạy trên MSL (sau RI) vì pattern đã là `float2`/`ubo_`/`float4x4`.
     {
@@ -2920,6 +2952,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     << " [[buffer(" << (17 + bi) << ")]]";
         if (R.usesPointCoord) msl_out << ",\n    float2 tglmt_pointCoord [[point_coord]]";
         if (R.usesFragCoord) msl_out << ",\n    float4 tglmt_fragCoord [[position]]";
+        if (R.usesFrontFacing) msl_out << ",\n    bool tglmt_frontFacing [[front_facing]]";
         msl_out << texParams << ") {\n  TGLMT_FOut _out = {};\n" << body
                 << "\n  return _out;\n}\n";
     } else {
@@ -2930,6 +2963,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     << " [[buffer(" << (17 + bi) << ")]]";
         if (R.usesPointCoord) msl_out << ",\n    float2 tglmt_pointCoord [[point_coord]]";
         if (R.usesFragCoord) msl_out << ",\n    float4 tglmt_fragCoord [[position]]";
+        if (R.usesFrontFacing) msl_out << ",\n    bool tglmt_frontFacing [[front_facing]]";
         msl_out << texParams << ") {\n  float4 tglmt_fragColor = float4(0.0);\n" << body
                 << "\n  return tglmt_fragColor;\n}\n";
     }

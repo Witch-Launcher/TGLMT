@@ -147,6 +147,11 @@ void glLinkProgram(GLuint p) {
         }
     }
     // 3. Attribute locations: glBindAttribLocation honoured, explicit giữ, còn lại gán tiếp.
+    // Blaze3D bind attribute theo tên element của VertexFormat cho mọi program
+    // (javap GlProgram.link, 26.1.2) — kể cả attribute shader không đọc. Attribute
+    // inactive đã bị strip ở converter nên còn lại đây đều ACTIVE; nếu 2 tên khác
+    // nhau chung 1 index (aliasing thật) thì Metal không biểu diễn được
+    // (`attribute used more than once`) → fail rõ ở link thay vì Metal error khó đọc.
     {
         int next = 0;
         for (auto& a : vsC.inputs)
@@ -165,6 +170,15 @@ void glLinkProgram(GLuint p) {
             }
             pr.attribLoc[a.name] = assigned;
         }
+        for (size_t i = 0; i < vsC.inputs.size(); ++i)
+            for (size_t j = i + 1; j < vsC.inputs.size(); ++j)
+                if (vsC.inputs[i].location == vsC.inputs[j].location) {
+                    pr.infoLog = "error: attribute location aliasing: '" + vsC.inputs[i].name +
+                                 "' and '" + vsC.inputs[j].name + "' both use index " +
+                                 std::to_string(vsC.inputs[i].location) +
+                                 " (bind chung index cho 2 attribute ACTIVE không biểu diễn được trên Metal)";
+                    return;
+                }
     }
     // 4. Uniform layout gộp (vs trước, fs sau, mỗi stage align 16 đầu khối).
     // Lưu ý: offset gộp để tương thích cũ; AppleDrawGL chuyển về stage-local khi upload.

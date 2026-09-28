@@ -2,7 +2,7 @@
 # Verify MSL that converter sinh ra bang Metal compiler that (macOS).
 # Day la bai test THAT: converter bao OK chua du, metal phai compile duoc.
 # Chay tu repo root. Yeu cau: build/ da build, xcrun macOS SDK.
-# Tra ve 0 neu 79/79 file pass.
+# Tra ve 0 neu TAT CA file pass (gom base + all-defines + bind regression).
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
