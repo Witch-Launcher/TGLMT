@@ -58,6 +58,8 @@ void TGLMT_SwapInterval(int interval);
 void* TGLMT_GetProcAddress(const char* name);
 int TGLMT_HasRealGPU(void);
 void TGLMT_ResizeWindow(TGLMT_Window* w, uint32_t width, uint32_t height);
+// Chuỗi diagnostic backend ("apple" vs "apple(null-fallback)"), log ở bridge.
+const char* TGLMT_BackendName(void);
 }
 
 } // namespace tglmt

@@ -86,6 +86,13 @@ static TextureObject* BoundTex(Context& c, GLenum target) {
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void* pixels) {
     Context& c = Context::Current();
     if (w < 0 || h < 0) { c.errors.Record(0x0501); return; }
+    // Proxy texture (GlDevice probe max size): không đổi state, không lỗi
+    // (đúng spec §8 — probe rồi fallback 8192 khi quá lớn).
+    switch (target) {
+        case 0x8063: case 0x8064: case 0x8070: case 0x8071: case 0x8513: case 0x8C19:
+            return;
+        default: break;
+    }
     TextureObject* tp = BoundTex(c, target);
     if (!tp) return; // lỗi đã record trong BoundTex
     auto& tx = *tp;
@@ -115,6 +122,7 @@ void glTexImage1D(GLenum t, GLint l, GLint inf, GLsizei w, GLint b, GLenum f, GL
     glTexImage2D(t, l, inf, w, 1, b, f, ty, p);
 }
 void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, GLsizei d, GLint b, GLenum f, GLenum ty, const void* p) {
+    if (target == 0x8070 || target == 0x8C19) return; // PROXY_3D/2D_ARRAY: probe, no-op
     (void)target;(void)level;(void)inf;(void)w;(void)h;(void)d;(void)b;(void)f;(void)ty;(void)p;
     // 3D → Metal type3D (M5 texture đầy đủ); hiện giữ shadow + log
     Context::Current().LogDebug(0,0,0,0,"glTexImage3D staged (Metal type3D ở M3)");

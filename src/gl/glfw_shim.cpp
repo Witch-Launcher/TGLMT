@@ -178,6 +178,7 @@ int TGLMT_HasRealGPU(void) { return GLFWShim::Instance().HasRealGPU() ? 1 : 0; }
 void TGLMT_ResizeWindow(TGLMT_Window* w, uint32_t width, uint32_t height) {
     GLFWShim::Instance().Resize(w, width, height);
 }
+const char* TGLMT_BackendName(void) { return GLFWShim::Instance().BackendName(); }
 } // extern "C"
 
 } // namespace tglmt

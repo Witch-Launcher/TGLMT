@@ -1144,7 +1144,22 @@ private:
 
 std::shared_ptr<IDevice> CreateAppleDevice(LogFn log) {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
-    if (!d) return nullptr; // headless/CI không GPU → caller fallback Null (trung thực)
+    if (!d) {
+        // Trên máy thật default device không bao giờ nil — nếu nil (thiết bị
+        // jailbreak lạ / race khởi tạo), thử toàn bộ danh sách trước khi bỏ.
+        // Log rõ để latestlog phân biệt với dylib build thiếu Apple backend.
+        if (log) log("TGLMT: MTLCreateSystemDefaultDevice nil, thu MTLCopyAllDevices");
+        NSArray<id<MTLDevice>>* all = MTLCopyAllDevices();
+        if (log) log("TGLMT: MTLCopyAllDevices count=" + std::to_string(all.count));
+        if (all.count > 0) {
+            d = all[0];
+            if (log) log(std::string("TGLMT: dung fallback device=") + ([d.name UTF8String] ? [d.name UTF8String] : "?"));
+        }
+    }
+    if (!d) {
+        if (log) log("TGLMT: khong co MTLDevice (Null fallback)");
+        return nullptr; // headless/CI không GPU → caller fallback Null (trung thực)
+    }
     return std::make_shared<AppleDevice>(d, log);
 }
 
