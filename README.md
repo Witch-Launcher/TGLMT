@@ -56,6 +56,10 @@ format must equal the `fmt` passed to `Init`; see `docs/en/` for details.
 
 ## Docs
 
+Open `docs-site/index.html` in a browser for the searchable bilingual site
+(dark/light, VI/EN toggle), generated from the markdown below via
+`python3 tools/gen_docs_site.py`:
+
 - `docs/en/getting-started.md` — build, test, first frame
 - `docs/en/api.md` — C++ and C API reference
 - `docs/en/architecture.md` — pipeline, draw flow, coordinate mapping
