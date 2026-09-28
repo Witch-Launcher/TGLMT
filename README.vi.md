@@ -56,7 +56,7 @@ phải bằng `fmt` truyền vào `Init`; chi tiết xem `docs/vi/`.
 
 ## Tài liệu
 
-Mở `docs-site/index.html` trên trình duyệt để xem site tra cứu song ngữ
+Mở `docs/index.html` trên trình duyệt để xem site tra cứu song ngữ
 (tối/sáng, chuyển VI/EN), sinh từ các file dưới qua
 `python3 tools/gen_docs_site.py`:
 

@@ -11,7 +11,7 @@ import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-OUT = ROOT / "docs-site"
+OUT = ROOT / "docs"  # GitHub Pages chi phuc vu /docs -> site nam chung day
 
 ORDER = ["getting-started", "api", "architecture", "launcher", "limits"]
 PAGE_ID = {
@@ -165,7 +165,7 @@ def main():
         sections = build(lang)
         js = "docsData." + lang + ".sections = " + json.dumps(sections, ensure_ascii=False) + ";\n"
         (OUT / f"content-{lang}.js").write_text(js, encoding="utf-8")
-        print(f"[docs-site] wrote docs-site/content-{lang}.js ({len(js)//1024} KB)")
+        print(f"[docs-site] wrote docs/content-{lang}.js ({len(js)//1024} KB)")
 
 
 if __name__ == "__main__":
