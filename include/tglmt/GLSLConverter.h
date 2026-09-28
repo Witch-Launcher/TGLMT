@@ -39,6 +39,9 @@ struct GLSLVar {
     bool isSampler = false;
     bool isBuffer = false;       // samplerBuffer/isamplerBuffer/usamplerBuffer
     std::string sampleType = "float"; // float/int/uint (cho buffer + read)
+    bool isCube = false;   // samplerCube → texturecube (panorama)
+    bool isArray = false;  // sampler2DArray → texture2d_array
+    bool isShadow = false; // sampler2DShadow → texture2D approx (bỏ compare ref)
 };
 // Uniform block (UBO read-only): `layout(std140) uniform Block { members }`.
 struct GLSLBlock {

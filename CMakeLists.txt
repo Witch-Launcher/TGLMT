@@ -56,6 +56,8 @@ if(TGLMT_BUILD_TESTS)
     get_filename_component(NAME ${T} NAME_WE)
     add_executable(${NAME} ${T})
     target_link_libraries(${NAME} PRIVATE tglmt)
+    target_compile_definitions(${NAME} PRIVATE
+      TGLMT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus/mc-26.1.2-shaders")
     add_test(NAME ${NAME} COMMAND ${NAME})
   endforeach()
 endif()

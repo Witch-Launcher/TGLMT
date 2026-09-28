@@ -2,6 +2,10 @@
 build/
 build-*/
 out/*.dylib
+# Minecraft corpus: chi giu sources da trich, khong commit jar tai ve
+tests/corpus/.*.jar
+tests/corpus/.*.json
+tests/corpus/.extract
 # Xcode / macOS
 .DS_Store
 *.o

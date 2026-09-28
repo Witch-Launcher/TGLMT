@@ -368,6 +368,23 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // Sampler/texture theo glUniform1i unit → MSL slot k (fix bug bind theo unit):
     // FS samplers (theo thứ tự khai báo) → fragment texture(k)/sampler(k).
     // VS samplers → vertex texture(k)/sampler(k). Mặc định unit 0 đúng GL.
+    // Target không khớp loại sampler (cube/array gắn texture 2D...) → BỎ bind
+    // để Metal không abort encoder (đen đúng sampler đó, P1 làm cube/array thật).
+    auto kindOk = [&](const std::string& name, GLenum target) {
+        auto kit = pr.samplerKind.find(name);
+        char kind = (kit == pr.samplerKind.end()) ? '2' : kit->second;
+        // Cube/Array: chưa có GPU texture đúng loại (placeholder 2D gắn vào
+        // texturecube param sẽ abort encoder) → bỏ bind, đen đúng sampler đó.
+        // P1: MTLTextureTypeCube/Array thật.
+        if (kind == 'C' || kind == 'A') return false;
+        // target==0: DSA bind (glBindTextureUnit) không ghi target → tin tưởng.
+        // Chỉ chặn mismatch CHẮC CHẮN (cả hai đã biết mà khác nhau).
+        if (target == 0) return true;
+        switch (kind) {
+            case 'B': return target == 0x8C2A; // TEXTURE_BUFFER
+            default: return target == 0x0DE1;  // TEXTURE_2D (+shadow approx)
+        }
+    };
     for (size_t k = 0; k < pr.vsSamplers.size(); ++k) {
         const std::string& name = pr.vsSamplers[k];
         auto uit = pr.samplerUnits.find(name);
@@ -377,6 +394,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (!texId) continue;
         auto tit = c.textures.find(texId);
         if (tit == c.textures.end() || !tit->second.gpu) continue;
+        if (!kindOk(name, tit->second.target)) {
+            c.LogDebug(0, 0, 0, 0, "AppleDrawGL: bo bind VS sampler " + name + " (target khong khop)");
+            continue;
+        }
         enc->setVertexTexture(tit->second.gpu.get(), (uint32_t)k);
         auto ss = SamplerForUnit(c, unit, tit->second);
         if (ss) enc->setVertexSamplerState(ss.get(), (uint32_t)k);
@@ -390,6 +411,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (!texId) continue;
         auto tit = c.textures.find(texId);
         if (tit == c.textures.end() || !tit->second.gpu) continue;
+        if (!kindOk(name, tit->second.target)) {
+            c.LogDebug(0, 0, 0, 0, "AppleDrawGL: bo bind FS sampler " + name + " (target khong khop)");
+            continue;
+        }
         enc->setFragmentTexture(tit->second.gpu.get(), (uint32_t)k);
         auto ss = SamplerForUnit(c, unit, tit->second);
         if (ss) enc->setFragmentSamplerState(ss.get(), (uint32_t)k);

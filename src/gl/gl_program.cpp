@@ -185,12 +185,17 @@ void glLinkProgram(GLuint p) {
     // 4b. Sampler lists + units mặc định 0 (đúng GL) cho AppleDrawGL slot mapping.
     {
         pr.vsSamplers.clear(); pr.fsSamplers.clear();
+        auto kindOf = [](const GLSLVar& s) {
+            return s.isBuffer ? 'B' : s.isCube ? 'C' : s.isArray ? 'A' : s.isShadow ? 'S' : '2';
+        };
         for (auto& s : vsC.samplers) {
             pr.vsSamplers.push_back(s.name);
+            pr.samplerKind[s.name] = kindOf(s);
             if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
         }
         for (auto& s : fsC.samplers) {
             pr.fsSamplers.push_back(s.name);
+            pr.samplerKind[s.name] = kindOf(s);
             if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
         }
     }

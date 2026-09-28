@@ -112,6 +112,9 @@ struct ProgramObject {
     std::vector<std::string> vsSamplers;
     std::vector<std::string> fsSamplers;
     std::unordered_map<std::string, GLuint> samplerUnits;
+    // Loại sampler theo tên ('2' 2D, 'C' cube, 'A' array, 'S' shadow, 'B' buffer)
+    // để AppleDrawGL bỏ bind khi texture target không khớp (tránh abort Metal).
+    std::unordered_map<std::string, char> samplerKind;
     // Uniform blocks (UBO read-only, vanilla 1.17+ / Sodium): tên → index/binding.
     // index là thứ tự khai báo gộp vs+fs (ổn định), binding từ glUniformBlockBinding
     // (mặc định 0). Buffer thật từ Context::uniformBindPoints[binding].
