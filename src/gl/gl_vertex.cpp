@@ -69,9 +69,16 @@ void glVertexAttribPointer(GLuint i, GLint size, GLenum type, GLboolean norm, GL
     if (!v) return;
     auto& a = v->attribs[i];
     a.size = size; a.type = type; a.normalized = norm; a.stride = stride;
-    a.offset = (size_t)ptr;
+    a.relativeOffset = (size_t)ptr;
     a.buffer = c.state.BoundBuffer(0x8892); // ARRAY_BUFFER tại thời điểm gọi (spec §10.3)
     a.isInt = false; a.isLong = false;
+    // Legacy: binding giữ nguyên (mặc định 0), offset binding = 0 → effective = ptr.
+    if (a.binding < v->bindings.size()) {
+        v->bindings[a.binding].buffer = a.buffer;
+        v->bindings[a.binding].offset = 0;
+        v->bindings[a.binding].stride = stride;
+    }
+    VAOSyncAttribOffset(*v, i);
 }
 void glVertexAttribIPointer(GLuint i, GLint size, GLenum type, GLsizei stride, const void* ptr) {
     Context& c = Context::Current();
@@ -79,8 +86,14 @@ void glVertexAttribIPointer(GLuint i, GLint size, GLenum type, GLsizei stride, c
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
     auto& a = v->attribs[i];
-    a.size = size; a.type = type; a.stride = stride; a.offset = (size_t)ptr;
+    a.size = size; a.type = type; a.stride = stride; a.relativeOffset = (size_t)ptr;
     a.buffer = c.state.BoundBuffer(0x8892); a.isInt = true;
+    if (a.binding < v->bindings.size()) {
+        v->bindings[a.binding].buffer = a.buffer;
+        v->bindings[a.binding].offset = 0;
+        v->bindings[a.binding].stride = stride;
+    }
+    VAOSyncAttribOffset(*v, i);
 }
 void glVertexAttribLPointer(GLuint i, GLint size, GLenum type, GLsizei stride, const void* ptr) {
     Context& c = Context::Current();
@@ -88,8 +101,14 @@ void glVertexAttribLPointer(GLuint i, GLint size, GLenum type, GLsizei stride, c
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
     auto& a = v->attribs[i];
-    a.size = size; a.type = type; a.stride = stride; a.offset = (size_t)ptr;
+    a.size = size; a.type = type; a.stride = stride; a.relativeOffset = (size_t)ptr;
     a.buffer = c.state.BoundBuffer(0x8892); a.isLong = true;
+    if (a.binding < v->bindings.size()) {
+        v->bindings[a.binding].buffer = a.buffer;
+        v->bindings[a.binding].offset = 0;
+        v->bindings[a.binding].stride = stride;
+    }
+    VAOSyncAttribOffset(*v, i);
 }
 void glVertexAttribFormat(GLuint i, GLint size, GLenum type, GLboolean norm, GLuint rel) {
     Context& c = Context::Current();
@@ -97,28 +116,41 @@ void glVertexAttribFormat(GLuint i, GLint size, GLenum type, GLboolean norm, GLu
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
     v->attribs[i].size = size; v->attribs[i].type = type;
-    v->attribs[i].normalized = norm; v->attribs[i].offset = rel;
+    v->attribs[i].normalized = norm; v->attribs[i].relativeOffset = rel;
+    VAOSyncAttribOffset(*v, i);
 }
 void glVertexAttribIFormat(GLuint i, GLint size, GLenum type, GLuint rel) {
     Context& c = Context::Current();
     if (i >= 16) { c.errors.Record(0x0501); return; }
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
-    v->attribs[i].size = size; v->attribs[i].type = type; v->attribs[i].offset = rel; v->attribs[i].isInt = true;
+    v->attribs[i].size = size; v->attribs[i].type = type; v->attribs[i].relativeOffset = rel; v->attribs[i].isInt = true;
+    VAOSyncAttribOffset(*v, i);
 }
 void glVertexAttribLFormat(GLuint i, GLint size, GLenum type, GLuint rel) {
     Context& c = Context::Current();
     if (i >= 16) { c.errors.Record(0x0501); return; }
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
-    v->attribs[i].size = size; v->attribs[i].type = type; v->attribs[i].offset = rel; v->attribs[i].isLong = true;
+    v->attribs[i].size = size; v->attribs[i].type = type; v->attribs[i].relativeOffset = rel; v->attribs[i].isLong = true;
+    VAOSyncAttribOffset(*v, i);
 }
 void glBindVertexBuffer(GLuint bi, GLuint buf, GLintptr off, GLsizei stride) {
     Context& c = Context::Current();
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
-    // gắn buffer vào mọi attrib dùng binding này (đơn giản hoá đúng spec §10.3.1)
-    for (auto& a : v->attribs) if (a.binding == bi) { a.buffer = buf; a.offset = (size_t)off; a.stride = stride; }
+    if (bi >= v->bindings.size()) { c.errors.Record(0x0501); return; }
+    v->bindings[bi].buffer = buf;
+    v->bindings[bi].offset = off;
+    v->bindings[bi].stride = stride;
+    // Gắn buffer/stride vào mọi attrib dùng binding này; GIỮ relativeOffset
+    // (spec §10.3.1: effective = binding.offset + relative). Ghi đè offset ở đây
+    // từng làm mọi attribute đọc từ đầu buffer → đen màn hình trên máy (26.x dùng
+    // Separate path: Format/Binding trước, BindVertexBuffer sau).
+    for (GLuint k = 0; k < (GLuint)v->attribs.size(); ++k) {
+        auto& a = v->attribs[k];
+        if (a.binding == bi) { a.buffer = buf; a.stride = stride; VAOSyncAttribOffset(*v, k); }
+    }
 }
 void glBindVertexBuffers(GLuint f, GLsizei n, const GLuint* b, const GLintptr* o, const GLsizei* s) {
     for (GLsizei i = 0; i < n; ++i) glBindVertexBuffer(f + i, b ? b[i] : 0, o ? o[i] : 0, s ? s[i] : 0);
@@ -127,6 +159,8 @@ void glVertexBindingDivisor(GLuint bi, GLuint d) {
     Context& c = Context::Current();
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
+    if (bi >= v->bindings.size()) { c.errors.Record(0x0501); return; }
+    v->bindings[bi].divisor = d;
     for (auto& a : v->attribs) if (a.binding == bi) a.divisor = d;
 }
 void glVertexAttribBinding(GLuint ai, GLuint bi) {
@@ -134,7 +168,9 @@ void glVertexAttribBinding(GLuint ai, GLuint bi) {
     if (ai >= 16) { c.errors.Record(0x0501); return; }
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
+    if (bi >= v->bindings.size()) { c.errors.Record(0x0501); return; }
     v->attribs[ai].binding = bi;
+    VAOSyncAttribOffset(*v, ai); // base đổi theo binding mới
 }
 void glVertexAttribDivisor(GLuint i, GLuint d) {
     Context& c = Context::Current();
@@ -142,6 +178,8 @@ void glVertexAttribDivisor(GLuint i, GLuint d) {
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
     v->attribs[i].divisor = d;
+    // Divisor là trạng thái của binding (spec §10.3.1) → đồng bộ cả hai.
+    if (v->attribs[i].binding < v->bindings.size()) v->bindings[v->attribs[i].binding].divisor = d;
 }
 // glVertexAttrib* (set current generic values) — shadow để shader mặc định đọc
 static void SetAttribValue(GLuint i, const double v[4]) {

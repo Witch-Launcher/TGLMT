@@ -121,6 +121,8 @@ void glGetVertexAttribiv(GLuint i, GLenum p, GLint* v) {
     else if (p == 0x8623) *v = a.size;            // ..._SIZE
     else if (p == 0x8625) *v = a.stride;          // ..._STRIDE
     else if (p == 0x88FD) *v = (GLint)a.divisor;  // ..._DIVISOR
+    else if (p == 0x82EB) *v = (GLint)a.binding;  // VERTEX_ATTRIB_BINDING
+    else if (p == 0x82EC) *v = (GLint)a.relativeOffset; // VERTEX_ATTRIB_RELATIVE_OFFSET
     else *v = 0;
 }
 void glGetVertexAttribfv(GLuint i, GLenum p, GLfloat* v) { GLint x=0; glGetVertexAttribiv(i,p,&x); *v=(GLfloat)x; }

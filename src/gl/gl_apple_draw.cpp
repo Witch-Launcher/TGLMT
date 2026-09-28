@@ -194,16 +194,27 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (!a.enabled) continue;
         auto bit = c.buffers.find(a.buffer);
         if (bit == c.buffers.end() || !bit->second.gpu) return false;
+        // Địa chỉ effective = bindings[binding].offset (base) + relativeOffset
+        // (descriptor) — spec §10.3.1. Trước đây dùng chung a.offset cho cả hai
+        // nên base+relative bị nhân đôi / relative bị mất (đen màn hình khi game
+        // dùng Separate path: Format/Binding trước, BindVertexBuffer sau).
+        size_t base = 0;
+        GLuint effDivisor = a.divisor;
+        if (a.binding < v.bindings.size()) {
+            GLintptr bo = v.bindings[a.binding].offset;
+            base = bo > 0 ? (size_t)bo : 0;
+            if (effDivisor == 0) effDivisor = v.bindings[a.binding].divisor;
+        }
         metal::CustomAttrib ca;
         ca.loc = (uint32_t)i; ca.size = (uint32_t)a.size; ca.type = a.type;
         ca.normalized = a.normalized ? true : false;
-        ca.offset = (uint32_t)a.offset;
+        ca.offset = (uint32_t)a.relativeOffset;
         ca.bufferIndex = a.binding;
         ca.stride = (uint32_t)a.stride;
-        ca.divisor = a.divisor;
+        ca.divisor = effDivisor;
         cas.push_back(ca);
         if (!bindMap.count(a.binding))
-            bindMap[a.binding] = {bit->second.gpu, (size_t)a.offset};
+            bindMap[a.binding] = {bit->second.gpu, base};
     }
     if (cas.empty()) {
         // Draw không attribute (screenquad suy từ vertex_id): pipeline descriptor

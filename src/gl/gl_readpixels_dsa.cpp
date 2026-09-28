@@ -192,7 +192,9 @@ void glVertexArrayAttribBinding(GLuint v, GLuint ai, GLuint bi) {
     auto it = c.vaos.find(v);
     if (it == c.vaos.end()) { c.errors.Record(0x0502); return; }
     if (ai >= 16) { c.errors.Record(0x0501); return; }
+    if (bi >= it->second.bindings.size()) { c.errors.Record(0x0501); return; }
     it->second.attribs[ai].binding = bi;
+    VAOSyncAttribOffset(it->second, ai);
 }
 void glVertexArrayAttribFormat(GLuint v, GLuint ai, GLint s, GLenum t, GLboolean n, GLuint r) {
     Context& c = Context::Current();
@@ -200,7 +202,8 @@ void glVertexArrayAttribFormat(GLuint v, GLuint ai, GLint s, GLenum t, GLboolean
     if (it == c.vaos.end()) { c.errors.Record(0x0502); return; }
     if (ai >= 16) { c.errors.Record(0x0501); return; }
     it->second.attribs[ai].size = s; it->second.attribs[ai].type = t;
-    it->second.attribs[ai].normalized = n; it->second.attribs[ai].offset = r;
+    it->second.attribs[ai].normalized = n; it->second.attribs[ai].relativeOffset = r;
+    VAOSyncAttribOffset(it->second, ai);
 }
 void glVertexArrayAttribIFormat(GLuint v, GLuint ai, GLint s, GLenum t, GLuint r) {
     Context& c = Context::Current();
@@ -208,7 +211,8 @@ void glVertexArrayAttribIFormat(GLuint v, GLuint ai, GLint s, GLenum t, GLuint r
     if (it == c.vaos.end()) { c.errors.Record(0x0502); return; }
     if (ai >= 16) { c.errors.Record(0x0501); return; }
     it->second.attribs[ai].size = s; it->second.attribs[ai].type = t;
-    it->second.attribs[ai].offset = r; it->second.attribs[ai].isInt = true;
+    it->second.attribs[ai].relativeOffset = r; it->second.attribs[ai].isInt = true;
+    VAOSyncAttribOffset(it->second, ai);
 }
 void glVertexArrayAttribLFormat(GLuint v, GLuint ai, GLint s, GLenum t, GLuint r) {
     Context& c = Context::Current();
@@ -216,12 +220,15 @@ void glVertexArrayAttribLFormat(GLuint v, GLuint ai, GLint s, GLenum t, GLuint r
     if (it == c.vaos.end()) { c.errors.Record(0x0502); return; }
     if (ai >= 16) { c.errors.Record(0x0501); return; }
     it->second.attribs[ai].size = s; it->second.attribs[ai].type = t;
-    it->second.attribs[ai].offset = r; it->second.attribs[ai].isLong = true;
+    it->second.attribs[ai].relativeOffset = r; it->second.attribs[ai].isLong = true;
+    VAOSyncAttribOffset(it->second, ai);
 }
 void glVertexArrayBindingDivisor(GLuint v, GLuint bi, GLuint d) {
     Context& c = Context::Current();
     auto it = c.vaos.find(v);
     if (it == c.vaos.end()) { c.errors.Record(0x0502); return; }
+    if (bi >= it->second.bindings.size()) { c.errors.Record(0x0501); return; }
+    it->second.bindings[bi].divisor = d;
     for (auto& a : it->second.attribs) if (a.binding == bi) a.divisor = d;
 }
 void glVertexArrayElementBuffer(GLuint v, GLuint b) {
@@ -234,7 +241,15 @@ void glVertexArrayVertexBuffer(GLuint v, GLuint bi, GLuint b, GLintptr o, GLsize
     Context& c = Context::Current();
     auto it = c.vaos.find(v);
     if (it == c.vaos.end()) { c.errors.Record(0x0502); return; }
-    for (auto& a : it->second.attribs) if (a.binding == bi) { a.buffer = b; a.offset = (size_t)o; a.stride = s; }
+    if (bi >= it->second.bindings.size()) { c.errors.Record(0x0501); return; }
+    it->second.bindings[bi].buffer = b;
+    it->second.bindings[bi].offset = o;
+    it->second.bindings[bi].stride = s;
+    // GIỮ relativeOffset từng attrib (spec §10.3.1) — xem glBindVertexBuffer.
+    for (GLuint k = 0; k < (GLuint)it->second.attribs.size(); ++k) {
+        auto& a = it->second.attribs[k];
+        if (a.binding == bi) { a.buffer = b; a.stride = s; VAOSyncAttribOffset(it->second, k); }
+    }
 }
 void glVertexArrayVertexBuffers(GLuint v, GLuint f, GLsizei n, const GLuint* b, const GLintptr* o, const GLsizei* s) {
     for (GLsizei i = 0; i < n; ++i) glVertexArrayVertexBuffer(v, f + i, b ? b[i] : 0, o ? o[i] : 0, s ? s[i] : 0);

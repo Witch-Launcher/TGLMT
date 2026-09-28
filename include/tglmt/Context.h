@@ -33,21 +33,42 @@ struct BufferObject {
 
 struct VertexAttrib {
     bool enabled = false;
-    GLuint buffer = 0;              // VBO bound tại thời điểm Pointer (legacy) hoặc binding (DSA)
+    GLuint buffer = 0;              // buffer của BINDING chứa attrib này
     GLint size = 4;
     GLenum type = 0x1406;           // FLOAT
     GLboolean normalized = 0;
-    GLsizei stride = 0;
-    size_t offset = 0;
+    GLsizei stride = 0;             // stride của BINDING (đồng bộ để draw/getter đọc)
+    size_t offset = 0;              // EFFECTIVE = bindings[binding].offset + relativeOffset
+    size_t relativeOffset = 0;      // VERTEX_ATTRIB_RELATIVE_OFFSET (Format/con trỏ)
     GLuint binding = 0, divisor = 0;
     bool isInt = false, isLong = false;
+};
+
+// Vertex buffer binding point (GL §10.3.1, ARB_vertex_attrib_binding — game 26.x
+// dùng Separate path: Format/Binding trước, BindVertexBuffer sau).
+struct VertexBindingPoint {
+    GLuint buffer = 0;
+    GLintptr offset = 0;
+    GLsizei stride = 0;
+    GLuint divisor = 0;
 };
 
 struct VertexArrayObject {
     GLuint id = 0;
     std::array<VertexAttrib, 16> attribs;
+    std::array<VertexBindingPoint, 16> bindings;
     GLuint elementBuffer = 0;
 };
+
+// Đồng bộ offset effective của 1 attrib sau khi đổi binding/relative/binding-offset.
+// Tách đúng spec: glBindVertexBuffer KHÔNG được ghi đè relativeOffset.
+inline void VAOSyncAttribOffset(VertexArrayObject& v, GLuint ai) {
+    if (ai >= v.attribs.size()) return;
+    VertexAttrib& a = v.attribs[ai];
+    GLintptr base = (a.binding < v.bindings.size()) ? v.bindings[a.binding].offset : 0;
+    if (base < 0) base = 0;
+    a.offset = (size_t)base + a.relativeOffset;
+}
 
 struct TextureObject {
     GLuint id = 0;
