@@ -355,6 +355,202 @@ static std::string RewriteArrayCtors(const std::string& src) {
     }
     return out;
 }
+// ============ GLSL implicit int→float promotion (vanilla 26.1.2) ====
+// GLSL 3.30 cho phép trộn ivec/vec trong số học (vd `ivec2 / float`,
+// `float / ivec2`, `ivec3 + vec3`) bằng cách nâng int ngầm lên float.
+// MSL cấm hoàn toàn (đã quan sát bằng metal thật trên máy). Ba idiom vanilla
+// dưới đây là TOÀN BỘ trường hợp trong corpus 26.1.2 (đã quét bằng grep):
+//  - sample_lightmap.glsl: `(uv / 256.0)` với uv:ivec2 → `float2(uv)/256.0`
+//  - terrain.fsh: `1.0f / TextureSize` với TextureSize:ivec2 (UBO) → float2
+//  - terrain.vsh: `(ChunkPosition - CameraBlockPos) + CameraOffset`
+//    (ivec3-ivec3)+vec3 → float3(ivec3_expr)+vec3
+// Viết tường minh floatN(...) — nếu input đã là float thì floatN(floatN)
+// vẫn đúng (identity) nên rewrite an toàn, không đổi nghĩa khi đã float.
+static void PromoteVanillaIntMixing(std::string& text) {
+    // 1. `uv / 256.0` → `float2(uv) / 256.0` (helper sample_lightmap, uv bare).
+    // Chỉ khi uv chưa được bọc (tránh double-wrap khi chạy 2 lần body+helper).
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < text.size()) {
+            size_t p = text.find("uv / 256.0", i);
+            if (p == std::string::npos) { out += text.substr(i); break; }
+            bool already = false;
+            if (p >= 7 && text.compare(p - 7, 7, "float2(") == 0) already = true;
+            // word-boundary trước uv (tránh `auv / ...`)
+            bool lb = p > 0 && IsIdentChar(text[p - 1], false);
+            // `uv` trong `float2(uv)` đã bọc thì `p-7` là float2( → already=true
+            if (already || lb) {
+                out += text.substr(i, p - i + 2); // giữ nguyên tới `uv`
+                i = p + 2;
+                continue;
+            }
+            out += text.substr(i, p - i);
+            out += "float2(uv) / 256.0";
+            i = p + 10; // len("uv / 256.0")
+        }
+        text.swap(out);
+    }
+    // 2. `1.0f / <Expr>.TextureSize` → `1.0f / float2(<Expr>.TextureSize)`.
+    // TextureSize là ivec2 trong UBO ChunkSection (terrain.fsh dùng 2 lần).
+    {
+        std::string out;
+        size_t i = 0;
+        const char* needle = "1.0f / ";
+        while (i < text.size()) {
+            size_t p = text.find(needle, i);
+            if (p == std::string::npos) { out += text.substr(i); break; }
+            out += text.substr(i, p - i);
+            size_t e = p + 7; // sau "1.0f / "
+            // bỏ spaces (thường không có, nhưng chắc ăn)
+            while (e < text.size() && isspace((unsigned char)text[e])) ++e;
+            // nếu đã là float2( → bỏ qua
+            if (text.compare(e, 7, "float2(") == 0) {
+                out += needle;
+                i = e;
+                continue;
+            }
+            // đọc `ubo_X.TextureSize` (word [. word]*)
+            size_t s = e;
+            while (s < text.size() && (IsIdentChar(text[s], s == e) || text[s] == '.')) {
+                // dừng ở ký tự không phải ident/dot; dot chỉ giữa words
+                if (text[s] == '.') {
+                    // dot phải theo sau bởi ident
+                    if (s + 1 >= text.size() || !IsIdentChar(text[s + 1], true)) break;
+                }
+                ++s;
+            }
+            std::string expr = text.substr(e, s - e);
+            if (expr.find("TextureSize") != std::string::npos && !expr.empty()) {
+                out += "1.0f / float2(" + expr + ")";
+                i = s;
+            } else {
+                out += needle;
+                i = e;
+            }
+        }
+        text.swap(out);
+    }
+    // 3. `(A.ChunkPosition - B.CameraBlockPos)` → `float3(...)` khi cộng vec3.
+    // Pattern vanilla terrain.vsh: `(ubo_X.ChunkPosition - ubo_Y.CameraBlockPos)`
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < text.size()) {
+            size_t p = text.find("ChunkPosition - ", i);
+            if (p == std::string::npos) { out += text.substr(i); break; }
+            // tìm '(' mở trước ChunkPosition (có thể có `ubo_X.` trước nữa)
+            // Lùi để lấy toàn bộ `(expr - expr)`: tìm '(' gần nhất mà chưa đóng.
+            size_t paren = text.rfind('(', p);
+            // kiểm tra đã bọc float3( chưa
+            bool already = false;
+            if (paren != std::string::npos && paren >= 6 &&
+                text.compare(paren - 6, 6, "float3") == 0)
+                already = true;
+            if (already || paren == std::string::npos) {
+                out += text.substr(i, p - i + 1);
+                i = p + 1;
+                continue;
+            }
+            // tìm ')' đóng của cặp này (cân bằng đơn giản: tới ')' đầu ở depth 0)
+            // Vì expr chỉ chứa `-` và dots, ')' đầu sau CameraBlockPos là đóng.
+            size_t cb = text.find(')', p);
+            if (cb == std::string::npos) { out += text.substr(i); break; }
+            std::string inside = text.substr(paren + 1, cb - paren - 1);
+            if (inside.find("ChunkPosition") == std::string::npos ||
+                inside.find("CameraBlockPos") == std::string::npos) {
+                out += text.substr(i, p - i + 1);
+                i = p + 1;
+                continue;
+            }
+            out += text.substr(i, paren - i);
+            out += "float3(" + inside + ")";
+            i = cb + 1;
+        }
+        text.swap(out);
+    }
+}
+// ============ mat4(mat2) expansion (end_portal) ====
+// GLSL `mat4(mat2 m)` nhúng 2x2 vào góc 4x4 (còn lại identity) — hợp lệ GL.
+// MSL không có ctor `float4x4(float2x2)` (đã quan sát bằng metal thật).
+// Rewrite MỌI `float4x4(X)` đơn-arg (không phẩy depth-0) thành helper
+// `tglmt_mat4_from_mat2(X)`; bản 16-float (có phẩy) giữ nguyên.
+static void ExpandMat4FromMat2(std::string& text) {
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t p = text.find("float4x4(", i);
+        if (p == std::string::npos) { out += text.substr(i); break; }
+        bool l = p > 0 && IsIdentChar(text[p - 1], false);
+        if (l) { out += text.substr(i, p - i + 1); i = p + 1; continue; }
+        size_t lp = p + 10; // '(' at p+8? "float4x4(" len 9 → '(' cuối
+        // "float4x4" 8 chars + "(" = 9
+        lp = p + 8;
+        // tìm ')' cân bằng + kiểm tra phẩy depth-0 bên trong
+        int d = 0;
+        size_t k = lp;
+        bool hasComma = false;
+        for (; k < text.size(); ++k) {
+            if (text[k] == '(') ++d;
+            else if (text[k] == ')') {
+                if (--d == 0) break;
+            } else if (text[k] == ',' && d == 1) {
+                hasComma = true;
+            }
+        }
+        if (k >= text.size()) { out += text.substr(i); break; }
+        if (hasComma) {
+            // 16-float ctor → giữ nguyên
+            out += text.substr(i, k - i + 1);
+            i = k + 1;
+            continue;
+        }
+        // đã là helper? tránh double-wrap
+        // kiểm tra 20 ký tự trước có phải tglmt_mat4_from_mat2( không — thực tế
+        // text tại p là float4x4(, nếu đã wrap thì không còn float4x4( đơn-arg
+        std::string inner = Trim(text.substr(lp + 1, k - lp - 1));
+        out += text.substr(i, p - i);
+        out += "tglmt_mat4_from_mat2(" + inner + ")";
+        i = k + 1;
+    }
+    text.swap(out);
+}
+// ============ Rename locals shadowing helper names (lightmap notGamma) ====
+// MSL (C++) dùng chung namespace cho hàm và biến: `float3 notGamma =
+// notGamma(color);` thì RHS `notGamma` trỏ vào BIẾN đang khai báo (self),
+// không phải hàm → "called object type 'float3' is not a function".
+// GLSL cho phép (namespace riêng) nên converter phải đổi tên biến local.
+// Quy tắc: trong body, mọi `H` KHÔNG theo sau bởi `(` (call) thì là biến →
+// `H_var`. Định nghĩa hàm trong helpers giữ nguyên (luôn theo sau `(`).
+static void RenameShadowedVars(std::string& body,
+                               const std::vector<std::string>& helperNames) {
+    for (auto& H : helperNames) {
+        if (H.empty()) continue;
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            size_t p = body.find(H, i);
+            if (p == std::string::npos) { out += body.substr(i); break; }
+            bool l = p > 0 && IsIdentChar(body[p - 1], false);
+            size_t e = p + H.size();
+            bool r = e < body.size() && IsIdentChar(body[e], false);
+            if (l || r) { out += body.substr(i, e - i); i = e; continue; }
+            // lookahead `(` sau spaces → call/def → giữ
+            size_t q = e;
+            while (q < body.size() && isspace((unsigned char)body[q])) ++q;
+            bool isCall = (q < body.size() && body[q] == '(');
+            if (isCall) {
+                out += body.substr(i, e - i);
+                i = e;
+            } else {
+                out += body.substr(i, p - i);
+                out += H + "_var";
+                i = e;
+            }
+        }
+        body.swap(out);
+    }
+}
 // ============ Helper-aware rewriting (sampler qua helper, uniforms/UBO) ====
 // Vanilla helpers (fog/light/sample_lightmap) nhận sampler/varying-explicit
 // qua param; Metal cần (texture,sampler) tách rời + uniforms/UBO thread vào.
@@ -614,6 +810,58 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             if (sv.kind != '2') { err = "textureGrad chỉ hỗ trợ sampler2D"; return false; }
             out += sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + "), gradient2d(float2(" +
                    args[2] + "), float2(" + args[3] + ")))";
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- textureLod() → sample với lod tường minh (animate_sprite).
+    // Đã kiểm chứng `t.sample(s, uv, lod)` compile được bằng metal thật.
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "textureLod")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 10);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "textureLod(...) ngoặc không cân bằng"; return false; }
+            if (args.size() != 3) { err = "textureLod cần (sampler, uv, lod)"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "textureLod sampler không khai báo: " + sname; return false; }
+            if (sv.kind != '2') { err = "textureLod chỉ hỗ trợ sampler2D"; return false; }
+            out += sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + "), float(" + args[2] + "))";
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- textureProj() → sample với chia phối cảnh (end_portal).
+    // GLSL textureProj(sampler, vec4) = texture(sampler, coord.xy/coord.w).
+    // Vanilla end_portal dùng 2 biến thể: (Sampler, vec4) và (Sampler, vec4, bias).
+    // Metal không có textureProj nên hạ về sample + chia tay (đúng GL, đã kiểm
+    // chứng bằng metal thật: float4 * float4x4 cho row-vector vẫn compile).
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "textureProj")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 11);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "textureProj(...) ngoặc không cân bằng"; return false; }
+            if (args.size() < 2 || args.size() > 3) { err = "textureProj cần (sampler, coord[, bias])"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "textureProj sampler không khai báo: " + sname; return false; }
+            if (sv.kind != '2') { err = "textureProj chỉ hỗ trợ sampler2D"; return false; }
+            std::string coord = Trim(args[1]);
+            std::string bias = args.size() == 3 ? ", float(" + args[2] + ")" : "";
+            // vec4 → xy/w (GL spec; vanilla end_portal chỉ dùng vec4, w luôn != 0
+            // vì là clip w nên chia trực tiếp, không guard để giữ đúng GL).
+            out += sname + "_tex.sample(" + sname + "_smp, float2((" + coord + ").xy / (" +
+                   coord + ").w)" + bias + ")";
             i = k + 1;
         }
         body = out;
@@ -1823,6 +2071,33 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         R.uniformBufferSize = (off + 15) & ~((size_t)15);
     }
     // UBO blocks layout (read-only, MSL natural giống default block để tái dùng upload path)
+    // Dedupe: Blaze3D inline #moj_import bằng text nên cùng include có thể vào
+    // 2 lần (end_portal.vsh import projection.glsl 2 lần). Trùng tên + trùng
+    // members thì giữ bản đầu (đúng GL: cùng block khai báo 2 lần vẫn link được
+    // nếu giống hệt); khác members là redef thật → fail trung thực.
+    {
+        std::vector<GLSLBlock> uniq;
+        for (auto& b : blocks) {
+            bool seen = false;
+            for (auto& u : uniq) {
+                if (u.name != b.name) continue;
+                seen = true;
+                if (u.members.size() != b.members.size()) {
+                    return fail("UBO " + b.name + " khai báo lại khác members");
+                }
+                for (size_t mi = 0; mi < u.members.size(); ++mi) {
+                    if (u.members[mi].name != b.members[mi].name ||
+                        u.members[mi].glslType != b.members[mi].glslType ||
+                        u.members[mi].arraySize != b.members[mi].arraySize) {
+                        return fail("UBO " + b.name + " khai báo lại khác members");
+                    }
+                }
+                break; // trùng hệt → bỏ bản sau
+            }
+            if (!seen) uniq.push_back(b);
+        }
+        blocks.swap(uniq);
+    }
     for (auto& b : blocks) {
         size_t off = 0;
         for (auto& m : b.members) {
@@ -2334,6 +2609,14 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // Builtins đạo hàm GLSL → Metal (terrain LOD): dFdx/dFdy chỉ khác chữ hoa.
     mpShared.emplace_back("dFdx", "dfdx");
     mpShared.emplace_back("dFdy", "dfdy");
+    // `radians`/`degrees`: Metal stdlib KHÔNG có (đã quan sát bằng metal thật:
+    // `use of undeclared identifier 'radians'`). Hạ về helper nhân PI/180.
+    // Lưu ý matrix.glsl có param tên `radians` (`mat2_rotate_z(float radians)`)
+    // — map cả param lẫn call sang `tglmt_radians` nên vẫn nhất quán
+    // (param `float tglmt_radians`, body `cos(tglmt_radians)`, call
+    // `tglmt_radians(...)`).
+    mpShared.emplace_back("radians", "tglmt_radians");
+    mpShared.emplace_back("degrees", "tglmt_degrees");
     // mp gộp cho main body = vary + shared (helpers chỉ dùng shared).
     mp.insert(mp.end(), mpVary.begin(), mpVary.end());
     mp.insert(mp.end(), mpShared.begin(), mpShared.end());
@@ -2377,6 +2660,19 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         body = nb;
     }
     body = RewriteIdents(RewriteArrayCtors(body), mp);
+    // GLSL implicit int→float (sample_lightmap/terrain) + mat4(mat2) + shadowing:
+    // chạy trên MSL (sau RI) vì pattern đã là `float2`/`ubo_`/`float4x4`.
+    {
+        PromoteVanillaIntMixing(body);
+        ExpandMat4FromMat2(body);
+        // Tên helper (pre-mp, GLSL) để rename biến local trùng tên trong body.
+        // Lấy từ rest (chưa RI) để có tên gốc như `notGamma`.
+        std::vector<std::string> hnames;
+        for (auto& h : ParseHelperDefs(rest, true)) hnames.push_back(h.name);
+        std::sort(hnames.begin(), hnames.end());
+        hnames.erase(std::unique(hnames.begin(), hnames.end()), hnames.end());
+        RenameShadowedVars(body, hnames);
+    }
     // `return;` trần trong main → vertex `z-convert + return _out;`, fragment MRT/single.
     {
         std::string out;
@@ -2433,6 +2729,11 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             }
         }
         std::string helpersMSL = RewriteIdents(RewriteArrayCtors(helpersOnly), mpShared);
+        // Cùng promotion/expansion trên helpers (sample_lightmap `uv/256.0` và
+        // end_portal `float4x4(mat2)` đều nằm trong helper, không phải body).
+        // KHÔNG RenameShadowedVars ở đây (định nghĩa hàm luôn kèm `(` nên giữ).
+        PromoteVanillaIntMixing(helpersMSL);
+        ExpandMat4FromMat2(helpersMSL);
         // global sampler table (cho declOf global pairs)
         SampTable globalSamp;
         for (auto& s : R.samplers) {
@@ -2456,6 +2757,22 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // Sinh MSL
     std::ostringstream msl_out;
     msl_out << "#include <metal_stdlib>\nusing namespace metal;\n";
+    // Builtins GLSL thiếu trong Metal (chỉ phát khi dùng — kiểm tra body+rest
+    // để khỏi rác; `find` word-boundary đơn giản vì tên đã là tglmt_*).
+    {
+        bool useRad = (body.find("tglmt_radians") != std::string::npos) ||
+                      (rest.find("tglmt_radians") != std::string::npos);
+        bool useDeg = (body.find("tglmt_degrees") != std::string::npos) ||
+                      (rest.find("tglmt_degrees") != std::string::npos);
+        bool useM2 = (body.find("tglmt_mat4_from_mat2") != std::string::npos) ||
+                     (rest.find("tglmt_mat4_from_mat2") != std::string::npos);
+        if (useRad)
+            msl_out << "float tglmt_radians(float d) { return d * 0.017453292519943295f; }\n";
+        if (useDeg)
+            msl_out << "float tglmt_degrees(float r) { return r * 57.29577951308232f; }\n";
+        if (useM2)
+            msl_out << "float4x4 tglmt_mat4_from_mat2(float2x2 m) { return float4x4(float4(m[0], 0.0, 0.0), float4(m[1], 0.0, 0.0), float4(0.0, 0.0, 1.0, 0.0), float4(0.0, 0.0, 0.0, 1.0)); }\n";
+    }
     if (R.isVertex) {
         msl_out << "struct TGLMT_VIn {\n";
         for (auto& a : ins) msl_out << "  " << a.mslType << " " << a.name << " [[attribute(" << a.location << ")]];\n";
