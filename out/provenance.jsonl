@@ -1,0 +1,81 @@
+{"ts": "2026-09-26T15:48:37.235955Z", "task": "glDrawElements", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T15:48:38.342937Z", "task": "glDrawElements", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T15:48:38.343172Z", "task": "glDrawElements", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T15:48:38.343310Z", "task": "glTexImage2D", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T15:48:38.832671Z", "task": "glTexImage2D", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T15:48:38.832946Z", "task": "glTexImage2D", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T15:48:38.833089Z", "task": "glLinkProgram", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T15:48:41.593427Z", "task": "glLinkProgram", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T15:48:41.593727Z", "task": "glLinkProgram", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T15:49:07.089592Z", "task": "glDrawElements", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T15:49:08.232285Z", "task": "glDrawElements", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T15:49:08.232655Z", "task": "glDrawElements", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T15:49:08.232879Z", "task": "glTexImage2D", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T15:49:08.694062Z", "task": "glTexImage2D", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T15:49:08.694277Z", "task": "glTexImage2D", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T15:49:08.694384Z", "task": "glLinkProgram", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T15:49:09.160857Z", "task": "glLinkProgram", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T15:49:09.161234Z", "task": "glLinkProgram", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:20:01.430094Z", "task": "glDrawElements", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:20:17.898573Z", "task": "glDrawElements", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:20:17.899299Z", "task": "glDrawElements", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:20:17.899513Z", "task": "glTexImage2D", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:20:18.027909Z", "task": "glTexImage2D", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:20:18.028280Z", "task": "glTexImage2D", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:20:18.028447Z", "task": "glLinkProgram", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:20:18.169285Z", "task": "glLinkProgram", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:20:18.169486Z", "task": "glLinkProgram", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:23:22.310211Z", "task": "glDrawElements", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:23:23.006414Z", "task": "glDrawElements", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:23:23.006666Z", "task": "glDrawElements", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:23:23.006792Z", "task": "glTexImage2D", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:23:23.644301Z", "task": "glTexImage2D", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:23:23.644514Z", "task": "glTexImage2D", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:23:23.644620Z", "task": "glLinkProgram", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:23:24.222514Z", "task": "glLinkProgram", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:23:24.222734Z", "task": "glLinkProgram", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:26:25.853008Z", "task": "glDrawElements", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:26:26.315606Z", "task": "glDrawElements", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:26:26.315804Z", "task": "glDrawElements", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:26:26.315908Z", "task": "glTexImage2D", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:26:26.787799Z", "task": "glTexImage2D", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:26:26.788070Z", "task": "glTexImage2D", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:26:26.788193Z", "task": "glLinkProgram", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:26:27.484777Z", "task": "glLinkProgram", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:26:27.484969Z", "task": "glLinkProgram", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:36:20.280636Z", "task": "glDrawElements", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:36:20.922445Z", "task": "glDrawElements", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:36:20.922639Z", "task": "glDrawElements", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:36:20.922739Z", "task": "glTexImage2D", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:36:21.638132Z", "task": "glTexImage2D", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:36:21.638430Z", "task": "glTexImage2D", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-26T23:36:21.638587Z", "task": "glLinkProgram", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-26T23:36:22.129329Z", "task": "glLinkProgram", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-26T23:36:22.129516Z", "task": "glLinkProgram", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-27T00:08:13.903693Z", "task": "glDrawElements", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-27T00:08:14.557745Z", "task": "glDrawElements", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-27T00:08:14.558471Z", "task": "glDrawElements", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-27T00:08:14.558672Z", "task": "glTexImage2D", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-27T00:08:15.574458Z", "task": "glTexImage2D", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-27T00:08:15.574649Z", "task": "glTexImage2D", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-27T00:08:15.574795Z", "task": "glLinkProgram", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-27T00:08:16.408632Z", "task": "glLinkProgram", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-27T00:08:16.408838Z", "task": "glLinkProgram", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-27T03:11:11.358860Z", "task": "glDrawElements", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-27T03:11:29.786641Z", "task": "glDrawElements", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-27T03:11:29.786907Z", "task": "glDrawElements", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-27T03:11:29.787020Z", "task": "glTexImage2D", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-27T03:11:30.855513Z", "task": "glTexImage2D", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-27T03:11:30.855728Z", "task": "glTexImage2D", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-27T03:11:30.855868Z", "task": "glLinkProgram", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-27T03:11:32.178528Z", "task": "glLinkProgram", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-27T03:11:32.178731Z", "task": "glLinkProgram", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-27T04:14:07.263687Z", "task": "glDrawElements", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-27T04:14:08.932523Z", "task": "glDrawElements", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-27T04:14:08.932904Z", "task": "glDrawElements", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-27T04:14:08.933124Z", "task": "glTexImage2D", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-27T04:14:10.387608Z", "task": "glTexImage2D", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-27T04:14:10.387912Z", "task": "glTexImage2D", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}
+{"ts": "2026-09-27T04:14:10.388026Z", "task": "glLinkProgram", "agent": "translator", "spec_ref": "docs/khronos/gl.xml", "result": "DONE", "detail": "code \u0111\u00e3 c\u00f3 trong src/gl/"}
+{"ts": "2026-09-27T04:14:12.147499Z", "task": "glLinkProgram", "agent": "tester", "spec_ref": "docs/khronos/gl.xml", "result": "PASS", "detail": "attempt 1: ctest PASS"}
+{"ts": "2026-09-27T04:14:12.148018Z", "task": "glLinkProgram", "agent": "reviewer", "spec_ref": "docs/khronos/gl.xml", "result": "APPROVED", "detail": "pass \u1edf attempt 1"}

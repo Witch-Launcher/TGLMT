@@ -1,0 +1,12 @@
+# Build outputs (rebuildable via cmake / make dep_tglmt)
+build/
+build-*/
+out/*.dylib
+# Xcode / macOS
+.DS_Store
+*.o
+*.a
+# Temp work dir (xem README)
+.tmp/
+Testing/
+*.ipa
