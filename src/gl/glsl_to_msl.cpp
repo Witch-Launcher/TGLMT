@@ -104,14 +104,67 @@ static size_t MSLSize(const std::string& m) {
     if (m == "float4x4") return 64;
     return 0;
 }
-// Parse "layout(location=N) in|out TYPE name" hoặc "in|out TYPE name" hoặc
-// "uniform TYPE name[N]" (array cho vanilla/Sodium). Trả false nếu không khớp.
-static bool ParseDecl(const std::string& stmt, bool isVertex,
-                      std::string& dir, GLSLVar& v, bool& isUniform) {
+// Tách "A, B[4], C = vec2(1.0, 2.0)" → [(A,0),(B,4),(C,0)].
+// Dấu phẩy trong ()/[] không tách; initializer (=...) bị bỏ (uniform lấy
+// giá trị từ glUniform, không từ source). Tên mảng macro đã thay xong ở
+// preprocessor nên [N] luôn là số ở đây.
+static bool SplitDeclarators(const std::string& rest,
+                             std::vector<std::pair<std::string, int>>& out) {
+    std::vector<std::string> pieces;
+    int pd = 0, bd = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= rest.size(); ++i) {
+        char ch = i < rest.size() ? rest[i] : ',';
+        if (ch == '(') ++pd;
+        else if (ch == ')') --pd;
+        else if (ch == '[') ++bd;
+        else if (ch == ']') --bd;
+        if (ch == ',' && pd == 0 && bd == 0) {
+            pieces.push_back(Trim(rest.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    for (auto& pc : pieces) {
+        // bỏ "= ..." ở depth 0
+        int d2 = 0;
+        size_t cut = std::string::npos;
+        for (size_t i = 0; i < pc.size(); ++i) {
+            if (pc[i] == '(') ++d2;
+            else if (pc[i] == ')') --d2;
+            else if (pc[i] == '=' && d2 == 0) { cut = i; break; }
+        }
+        std::string nm = Trim(cut == std::string::npos ? pc : pc.substr(0, cut));
+        int arr = 0;
+        size_t lb = nm.find('[');
+        if (lb != std::string::npos) {
+            size_t rb = nm.find(']', lb);
+            if (rb == std::string::npos) return false;
+            std::string ns = Trim(nm.substr(lb + 1, rb - lb - 1));
+            if (ns.empty()) return false; // mảng unsized ngoài subset
+            for (char c : ns)
+                if (!isdigit((unsigned char)c)) return false;
+            arr = atoi(ns.c_str());
+            if (arr <= 0 || arr > 4096) return false;
+            nm = Trim(nm.substr(0, lb));
+        }
+        if (nm.empty()) return false;
+        size_t p0 = 0;
+        while (p0 < nm.size() && (IsIdentChar(nm[p0], p0 == 0))) ++p0;
+        if (p0 != nm.size()) return false; // token lạ
+        out.emplace_back(nm, arr);
+    }
+    return !out.empty();
+}
+// Parse "layout(location=N) in|out TYPE decls" / "in|out TYPE decls" /
+// "uniform TYPE decls" (nhiều declarator, vd `uniform vec2 A, B[4];`).
+// Trả false nếu không khớp.
+static bool ParseDecls(const std::string& stmt, bool isVertex,
+                       std::string& dir, std::vector<GLSLVar>& vars, bool& isUniform) {
     std::string s = Trim(stmt);
     if (!s.empty() && s.back() == ';') s.pop_back();
     s = Trim(s);
     isUniform = false;
+    vars.clear();
     int loc = -1;
     if (s.rfind("layout", 0) == 0) {
         size_t lp = s.find('('), rp = s.find(')');
@@ -135,62 +188,63 @@ static bool ParseDecl(const std::string& stmt, bool isVertex,
         return t == "highp" || t == "mediump" || t == "lowp" || t == "flat" ||
                t == "smooth" || t == "noperspective" || t == "centroid" || t == "sample" ||
                t == "coherent" || t == "volatile" || t == "restrict" || t == "readonly" ||
-               t == "writeonly";
-    };
-    auto parseArray = [](std::string& name, int& arr) {
-        arr = 0;
-        size_t lb = name.find('[');
-        if (lb == std::string::npos) return true;
-        size_t rb = name.find(']', lb);
-        if (rb == std::string::npos) return false;
-        std::string n = Trim(name.substr(lb + 1, rb - lb - 1));
-        if (n.empty()) return false; // unsized array ngoài subset (trừ sampler? vẫn cần size)
-        arr = atoi(n.c_str());
-        if (arr <= 0 || arr > 1024) return false;
-        name = Trim(name.substr(0, lb));
-        // tên mảng có thể dính ", ..." ? caller chỉ cho 1 decl/dòng nên OK
-        return true;
+               t == "writeonly" || t == "invariant";
     };
     if (w.empty()) return false;
+    std::string type;
+    std::string restDecls;
     if (w[0] == "uniform") {
         size_t k = 1;
         while (k < w.size() && isQual(w[k])) ++k;
-        if (k + 1 >= w.size() && (k >= w.size())) return false;
-        // uniform block (`uniform Block {`) → caller xử lý, không phải single uniform
-        if (w[k].find('{') != std::string::npos) return false;
-        if (k + 1 >= w.size()) return false;
-        // gộp tên có thể chứa "[N]" dính hoặc tách ("x[4]" hoặc "x [4]" → iss tách?)
-        std::string nm = w[k + 1];
-        for (size_t q = k + 2; q < w.size(); ++q) nm += w[q];
-        int arr = 0;
-        if (!parseArray(nm, arr)) return false;
+        if (k >= w.size()) return false;
+        if (w[k].find('{') != std::string::npos) return false; // uniform block
+        type = w[k];
+        restDecls.clear();
+        for (size_t q = k + 1; q < w.size(); ++q) {
+            if (!restDecls.empty()) restDecls += " ";
+            restDecls += w[q];
+        }
+        if (restDecls.empty()) return false;
         isUniform = true;
         dir = "uniform";
-        v.glslType = w[k];
-        v.name = nm;
-        v.location = -1;
-        v.arraySize = arr;
-        return true;
-    }
-    if (w[0] == "in" || w[0] == "out") {
+    } else if (w[0] == "in" || w[0] == "out") {
+        dir = w[0];
         size_t k = 1;
         while (k < w.size() && isQual(w[k])) ++k;
-        if (k + 1 >= w.size()) return false;
-        std::string nm = w[k + 1];
-        for (size_t q = k + 2; q < w.size(); ++q) nm += w[q];
-        int arr = 0;
-        if (!parseArray(nm, arr)) return false;
-        // in/out array (vd `out vec4 c[2]`) ngoài subset MRT đơn giản → từ chối rõ
+        if (k >= w.size()) return false;
+        type = w[k];
+        restDecls.clear();
+        for (size_t q = k + 1; q < w.size(); ++q) {
+            if (!restDecls.empty()) restDecls += " ";
+            restDecls += w[q];
+        }
+        if (restDecls.empty()) return false;
+    } else {
+        return false;
+    }
+    std::vector<std::pair<std::string, int>> ds;
+    if (!SplitDeclarators(restDecls, ds)) return false;
+    for (auto& [nm, arr] : ds) {
+        // mảng in/out (vd `out vec4 c[2]`) ngoài subset MRT đơn giản → từ chối rõ
         // (MRT dùng nhiều `out` riêng, không phải array).
-        if (arr != 0) return false;
-        dir = w[0];
-        v.glslType = w[k];
+        if (!isUniform && arr != 0) return false;
+        GLSLVar v;
+        v.glslType = type;
         v.name = nm;
         v.location = loc;
-        (void)isVertex;
-        return true;
+        v.arraySize = arr;
+        vars.push_back(v);
     }
-    return false;
+    (void)isVertex;
+    return true;
+}
+// Wrapper 1-declarator cho code cũ (giữ để khỏi sửa nhiều).
+static bool ParseDecl(const std::string& stmt, bool isVertex,
+                      std::string& dir, GLSLVar& v, bool& isUniform) {
+    std::vector<GLSLVar> vs;
+    if (!ParseDecls(stmt, isVertex, dir, vs, isUniform) || vs.size() != 1) return false;
+    v = vs[0];
+    return true;
 }
 // Thay identifier dạng token (không chạm substring), theo bảng ánh xạ.
 static std::string RewriteIdents(const std::string& src,
@@ -510,8 +564,33 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             out.members = mems;
             return true;
         };
-        for (auto& st : stmts) {
-            std::string t = Trim(st.text);
+        // Hàng đợi xử lý: stmt lẫn `hàm...} decl;` được tách (decl sau hàm
+        // rất thường gặp ở vanilla: uniform/varying sau helper function).
+        std::vector<std::string> queue;
+        for (auto& st : stmts) queue.push_back(st.text);
+        auto peelMixed = [](const std::string& t, std::string& funcPart, std::string& tail) -> bool {
+            int depth = 0;
+            size_t lastZero = std::string::npos;
+            bool inStr = false;
+            for (size_t i = 0; i < t.size(); ++i) {
+                char ch = t[i];
+                if (inStr) { if (ch == '"') inStr = false; continue; }
+                if (ch == '"') { inStr = true; continue; }
+                if (ch == '{') ++depth;
+                else if (ch == '}') {
+                    --depth;
+                    if (depth == 0) lastZero = i + 1;
+                }
+            }
+            if (lastZero == std::string::npos) return false;
+            std::string tl = Trim(t.substr(lastZero));
+            if (tl.empty()) return false;
+            funcPart = t.substr(0, lastZero);
+            tail = tl;
+            return true;
+        };
+        for (size_t qi = 0; qi < queue.size(); ++qi) {
+            std::string t = Trim(queue[qi]);
             if (t.empty() || t == ";") continue; // khoảng trắng thừa, bỏ qua
             // UBO block TRƯỚC (chứa '{' nhưng là decl)
             {
@@ -524,46 +603,126 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     continue;
                 }
             }
+            // Tách `hàm...} decl;` lẫn nhau: func vào rest, decl xử lý tiếp.
+            // (UBO sau hàm (`} uniform B {...};`) đã bắt ở trên qua tail check dưới.)
+            if (t.find('{') != std::string::npos) {
+                std::string funcPart, tail;
+                if (peelMixed(t, funcPart, tail)) {
+                    rest += funcPart;
+                    // tail có thể là UBO → thử trước
+                    GLSLBlock b;
+                    std::string tt = Trim(tail);
+                    if ((tt.rfind("layout", 0) == 0 || tt.rfind("uniform", 0) == 0) &&
+                        tt.find('{') != std::string::npos && tryParseUBO(tt, b)) {
+                        blocks.push_back(b);
+                        continue;
+                    }
+                    queue.insert(queue.begin() + qi + 1, tail);
+                    continue;
+                }
+                // nguyên khối hàm, không decl lẫn
+                rest += queue[qi];
+                continue;
+            }
             // Khai báo kiểm tra TRƯỚC (layout(...) có ngoặc nhưng vẫn là decl!)
             if (!startsKw(t)) {
-                if (t.find('{') != std::string::npos || t.find('}') != std::string::npos ||
+                if (t.find('}') != std::string::npos ||
                     t.find("void") != std::string::npos || t.find('(') != std::string::npos) {
-                    rest += st.text;
+                    rest += queue[qi];
                     continue;
                 }
                 return fail("câu lệnh không hỗ trợ: " + t);
             }
             std::string dir;
-            GLSLVar v;
+            std::vector<GLSLVar> vs;
             bool isU = false;
-            if (ParseDecl(t, R.isVertex, dir, v, isU)) {
-                bool okT = false;
-                if (isU && (v.glslType == "sampler2D" || v.glslType == "sampler2DShadow" ||
-                            v.glslType == "samplerCube" || v.glslType == "sampler2DArray")) {
-                    // vanilla dùng sampler2D; Shadow/Cube/Array map về texture2d (giới hạn A11)
-                    v.mslType = "sampler";
-                    v.isSampler = true;
-                    uniforms.push_back(v);
-                    continue;
-                }
-                v.mslType = MSLType(v.glslType, okT);
-                if (!okT) return fail("kiểu không hỗ trợ: " + v.glslType + " (" + v.name + ")");
-                if (isU) {
-                    uniforms.push_back(v);
-                } else if (dir == "in") {
-                    ins.push_back(v);
-                } else {
-                    outs.push_back(v);
+            if (ParseDecls(t, R.isVertex, dir, vs, isU)) {
+                for (auto& v : vs) {
+                    bool okT = false;
+                    if (isU && (v.glslType == "samplerBuffer" || v.glslType == "isamplerBuffer" ||
+                                v.glslType == "usamplerBuffer")) {
+                        // Buffer texture (CloudFaces mây): emulate bằng texture2d<int>
+                        // + read(index) ở host (xem texelFetch bên dưới + BindBufTex).
+                        v.mslType = "sampler";
+                        v.isSampler = true;
+                        v.isBuffer = true;
+                        v.sampleType = (v.glslType == "isamplerBuffer") ? "int"
+                                     : (v.glslType == "usamplerBuffer") ? "uint" : "float";
+                        uniforms.push_back(v);
+                        continue;
+                    }
+                    if (isU && (v.glslType == "sampler2D" || v.glslType == "sampler2DShadow" ||
+                                v.glslType == "samplerCube" || v.glslType == "sampler2DArray")) {
+                        // vanilla dùng sampler2D; Shadow/Cube/Array map về texture2d (giới hạn A11)
+                        v.mslType = "sampler";
+                        v.isSampler = true;
+                        uniforms.push_back(v);
+                        continue;
+                    }
+                    v.mslType = MSLType(v.glslType, okT);
+                    if (!okT) return fail("kiểu không hỗ trợ: " + v.glslType + " (" + v.name + ")");
+                    if (isU) {
+                        uniforms.push_back(v);
+                    } else if (dir == "in") {
+                        ins.push_back(v);
+                    } else {
+                        outs.push_back(v);
+                    }
                 }
             } else if (!t.empty() && t != ";") {
-                // const global hoặc thứ khác
+                // const global (có thể nhiều declarator): `constant T a = ..; ...`
                 if (t.rfind("const", 0) == 0) {
-                    rest += "constant " + t; // MSL: global const phải có `constant`
+                    std::string body = Trim(t.substr(5)); // bỏ 1 "const" (tránh `constant const`)
+                    if (!body.empty() && body.back() == ';') body.pop_back();
+                    // tách `T a = 1, b = 2` → head type + declarators
+                    std::istringstream cs(body);
+                    std::vector<std::string> cw; std::string ctk;
+                    while (cs >> ctk) cw.push_back(ctk);
+                    if (cw.empty()) return fail("khai báo không hỗ trợ: " + t);
+                    std::string ctype = cw[0];
+                    std::string crest;
+                    for (size_t q = 1; q < cw.size(); ++q) {
+                        if (!crest.empty()) crest += " ";
+                        crest += cw[q];
+                    }
+                    bool cok = false;
+                    std::string cm = MSLType(ctype, cok);
+                    if (!cok) return fail("kiểu không hỗ trợ: " + ctype);
+                    std::vector<std::pair<std::string, int>> cds;
+                    if (!SplitDeclarators(crest, cds)) return fail("khai báo không hỗ trợ: " + t);
+                    for (auto& [cnm, carr] : cds) {
+                        if (carr != 0) return fail("mảng const ngoài subset: " + t);
+                        // giữ initializer gốc: tìm lại `cnm = ...` trong crest
+                        std::string init;
+                        size_t fp = crest.find(cnm);
+                        if (fp != std::string::npos) {
+                            size_t eq = crest.find('=', fp + cnm.size());
+                            if (eq != std::string::npos) {
+                                size_t cm2 = crest.find(',', eq);
+                                init = Trim(crest.substr(eq + 1, cm2 == std::string::npos
+                                                                    ? std::string::npos : cm2 - eq - 1));
+                            }
+                        }
+                        // viết lại tên kiểu GLSL trong init (vec→float)
+                        for (auto& rp : std::vector<std::pair<std::string,std::string>>{
+                                 {"vec2","float2"},{"vec3","float3"},{"vec4","float4"},
+                                 {"mat2","float2x2"},{"mat3","float3x3"},{"mat4","float4x4"}}) {
+                            size_t pp = 0;
+                            while ((pp = init.find(rp.first, pp)) != std::string::npos) {
+                                bool l = pp > 0 && IsIdentChar(init[pp-1], false);
+                                size_t e2 = pp + rp.first.size();
+                                bool r2 = e2 < init.size() && IsIdentChar(init[e2], false);
+                                if (!l && !r2) { init.replace(pp, rp.first.size(), rp.second); pp += rp.second.size(); }
+                                else ++pp;
+                            }
+                        }
+                        rest += "constant " + cm + " " + cnm + (init.empty() ? "" : " = " + init) + ";\n";
+                    }
                 } else {
                     return fail("khai báo không hỗ trợ: " + t);
                 }
             } else {
-                rest += st.text;
+                rest += queue[qi];
             }
         }
     }
@@ -587,9 +746,42 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             if (a.location < 0) a.location = tmp++;
     }
     // Fragment: 1..8 out vec4 (MRT cho vanilla deferred/Iris; location = attachment).
+    // Legacy gl_FragColor / gl_FragData[0] (end_portal compat): map về out duy nhất.
+    bool legacyFrag = false;
     if (!R.isVertex) {
-        if (outs.empty() || outs.size() > 8)
+        if (outs.empty()) {
+            auto hasWord = [&](const char* w) {
+                size_t n = strlen(w), p = 0;
+                while ((p = rest.find(w, p)) != std::string::npos) {
+                    bool l = p > 0 && IsIdentChar(rest[p - 1], false);
+                    size_t e = p + n;
+                    bool r = e < rest.size() && IsIdentChar(rest[e], false);
+                    if (!l && !r) return true;
+                    p = e;
+                }
+                return false;
+            };
+            // gl_FragData[N>0] (MRT legacy) ngoài subset → fail rõ
+            {
+                size_t p = 0;
+                while ((p = rest.find("gl_FragData", p)) != std::string::npos) {
+                    size_t b = rest.find('[', p);
+                    size_t e2 = (b == std::string::npos) ? std::string::npos : rest.find(']', b);
+                    if (b != std::string::npos && e2 != std::string::npos) {
+                        int idx = atoi(rest.substr(b + 1, e2 - b - 1).c_str());
+                        if (idx != 0) return fail("gl_FragData[N>0] ngoài subset");
+                    }
+                    p += 11;
+                }
+            }
+            if (hasWord("gl_FragColor") || hasWord("gl_FragData")) {
+                legacyFrag = true;
+            } else {
+                return fail("fragment cần 1..8 out (hiện có 0)");
+            }
+        } else if (outs.size() > 8) {
             return fail("fragment cần 1..8 out (hiện có " + std::to_string(outs.size()) + ")");
+        }
         for (auto& o : outs)
             if (o.mslType != "float4") return fail("fragment out phải vec4 (" + o.name + ")");
         // location trùng → link lỗi (đúng GL)
@@ -685,6 +877,9 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (body.find("gl_FragCoord") != std::string::npos) R.usesFragCoord = true;
         if (isMRT) {
             for (auto& o : outs) mp.emplace_back(o.name, "_out.mrt" + std::to_string(o.location));
+        } else if (legacyFrag) {
+            // end_portal compat: gl_FragColor / gl_FragData[0] → out duy nhất
+            mp.emplace_back("gl_FragColor", "tglmt_fragColor");
         } else {
             // out color: tên biến out → tglmt_fragColor (return ở cuối)
             mp.emplace_back(outs[0].name, "tglmt_fragColor");
@@ -783,8 +978,80 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         }
         body = out;
     }
-    if (body.find("texelFetch") != std::string::npos)
-        return fail("texelFetch ngoài subset (dùng texture() với NEAREST)");
+    // texelFetch(sampler, coord[, lod]) → .read() (entity VS, CloudFaces).
+    // Buffer sampler: read(uint2(index, 0)). Sampler 2D: read(uint2(coord), lod).
+    {
+        auto isSampler = [&](const std::string& w, const GLSLVar*& out) {
+            for (auto& s : R.samplers)
+                if (s.name == w) { out = &s; return true; }
+            out = nullptr;
+            return false;
+        };
+        std::string out;
+        size_t i = 0;
+        auto isWordCharAt = [&](size_t p) { return p < body.size() && IsIdentChar(body[p], false); };
+        while (i < body.size()) {
+            bool head = (body.compare(i, 10, "texelFetch") == 0) &&
+                        (i == 0 || !IsIdentChar(body[i - 1], false)) && !isWordCharAt(i + 10);
+            if (!head) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 10);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            int d = 0;
+            size_t k = lp;
+            std::vector<std::string> args;
+            size_t a0 = lp + 1;
+            for (; k < body.size(); ++k) {
+                if (body[k] == '(') ++d;
+                else if (body[k] == ')') { if (--d == 0) break; }
+                else if (body[k] == ',' && d == 1) {
+                    args.push_back(Trim(body.substr(a0, k - a0)));
+                    a0 = k + 1;
+                }
+            }
+            if (k >= body.size()) return fail("texelFetch(...) ngoặc không cân bằng");
+            args.push_back(Trim(body.substr(a0, k - a0)));
+            const GLSLVar* sv = nullptr;
+            if (args.empty() || !isSampler(Trim(args[0]), sv))
+                return fail("texelFetch chỉ hỗ trợ texelFetch(sampler, coord[, lod])");
+            std::string sname = Trim(args[0]);
+            std::string rep;
+            if (sv->isBuffer) {
+                if (args.size() != 2)
+                    return fail("texelFetch buffer chỉ 2 args (sampler, index)");
+                rep = sname + "_tex.read(uint2(uint(" + args[1] + "), 0u))";
+            } else {
+                if (args.size() < 2 || args.size() > 3)
+                    return fail("texelFetch 2D cần (sampler, coord[, lod])");
+                std::string lod = args.size() == 3 ? args[2] : "0";
+                rep = sname + "_tex.read(uint2(" + args[1] + "), " + lod + ")";
+            }
+            out += rep;
+            i = k + 1;
+        }
+        body = out;
+    }
+    // gl_FragData[0] → tglmt_fragColor (trước RewriteIdents để không còn `[0]` lẻ).
+    if (!R.isVertex && legacyFrag) {
+        std::string nb;
+        size_t i = 0;
+        while (i < body.size()) {
+            size_t p = body.find("gl_FragData", i);
+            if (p == std::string::npos) { nb += body.substr(i); break; }
+            bool l = p > 0 && IsIdentChar(body[p - 1], false);
+            size_t b = body.find('[', p + 11);
+            size_t e2 = (b == std::string::npos) ? std::string::npos : body.find(']', b);
+            if (!l && b != std::string::npos && e2 != std::string::npos &&
+                atoi(body.substr(b + 1, e2 - b - 1).c_str()) == 0) {
+                nb += body.substr(i, p - i);
+                nb += "tglmt_fragColor";
+                i = e2 + 1;
+                continue;
+            }
+            nb += body.substr(i, p - i + 11);
+            i = p + 11;
+        }
+        body = nb;
+    }
     body = RewriteIdents(body, mp);
     // `return;` trần trong main → vertex `z-convert + return _out;`, fragment MRT/single.
     {
@@ -859,9 +1126,15 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         }
         msl_out << "};\n";
     }
-    // Khai báo texture/sampler params (index theo thứ tự khai báo sampler)
+    // Khai báo texture/sampler params (index theo thứ tự khai báo sampler).
+    // Buffer sampler (CloudFaces): texture2d<elem> KHÔNG sampler (chỉ .read).
     std::string texParams;
     for (size_t k = 0; k < R.samplers.size(); ++k) {
+        if (R.samplers[k].isBuffer) {
+            texParams += ", texture2d<" + R.samplers[k].sampleType + "> " +
+                         R.samplers[k].name + "_tex [[texture(" + std::to_string(k) + ")]]";
+            continue;
+        }
         texParams += ", texture2d<float> " + R.samplers[k].name + "_tex [[texture(" +
                      std::to_string(k) + ")]], sampler " + R.samplers[k].name + "_smp [[sampler(" +
                      std::to_string(k) + ")]]";

@@ -13,6 +13,9 @@ static metal::PixelFormat ToMetalFormat(GLenum internalFormat) {
         case 0x8C43: return metal::PixelFormat::RGBA8Unorm_sRGB;   // SRGB8_ALPHA8
         case 0x8229: return metal::PixelFormat::R8Unorm;           // R8
         case 0x822B: return metal::PixelFormat::RG8Unorm;          // RG8
+        case 0x822E: return metal::PixelFormat::R32Float;          // R32F (buffer)
+        case 0x8235: return metal::PixelFormat::R32Sint;           // R32I (CloudFaces)
+        case 0x8236: return metal::PixelFormat::R32Uint;           // R32UI (buffer)
         case 0x81A5: case 0x81A6: case 0x8CAC:                     // DEPTH16/24/32F
             return metal::PixelFormat::Depth32Float;
         case 0x88F0: return metal::PixelFormat::Depth24Stencil8;   // DEPTH24_STENCIL8

@@ -16,6 +16,7 @@ enum class PixelFormat : uint32_t {
     BGRA8Unorm = 80, BGRA8Unorm_sRGB = 81,
     Depth32Float = 252, Depth24Stencil8 = 255, Stencil8 = 53,
     R8Unorm = 10, RG8Unorm = 30, RGBA16Float = 115, RGBA32Float = 125,
+    R32Float = 55, R32Sint = 56, R32Uint = 57, // buffer textures (CloudFaces)
 };
 // GL enum thô (giá trị từ gl.xml) cho blend/sampler — bridge ánh xạ sang MTL*.
 // Không include GL header ở đây để giữ IMetal độc lập platform.

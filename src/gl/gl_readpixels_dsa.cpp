@@ -114,7 +114,27 @@ static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {
     auto itb = c.buffers.find(buf);
     if (itt == c.textures.end()) { c.errors.Record(0x0502); return; }
     itt->second.internalFormat = inf;
-    if (itb != c.buffers.end()) itt->second.pixels = itb->second.data; // view CPU
+    if (itb == c.buffers.end()) return;
+    itt->second.pixels = itb->second.data; // view CPU
+    // GPU: R32I/R32UI/R32F → texture int Nx1 để shader .read(index).
+    // Format khác: shadow only (đủ cho probe, P1 mở rộng).
+    if (inf == 0x8235 || inf == 0x8236 || inf == 0x822E) {
+        size_t n = itb->second.data.size() / 4;
+        if (n == 0) n = 1;
+        itt->second.w = (uint32_t)n;
+        itt->second.h = 1;
+        std::vector<uint8_t> tmp(n * 4, 0);
+        memcpy(tmp.data(), itb->second.data.data(),
+               std::min(tmp.size(), itb->second.data.size()));
+        itt->second.pixels = tmp;
+        itt->second.gpu = c.device->newTextureWithBytes(
+            (uint32_t)n, 1, itt->second.internalFormat == 0x8235 ? metal::PixelFormat::R32Sint
+                         : itt->second.internalFormat == 0x8236 ? metal::PixelFormat::R32Uint
+                                                                 : metal::PixelFormat::R32Float,
+            tmp.data(), n * 4);
+        if (!itt->second.gpu)
+            c.LogDebug(0, 0, 0, 0, "glTexBuffer: GPU int texture fail, shadow only");
+    }
 }
 void glTexBuffer(GLenum t, GLenum inf, GLuint b) {
     Context& c = Context::Current();
@@ -122,7 +142,26 @@ void glTexBuffer(GLenum t, GLenum inf, GLuint b) {
     c.errors.Record(0x0502);
 }
 void glTexBufferRange(GLenum t, GLenum inf, GLuint b, GLintptr o, GLsizeiptr s) {
-    (void)o; (void)s; glTexBuffer(t, inf, b);
+    // Range: slice buffer [o, o+s) trước khi bind (CloudFaces dùng full nên ít gặp).
+    Context& c = Context::Current();
+    if (o < 0 || s < 0) { c.errors.Record(0x0501); return; }
+    if ((o != 0 || s != 0)) {
+        auto itb = c.buffers.find(b);
+        if (itb == c.buffers.end()) { c.errors.Record(0x0502); return; }
+        if ((size_t)o > itb->second.data.size()) { c.errors.Record(0x0501); return; }
+        size_t len = s ? std::min((size_t)s, itb->second.data.size() - (size_t)o)
+                       : itb->second.data.size() - (size_t)o;
+        // bind bản slice qua buffer tạm nội bộ để tái dùng BindBufTex
+        GLuint tmp = 0;
+        c.registry.Create(ObjectKind::Buffer, 1, &tmp);
+        c.buffers[tmp].data.assign(itb->second.data.begin() + o,
+                                   itb->second.data.begin() + o + len);
+        c.buffers[tmp].gpu = c.device->newBufferWithBytes(c.buffers[tmp].data.data(), len,
+                                                          metal::StorageMode::Shared);
+        glTexBuffer(t, inf, tmp);
+        return;
+    }
+    glTexBuffer(t, inf, b);
 }
 void glTextureBuffer(GLuint t, GLenum inf, GLuint b) { BindBufTex(t, inf, b); }
 void glTextureBufferRange(GLuint t, GLenum inf, GLuint b, GLintptr o, GLsizeiptr s) {

@@ -31,6 +31,9 @@ static MTLPixelFormat ToMTL(PixelFormat f) {
         case PixelFormat::BGRA8Unorm_sRGB: return MTLPixelFormatBGRA8Unorm_sRGB;
         case PixelFormat::R8Unorm: return MTLPixelFormatR8Unorm;
         case PixelFormat::RG8Unorm: return MTLPixelFormatRG8Unorm;
+        case PixelFormat::R32Float: return MTLPixelFormatR32Float;
+        case PixelFormat::R32Sint: return MTLPixelFormatR32Sint;
+        case PixelFormat::R32Uint: return MTLPixelFormatR32Uint;
         case PixelFormat::Depth32Float: return MTLPixelFormatDepth32Float;
 #if TARGET_OS_OSX
         case PixelFormat::Depth24Stencil8: return MTLPixelFormatDepth24Unorm_Stencil8;
@@ -446,7 +449,12 @@ public:
     std::shared_ptr<ITexture> newTexture(uint32_t w, uint32_t h, PixelFormat f) override {
         MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:ToMTL(f)
                                             width:w height:h mipmapped:NO];
-        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        // Integer/float-buffer textures chỉ đọc (.read), không render target
+        // (R32Sint làm RT có thể fail validation trên TBDR).
+        if (f == PixelFormat::R32Sint || f == PixelFormat::R32Uint || f == PixelFormat::R32Float)
+            d.usage = MTLTextureUsageShaderRead;
+        else
+            d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         d.storageMode = MTLStorageModeShared;
         id<MTLTexture> t = [dev_ newTextureWithDescriptor:d];
         return t ? std::make_shared<AppleTexture>(t, w, h, f) : nullptr;

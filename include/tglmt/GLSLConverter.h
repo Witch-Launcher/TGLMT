@@ -37,6 +37,8 @@ struct GLSLVar {
     size_t uniformSize = 0;
     int arraySize = 0;      // 0 = không mảng, >0 = uniform array[N] (vanilla/Sodium)
     bool isSampler = false;
+    bool isBuffer = false;       // samplerBuffer/isamplerBuffer/usamplerBuffer
+    std::string sampleType = "float"; // float/int/uint (cho buffer + read)
 };
 // Uniform block (UBO read-only): `layout(std140) uniform Block { members }`.
 struct GLSLBlock {

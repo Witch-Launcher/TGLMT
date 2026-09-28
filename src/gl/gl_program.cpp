@@ -215,12 +215,23 @@ void glLinkProgram(GLuint p) {
     pr.linked = true;
     (void)hasF;
     // 5. Apple backend: biên dịch MTLLibrary ngay tại link (lỗi biên dịch → link fail thật).
+    // Kèm excerpt MSL để log MC hiện đủ nguyên nhân từ xa (không cần DumpProgramMSL).
     if (c.device && !c.device->isNull()) {
         std::string err;
         pr.appleVS = c.device->compileLibrary(pr.vertexMSL, err);
-        if (!pr.appleVS) { pr.linked = false; pr.infoLog = "error: MSL vertex compile: " + err; return; }
+        if (!pr.appleVS) {
+            pr.linked = false;
+            pr.infoLog = "error: MSL vertex compile: " + err + "\n--- MSL head ---\n" +
+                         pr.vertexMSL.substr(0, 1200);
+            return;
+        }
         pr.appleFS = c.device->compileLibrary(pr.fragmentMSL, err);
-        if (!pr.appleFS) { pr.linked = false; pr.infoLog = "error: MSL fragment compile: " + err; return; }
+        if (!pr.appleFS) {
+            pr.linked = false;
+            pr.infoLog = "error: MSL fragment compile: " + err + "\n--- MSL head ---\n" +
+                         pr.fragmentMSL.substr(0, 1200);
+            return;
+        }
     }
 }
 void glUseProgram(GLuint p) {
