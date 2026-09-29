@@ -9,8 +9,10 @@
 #include "tglmt/Context.h"
 #include "tglmt/GLConvert.h"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace tglmt {
@@ -508,6 +510,40 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     c.appleStats.drawsEncoded++;
     c.appleStats.progEncoded[prog]++;
+    // Chẩn đoán đen màn hình: định danh program 1 lần (tên attribute/sampler/
+    // block) để đối chiếu với pipeline vanilla nào đang vẽ trên máy.
+    {
+        static std::set<GLuint> logged;
+        if (!logged.count(prog)) {
+            logged.insert(prog);
+            std::string attrs, vsS, fsS, blks;
+            for (auto& kv : pr.attribLoc) {
+                if (!attrs.empty()) attrs += ",";
+                attrs += kv.first + "@" + std::to_string(kv.second);
+            }
+            for (auto& s : pr.vsSamplers) {
+                if (!vsS.empty()) vsS += ",";
+                vsS += s;
+            }
+            for (auto& s : pr.fsSamplers) {
+                if (!fsS.empty()) fsS += ",";
+                fsS += s;
+            }
+            for (auto& b : pr.uniformBlocks) {
+                if (!blks.empty()) blks += ",";
+                blks += b.name;
+            }
+            c.LogDebug(0, 0, 0, 0,
+                       "AppleDrawGL prog@" + std::to_string(prog) + " attrs=[" + attrs +
+                           "] vsSamp=[" + vsS + "] fsSamp=[" + fsS + "] blocks=[" + blks + "]");
+            // LogDebug chỉ tới debugCb (game có thể không đăng ký) → stderr luôn
+            // để latestlog thấy được.
+            fprintf(stderr,
+                    "[TGLMT] prog@%u attrs=[%s] vsSamp=[%s] fsSamp=[%s] blocks=[%s]\n", prog,
+                    attrs.c_str(), vsS.c_str(), fsS.c_str(), blks.c_str());
+            fflush(stderr);
+        }
+    }
     return true;
 }
 

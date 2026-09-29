@@ -108,16 +108,32 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                 th = tgt->height();
             }
             ViewportState vp = st.renderer->context().state.GetViewport(0);
+            // Oracle nội dung: đọc pixel giữa default target (xác nhận đen thật
+            // hay present sai). glReadPixels đã xả GPU + flip đúng spec.
+            unsigned center[4] = {0, 0, 0, 0};
+            {
+                unsigned char one[4] = {0, 0, 0, 0};
+                if (tw > 0 && th > 0) {
+                    tglmt::gl::glReadPixels((GLint)(tw / 2), (GLint)(th / 2), 1, 1, 0x1908,
+                                            0x1401, one);
+                    center[0] = one[0];
+                    center[1] = one[1];
+                    center[2] = one[2];
+                    center[3] = one[3];
+                }
+            }
             fprintf(stderr,
-                    "[TGLMT] build=b3-blackdiag3 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
+                    "[TGLMT] build=b3-blackdiag4 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
-                    "misc=%llu target=%ux%u vp=%.0fx%.0f@%.0f,%.0f present=%d\n",
+                    "misc=%llu target=%ux%u vp=%.0fx%.0f@%.0f,%.0f center=(%u,%u,%u,%u) "
+                    "present=%d\n",
                     (unsigned long long)nSwap, dt, (unsigned long long)(a.drawsAttempted - pAtt),
                     (unsigned long long)(a.drawsEncoded - pEnc),
                     (unsigned long long)a.drawsAttempted, (unsigned long long)a.drawsEncoded,
                     a.progEncoded.size(), (unsigned long long)a.noProgram,
                     (unsigned long long)a.noTarget, (unsigned long long)a.noPipeline,
-                    (unsigned long long)a.miscFail, tw, th, vp.x, vp.y, vp.w, vp.h, (int)ok);
+                    (unsigned long long)a.miscFail, tw, th, vp.x, vp.y, vp.w, vp.h, center[0],
+                    center[1], center[2], center[3], (int)ok);
             fflush(stderr);
             pAtt = a.drawsAttempted;
             pEnc = a.drawsEncoded;
