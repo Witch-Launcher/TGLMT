@@ -110,12 +110,18 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             ViewportState vp = st.renderer->context().state.GetViewport(0);
             // Oracle nội dung: đọc pixel giữa default target (xác nhận đen thật
             // hay present sai). glReadPixels đã xả GPU + flip đúng spec.
+            // PHẢI bind READ=0 trước: game để READ trỏ FBO scratch sau blit
+            // (oracle cũ đọc nhầm buffer rỗng). Xong trả lại READ cũ.
             unsigned center[4] = {0, 0, 0, 0};
             {
                 unsigned char one[4] = {0, 0, 0, 0};
                 if (tw > 0 && th > 0) {
+                    GLuint savedRead = st.renderer->context().state.BoundReadFBO();
+                    tglmt::gl::glBindFramebuffer(0x8CA8, 0); // READ_FRAMEBUFFER → default
                     tglmt::gl::glReadPixels((GLint)(tw / 2), (GLint)(th / 2), 1, 1, 0x1908,
                                             0x1401, one);
+                    if (savedRead != 0)
+                        tglmt::gl::glBindFramebuffer(0x8CA8, savedRead);
                     center[0] = one[0];
                     center[1] = one[1];
                     center[2] = one[2];
@@ -123,7 +129,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                 }
             }
             fprintf(stderr,
-                    "[TGLMT] build=b3-blackdiag14 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
+                    "[TGLMT] build=b3-blackdiag15 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
                     "misc=%llu clears=%llu blits=%llu copyTex=%llu target=%p %ux%u "
                     "vp=%.0fx%.0f@%.0f,%.0f center=(%u,%u,%u,%u) present=%d\n",

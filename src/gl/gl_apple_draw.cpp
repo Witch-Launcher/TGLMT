@@ -264,9 +264,34 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         // cộng offset (bug cũ cộng relative vào stride làm đỉnh thưa sai).
         if (ca.stride == 0) ca.stride = ca.size * GLTypeSize(ca.type);
     }
+    // Validator đọc vượt buffer (TBDR A11 fault → SubmissionsIgnored + đứng
+    // hình, trong khi desktop chỉ ra rác): chỉ LOG + đếm, không chặn draw.
+    if (!indexed) {
+        static std::set<std::pair<GLuint, int>> warnedRange;
+        for (auto& ca : cas) {
+            auto bit = bindMap.find(ca.bufferIndex);
+            if (bit == bindMap.end() || !bit->second.first) continue;
+            size_t gpuLen = bit->second.first->length();
+            size_t elemBytes = (size_t)ca.size * GLTypeSize(ca.type);
+            size_t lastN = ca.divisor > 0 ? (inst > 0 ? (size_t)inst - 1 : 0)
+                                          : (size_t)first + (size_t)(count > 0 ? count - 1 : 0);
+            size_t fetchEnd = bit->second.second + ca.offset + lastN * ca.stride + elemBytes;
+            if (fetchEnd > gpuLen && warnedRange.size() < 16 &&
+                warnedRange.insert({prog, (int)ca.loc}).second) {
+                ++c.appleStats.rangeWarn;
+                char b[192];
+                snprintf(b, sizeof(b),
+                         "AppleDrawGL: RANGE prog@%u slot%d fetchEnd=%zu > bufLen=%zu "
+                         "(first=%d count=%d inst=%d)",
+                         prog, (int)ca.loc, fetchEnd, gpuLen, first, count, inst);
+                c.LogDebug(0, 0, 0, 0, b);
+            }
+        }
+    }
     // 3. Target: FBO 0 → default; khác → wrap colorTex[0] (+depth nếu có)
     std::shared_ptr<metal::IRenderTarget> target;
     bool hasDepthTex = false;
+    GLuint drawColorTexId = 0; // texture đích (so hazard feedback ở dưới)
     if (c.state.BoundDrawFBO() == 0) {
         target = c.device->defaultRenderTarget();
         if (!target) { c.appleStats.noTarget++; return false; } // app chưa đặt target
@@ -275,6 +300,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (fit == c.fbos.end()) return false;
         auto cit = fit->second.colorTex.find(0);
         if (cit == fit->second.colorTex.end()) return false;
+        drawColorTexId = cit->second;
         auto tit = c.textures.find(cit->second);
         if (tit == c.textures.end() || !tit->second.gpu) return false;
         metal::ITexture* dep = nullptr;
@@ -459,6 +485,20 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             default: return target == 0x0DE1;  // TEXTURE_2D (+shadow approx)
         }
     };
+    // Feedback hazard: render vào texture đồng thời sample nó (TBDR fault).
+    // Chỉ LOG + đếm (không chặn — desktop GL thường "chạy được").
+    auto hazardCheck = [&](GLuint texId) {
+        if (drawColorTexId && texId == drawColorTexId) {
+            static std::set<GLuint> warnedHz;
+            if (warnedHz.size() < 16 && warnedHz.insert(prog).second) {
+                ++c.appleStats.hazardWarn;
+                char b[128];
+                snprintf(b, sizeof(b), "AppleDrawGL: FEEDBACK prog@%u sample tex#%u dang render",
+                         prog, texId);
+                c.LogDebug(0, 0, 0, 0, b);
+            }
+        }
+    };
     for (size_t k = 0; k < pr.vsSamplers.size(); ++k) {
         const std::string& name = pr.vsSamplers[k];
         auto uit = pr.samplerUnits.find(name);
@@ -475,6 +515,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 kindOk(name, tit->second.target)) {
                 txp = &tit->second;
                 gpu = txp->gpu.get();
+                hazardCheck(texId);
             } else if (tit != c.textures.end()) {
                 c.LogDebug(0, 0, 0, 0,
                            "AppleDrawGL: VS sampler " + name + " thieu/khop, fallback den");
@@ -508,6 +549,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 kindOk(name, tit->second.target)) {
                 txp = &tit->second;
                 gpu = txp->gpu.get();
+                hazardCheck(texId);
             } else if (tit != c.textures.end()) {
                 c.LogDebug(0, 0, 0, 0,
                            "AppleDrawGL: FS sampler " + name + " thieu/khop, fallback den");
@@ -591,6 +633,45 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             ioff = 0;
         }
         if (!ib) { c.appleStats.miscFail++; return false; }
+        // Validator index max vs sức chứa đỉnh (TBDR fault khi index trỏ ra
+        // ngoài buffer): quét tối đa 32k index đầu, chỉ LOG + đếm.
+        if (srcBytes) {
+            static std::set<GLuint> warnedIdx;
+            uint64_t mx = 0;
+            GLsizei scan = count > 32768 ? 32768 : count;
+            for (GLsizei k = 0; k < scan; ++k)
+                mx = std::max(mx, (elem == 2)
+                                        ? (uint64_t)(srcBytes[2 * k] | (srcBytes[2 * k + 1] << 8))
+                                        : (uint64_t)(srcBytes[4 * k] | (srcBytes[4 * k + 1] << 8) |
+                                                     (srcBytes[4 * k + 2] << 16) |
+                                                     (srcBytes[4 * k + 3] << 24)));
+            int64_t want = (int64_t)mx + (int64_t)baseVertex;
+            if (want >= 0) {
+                for (auto& ca : cas) {
+                    auto bbit = bindMap.find(ca.bufferIndex);
+                    if (bbit == bindMap.end() || !bbit->second.first || !ca.stride) continue;
+                    size_t gpuLen = bbit->second.first->length();
+                    size_t elemBytes = (size_t)ca.size * GLTypeSize(ca.type);
+                    size_t cap = 0;
+                    if (ca.divisor > 0) {
+                        cap = gpuLen; // per-instance: fetch nhỏ, bỏ qua
+                    } else if (gpuLen > bbit->second.second + ca.offset + elemBytes) {
+                        cap = (gpuLen - bbit->second.second - ca.offset - elemBytes) / ca.stride +
+                              1;
+                    }
+                    if (!ca.divisor && (uint64_t)want >= cap && warnedIdx.size() < 16 &&
+                        warnedIdx.insert(prog).second) {
+                        ++c.appleStats.rangeWarn;
+                        char b[192];
+                        snprintf(b, sizeof(b),
+                                 "AppleDrawGL: IDXRANGE prog@%u maxIdx=%llu cap=%zu (count=%d)",
+                                 prog, (unsigned long long)want, cap, count);
+                        c.LogDebug(0, 0, 0, 0, b);
+                        break;
+                    }
+                }
+            }
+        }
     }
     if (indexed) enc->drawIndexed(prim, (uint32_t)count, ity, ib.get(), ioff, (uint32_t)inst);
     else enc->drawPrimitives(prim, (uint32_t)first, (uint32_t)count, (uint32_t)inst);
@@ -622,11 +703,21 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             };
             fprintf(stderr, "[TGLMT] draw prog@%u vao@%u mode=0x%x count=%d indexed=%d inst=%d\n",
                     prog, vao, mode, count, (int)indexed, inst);
-            // FBO đích: menu 26.x render qua post chain (offscreen) rồi composite
-            // ra màn hình. Nếu draw vào FBO != 0 mà composite cuối (blit/copy)
-            // bị stub thì màn hình đen dù mọi draw đều khỏe.
-            fprintf(stderr, "[TGLMT]   target fbo=%u (0 = default/màn hình)\n",
-                    c.state.BoundDrawFBO());
+            // FBO đích + texture đích (so feedback: sample đúng texture đang
+            // render là hazard trên TBDR).
+            {
+                GLuint dfbo = c.state.BoundDrawFBO();
+                GLuint dtex = 0;
+                if (dfbo != 0) {
+                    auto fit = c.fbos.find(dfbo);
+                    if (fit != c.fbos.end()) {
+                        auto cit = fit->second.colorTex.find(0);
+                        if (cit != fit->second.colorTex.end()) dtex = cit->second;
+                    }
+                }
+                fprintf(stderr, "[TGLMT]   target fbo=%u tex=%u (0 = default/màn hình)\n",
+                        dfbo, dtex);
+            }
             // Index/EBO/baseVertex/first: draw indexed sai ở đây là đen toàn bộ
             // mà không error nào (indices rác → degenerate).
             {

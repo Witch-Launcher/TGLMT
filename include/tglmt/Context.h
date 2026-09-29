@@ -221,6 +221,8 @@ public:
         uint64_t glClears = 0;       // số lần glClear (đối chiếu pendingClear)
         uint64_t blits = 0;          // số lần glBlitFramebuffer (composite cuối?)
         uint64_t copyTex = 0;        // số lần glCopyTexSubImage2D (post chain?)
+        uint64_t rangeWarn = 0;      // draw đọc đỉnh/index vượt buffer (TBDR fault?)
+        uint64_t hazardWarn = 0;     // draw vừa render vừa sample cùng texture
         std::map<GLuint, uint64_t> progEncoded; // program id -> số draw đã encode
     };
     AppleStats appleStats;
