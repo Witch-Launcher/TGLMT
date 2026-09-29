@@ -36,6 +36,33 @@ static size_t Bpp(GLenum format, GLenum type) {
         default: return 4;
     }
 }
+// Sync 1 vùng pixels lên GPU: RGBA/UBYTE direct, RGB/UBYTE expand alpha 255.
+// srcRows trỏ vùng (xoff,yoff,w,h) với pitch srcRowLen. Trả true nếu đã sync.
+static bool SyncRegionToGPU(Context& c, TextureObject& tx, GLint xoff, GLint yoff, GLsizei w,
+                            GLsizei h, const uint8_t* srcRows, size_t srcRowLen, GLenum format,
+                            GLenum type) {
+    if (!tx.gpu || w <= 0 || h <= 0) return false;
+    if (format == 0x1908 && type == 0x1401) {
+        std::vector<uint8_t> tight((size_t)w * h * 4);
+        for (GLsizei r = 0; r < h; ++r)
+            memcpy(tight.data() + (size_t)r * w * 4, srcRows + r * srcRowLen, (size_t)w * 4);
+        return c.device->updateTexture(tx.gpu.get(), (uint32_t)xoff, (uint32_t)yoff,
+                                       (uint32_t)w, (uint32_t)h, tight.data(), (size_t)w * 4);
+    }
+    if (format == 0x1907 && type == 0x1401) {
+        std::vector<uint8_t> rgba((size_t)w * h * 4);
+        for (GLsizei r = 0; r < h; ++r)
+            for (GLsizei x = 0; x < w; ++x) {
+                rgba[((size_t)r * w + x) * 4 + 0] = srcRows[r * srcRowLen + (size_t)x * 3 + 0];
+                rgba[((size_t)r * w + x) * 4 + 1] = srcRows[r * srcRowLen + (size_t)x * 3 + 1];
+                rgba[((size_t)r * w + x) * 4 + 2] = srcRows[r * srcRowLen + (size_t)x * 3 + 2];
+                rgba[((size_t)r * w + x) * 4 + 3] = 255;
+            }
+        return c.device->updateTexture(tx.gpu.get(), (uint32_t)xoff, (uint32_t)yoff,
+                                       (uint32_t)w, (uint32_t)h, rgba.data(), (size_t)w * 4);
+    }
+    return false;
+}
 
 namespace tglmt::gl {
 void glGenTextures(GLsizei n, GLuint* t) {
@@ -152,12 +179,32 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     }
     tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
     // Upload base level lên GPU (bug cũ: tạo texture rỗng → sampling đen).
-    // Chỉ RGBA8/UBYTE tight (vanilla atlas); format khác giữ shadow + log.
-    if (tx.gpu && pixels && format == 0x1908 && type == 0x1401 && w > 0 && h > 0) {
-        // pixels đã unpack vào tx.pixels tight → upload trực tiếp
-        if (tx.pixels.size() >= (size_t)w * h * 4)
+    // Vanilla atlas RGBA/UBYTE tight; JPG panorama là RGB/UBYTE → expand alpha 255.
+    // Mọi format khác giữ shadow + log (trước đây im lặng đen).
+    if (tx.gpu && pixels && w > 0 && h > 0) {
+        if (format == 0x1908 && type == 0x1401) {
+            // pixels đã unpack vào tx.pixels tight → upload trực tiếp
+            if (tx.pixels.size() >= (size_t)w * h * 4)
+                c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
+                                        tx.pixels.data(), (size_t)w * 4);
+        } else if (format == 0x1907 && type == 0x1401) {
+            // RGB → RGBA (alpha 255), tôn trọng unpack pitch của source
+            GLint align = c.state.PixelStore().unpackAlignment;
+            size_t rowLen = (((size_t)w * 3 + (size_t)align - 1) / (size_t)align) * (size_t)align;
+            const uint8_t* src = (const uint8_t*)pixels;
+            std::vector<uint8_t> rgba((size_t)w * h * 4);
+            for (GLsizei r = 0; r < h; ++r)
+                for (GLsizei x = 0; x < w; ++x) {
+                    rgba[((size_t)r * w + x) * 4 + 0] = src[r * rowLen + (size_t)x * 3 + 0];
+                    rgba[((size_t)r * w + x) * 4 + 1] = src[r * rowLen + (size_t)x * 3 + 1];
+                    rgba[((size_t)r * w + x) * 4 + 2] = src[r * rowLen + (size_t)x * 3 + 2];
+                    rgba[((size_t)r * w + x) * 4 + 3] = 255;
+                }
             c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
-                                    tx.pixels.data(), (size_t)w * 4);
+                                    rgba.data(), (size_t)w * 4);
+        } else {
+            c.LogDebug(0, 0, 0, 0, "glTexImage2D: format/type chưa upload GPU (giữ shadow)");
+        }
     }
     (void)border; (void)level;
 }
@@ -199,14 +246,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     }
     if (dstPix != &t.pixels && !t.faces[0].empty()) t.pixels = t.faces[0]; // mirror face 0
     // Sync GPU vùng đã đổi (chunk atlas streaming mỗi frame) — A11 Shared coherent
-    if (syncGPU && t.gpu && bpp == 4) {
-        // pack thành tight rows cho replaceRegion
-        std::vector<uint8_t> tight((size_t)w * h * 4);
-        for (GLsizei r = 0; r < h; ++r)
-            memcpy(tight.data() + (size_t)r * w * 4, src + r * rowLen, (size_t)w * 4);
-        c.device->updateTexture(t.gpu.get(), (uint32_t)xoff, (uint32_t)yoff,
-                                (uint32_t)w, (uint32_t)h, tight.data(), (size_t)w * 4);
-    }
+    if (syncGPU) SyncRegionToGPU(c, t, xoff, yoff, w, h, src, rowLen, format, type);
     (void)level;
 }
 void glTexSubImage1D(GLenum t, GLint l, GLint x, GLsizei w, GLenum f, GLenum ty, const void* p) {
@@ -341,13 +381,7 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
         uint8_t* dst = tx.pixels.data() + ((size_t)(y + r) * tx.w + (size_t)x) * bpp;
         memcpy(dst, src + r * rowLen, (size_t)w * bpp);
     }
-    if (tx.gpu && bpp == 4) {
-        std::vector<uint8_t> tight((size_t)w * h * 4);
-        for (GLsizei r = 0; r < h; ++r)
-            memcpy(tight.data() + (size_t)r * w * 4, src + r * rowLen, (size_t)w * 4);
-        c.device->updateTexture(tx.gpu.get(), (uint32_t)x, (uint32_t)y, (uint32_t)w,
-                                (uint32_t)h, tight.data(), (size_t)w * 4);
-    }
+    SyncRegionToGPU(c, tx, x, y, w, h, src, rowLen, f, ty);
     (void)l;
 }
 void glTextureSubImage3D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLenum j, const void* k) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; }

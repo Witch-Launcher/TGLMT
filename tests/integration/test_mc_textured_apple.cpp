@@ -233,6 +233,41 @@ int main() {
         printf("test_mc_textured_apple FAIL: texels wrong (texture/blend/indexed?)\n");
         return 1;
     }
+    // Case RGB (JPG panorama menu): cùng pattern nhưng upload RGB/UBYTE —
+    // trước fix GPU texture rỗng (đen) vì chỉ sync RGBA.
+    {
+        GLuint texRGB;
+        glGenTextures(1, &texRGB);
+        glActiveTexture(0x84C0);
+        glBindTexture(0x0DE1, texRGB);
+        unsigned char rgb[4 * 4 * 3];
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) {
+                unsigned char* q = rgb + (y * 4 + x) * 3;
+                q[0] = ((x < 2) == (y < 2)) ? 255 : 0;
+                q[1] = (x >= 2) ? 255 : 0;
+                q[2] = (y >= 2) ? 255 : 0;
+            }
+        glTexImage2D(0x0DE1, 0, 0x8051, 4, 4, 0, 0x1907, 0x1401, rgb);
+        glTexParameteri(0x0DE1, 0x2801, 0x2600);
+        glTexParameteri(0x0DE1, 0x2800, 0x2600);
+        if (glGetError() != 0) {
+            printf("test_mc_textured_apple FAIL: gl error rgb upload\n");
+            return 1;
+        }
+        glDrawElements(0x0004, 6, 0x1405, (void*)0);
+        memset(px, 0, sizeof(px));
+        glReadPixels(0, 0, 256, 256, 0x1908, 0x1401, px);
+        unsigned char* bl2 = at(64, 64);
+        unsigned char* tr2 = at(192, 192);
+        printf("rgb bl=(%u,%u,%u) tr=(%u,%u,%u)\n", bl2[0], bl2[1], bl2[2], tr2[0],
+               tr2[1], tr2[2]);
+        if (!(bl2[0] > 200 && bl2[1] < 50 && bl2[2] < 50 && tr2[0] > 200 &&
+              tr2[1] > 200 && tr2[2] > 200)) {
+            printf("test_mc_textured_apple FAIL: RGB upload sampling wrong\n");
+            return 1;
+        }
+    }
     printf("test_mc_textured_apple PASS (indexed+texture+blend exact)\n");
     return 0;
 }
