@@ -240,6 +240,24 @@ void glLinkProgram(GLuint p) {
             addBlock(b.name, false);
             pr.fsBlocks.push_back(b.name);
         }
+        // Kích thước struct thật mỗi block (max end-offset members, không pad
+        // cuối) để AppleDrawGL từ chối buffer thiếu (misbound → OOB fault A11).
+        {
+            auto trueSize = [](const std::vector<GLSLVar>& members) {
+                size_t end = 0;
+                for (auto& m : members)
+                    end = std::max(end, m.uniformOffset + m.uniformSize);
+                return end;
+            };
+            for (auto& ub : pr.uniformBlocks) {
+                size_t need = 0;
+                for (auto& b : vsC.blocks)
+                    if (b.name == ub.name) need = std::max(need, trueSize(b.members));
+                for (auto& b : fsC.blocks)
+                    if (b.name == ub.name) need = std::max(need, trueSize(b.members));
+                ub.minSize = need;
+            }
+        }
         // ZERO_TO_ONE cảnh báo: shader đã bake z-convert mặc định; app đổi ClipControl
         // depth cần relink (hiện log, M5c recompile tự động).
         if (c.state.ClipDepth() == 0x935F)

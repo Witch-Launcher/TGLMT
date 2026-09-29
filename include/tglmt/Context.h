@@ -144,6 +144,9 @@ struct ProgramObject {
         GLuint index = 0;
         GLuint binding = 0;
         bool isVS = true;
+        // Kích thước struct thật (end offset lớn nhất, KHÔNG pad 16 cuối) để
+        // phát hiện buffer thiếu (misbound) trước khi bind GPU (A11 fault OOB).
+        size_t minSize = 0;
     };
     std::vector<UniformBlock> uniformBlocks;
     // Thứ tự block KHAI BÁO RIÊNG mỗi stage (khớp [[buffer(17+bi)]] mà converter
@@ -229,6 +232,7 @@ public:
         uint64_t rangeWarn = 0;      // draw đọc đỉnh/index vượt buffer (TBDR fault?)
         uint64_t hazardWarn = 0;     // draw vừa render vừa sample cùng texture
         uint64_t mipBase = 0;        // sampler 1-level + minfilter mipmap → base (fix A11)
+        uint64_t uboSmall = 0;       // UBO buffer thiếu so với struct → zero fallback (chống fault)
         std::map<GLuint, uint64_t> progEncoded; // program id -> số draw đã encode
     };
     AppleStats appleStats;

@@ -144,6 +144,28 @@ int main() {
     printf("[ubostage] mid=(%u,%u,%u,%u)\n", mid[0], mid[1], mid[2], mid[3]);
     Check(mid[1] > 200 && mid[0] < 50 && mid[2] < 50, "per-stage UBO slot (fs D = green)");
     if (gFails) return 1;
+
+    // Phần 2: buffer thiếu so với struct (misbound như Globals đọc nhầm 16B
+    // trong khi struct 56B) → zero fallback, không fault OOB. Bind point 13
+    // (UBO_D) sang buffer 4B → draw phải ra đen trong suốt + uboSmall tăng.
+    GLuint bTiny;
+    glGenBuffers(1, &bTiny);
+    unsigned char tiny[4] = {0, 0, 0x80, 0x3F}; // float 1.0
+    glBindBuffer(0x8A11, bTiny);
+    glBufferData(0x8A11, sizeof(tiny), tiny, 0x88E4);
+    glBindBufferBase(0x8A11, 13, bTiny);
+    uint64_t smallBefore = ctx.appleStats.uboSmall;
+    glClearColor(0, 0, 0, 1);
+    glClear(0x00004000);
+    glDrawArrays(0x0004, 0, 3);
+    Check(glGetError() == 0, "tiny draw gl error");
+    Check(ctx.appleStats.uboSmall > smallBefore, "small UBO guarded (uboSmall++)");
+    memset(px, 0, sizeof(px));
+    glReadPixels(0, 0, 64, 64, 0x1908, 0x1401, px);
+    mid = px + (32 * 64 + 32) * 4;
+    printf("[ubosmall] mid=(%u,%u,%u,%u)\n", mid[0], mid[1], mid[2], mid[3]);
+    Check(mid[3] == 0, "small UBO zero fallback (alpha 0)");
+    if (gFails) return 1;
     printf("test_mc_ubostage_apple PASS (UBO per-stage slots)\n");
     return 0;
 }

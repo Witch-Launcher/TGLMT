@@ -2,6 +2,7 @@
 // Metal không có glUniform: TGLMT giữ shadow CPU + upload vào MTLBuffer khi draw.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <cstdio>
 #include <cstring>
 #include <type_traits>
 using namespace tglmt;
@@ -67,6 +68,21 @@ GLuint glGetUniformBlockIndex(GLuint p, const GLchar* n) {
 }
 void glUniformBlockBinding(GLuint p, GLuint b, GLuint bi) {
     Context& c = Context::Current();
+    {
+        // Chẩn đoán misbound UBO trên máy (blur Globals đọc nhầm buffer):
+        // log chương trình nào bind block nào vào point nào (40 dòng đầu).
+        static int nBind = 0;
+        if (++nBind <= 40) {
+            std::string nm = "?";
+            auto it0 = c.programs.find(p);
+            if (it0 != c.programs.end())
+                for (auto& blk : it0->second.uniformBlocks)
+                    if (blk.index == b) { nm = blk.name; break; }
+            fprintf(stderr, "[TGLMT] ublockbind#%d prog@%u idx=%u(%s) -> point %u\n",
+                    nBind, p, b, nm.c_str(), bi);
+            fflush(stderr);
+        }
+    }
     auto it = c.programs.find(p);
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
     for (auto& blk : it->second.uniformBlocks)

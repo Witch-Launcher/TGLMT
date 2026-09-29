@@ -456,14 +456,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             uboKeep.push_back(z);
             enc->setFragmentBuffer(z.get(), 0, (uint32_t)s);
         };
-        auto bindingOf = [&](const std::string& nm, GLuint& out) -> bool {
-            for (auto& b : pr.uniformBlocks)
-                if (b.name == nm) { out = b.binding; return true; }
-            return false;
-        };
         auto uploadBlock = [&](const std::string& nm) -> std::shared_ptr<metal::IBuffer> {
             GLuint point = 0;
-            if (!bindingOf(nm, point)) return nullptr;
+            size_t need = 0;
+            for (auto& b : pr.uniformBlocks)
+                if (b.name == nm) { point = b.binding; need = b.minSize; break; }
             auto bit = c.uniformBindPoints.find(point);
             if (bit == c.uniformBindPoints.end() || !bit->second.buffer) {
                 c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " unbound, zero fallback");
@@ -483,6 +480,23 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                                           : t->second.data.size() - off;
             len = std::min(len, t->second.data.size() - off);
             if (!len) return nullptr;
+            // Buffer thiếu so với struct shader cần (misbound: vd Globals đọc
+            // nhầm buffer SamplerInfo 16B trong khi struct 56B) → đọc OOB hoặc
+            // rác điều khiển loop (MenuBlurRadius khổng lồ → treo GPU → iOS ban
+            // submissions, đen + đứng hình). Zero fallback giữ GPU sống (GL coi
+            // là undefined, blur thành sharp còn hơn fault).
+            if (need && len < need) {
+                ++c.appleStats.uboSmall;
+                static std::set<std::string> loggedSmall;
+                if (loggedSmall.size() < 16 && loggedSmall.insert(nm).second) {
+                    char b[160];
+                    snprintf(b, sizeof(b),
+                             "AppleDrawGL: UBO %s small %zuB < need %zuB, zero fallback",
+                             nm.c_str(), len, need);
+                    c.LogDebug(0, 0, 0, 0, b);
+                }
+                return nullptr;
+            }
             // Pad 0 lên bội số 16 (std140 pad; A11 TBDR nghiêm OOB).
             size_t padded = (len + 15) & ~((size_t)15);
             std::vector<uint8_t> ubPad(padded, 0);
@@ -760,11 +774,12 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     c.appleStats.progEncoded[prog]++;
     // Chẩn đoán đen màn hình: dump TOÀN BỘ draw-state lần đầu mỗi (program,VAO)
     // (thừa còn hơn thiếu): attribute + byte đỉnh đầu trên GPU, UBO, texture,
-    // blend/cull/depth/scissor. Cap 48 combo để log không phình.
+    // blend/cull/depth/scissor. Cap 96 combo (menu + world-creation cần nhiều
+    // hơn 48 cũ; mỗi combo log 1 lần nên không phình).
     {
         static std::set<std::pair<GLuint, GLuint>> loggedDraws;
         auto key = std::make_pair(prog, vao);
-        if (loggedDraws.size() < 48 && !loggedDraws.count(key)) {
+        if (loggedDraws.size() < 96 && !loggedDraws.count(key)) {
             loggedDraws.insert(key);
             auto hex = [](const uint8_t* d, size_t n) {
                 static const char* H = "0123456789ABCDEF";
@@ -908,10 +923,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     full += fb;
                 }
                 fprintf(stderr,
-                        "[TGLMT]   ubo %s (bindpt %u vsSlot=%d fsSlot=%d, buf %u+%zu, have %zuB): "
+                        "[TGLMT]   ubo %s (bindpt %u vsSlot=%d fsSlot=%d, buf %u+%zu, have %zuB need %zuB): "
                         "diag=(%g,%g,%g,%g) row0=(%g,%g,%g,%g)\n[TGLMT]     full=[%s]\n",
                         b.name.c_str(), b.binding, vsSlot, fsSlot, bit->second.buffer, off,
-                        have, F(0), F(5),
+                        have, b.minSize, F(0), F(5),
                         F(10), F(15), F(0), F(1), F(2), F(3), full.c_str());
             }
             // Texture theo sampler (unit, id, WxH, format, gpu?, pixel đầu).
@@ -949,8 +964,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                              tx.pixels[2], tx.pixels[3]);
                     px0 = std::string("shadow") + b;
                 }
-                // Ground truth GPU cho texture nhỏ (atlas lớn đọc tốn RAM).
-                if (tx.gpu && tx.w <= 256 && tx.h <= 256 && tx.w > 0 && tx.h > 0) {
+                // Ground truth GPU cho texture vừa/nhỏ (atlas lớn đọc tốn RAM).
+                // 512 (logo/widgets/menu) đọc 1 lần/combo để soi nội dung thật.
+                if (tx.gpu && tx.w <= 512 && tx.h <= 512 && tx.w > 0 && tx.h > 0) {
                     auto wt = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
                     if (wt) {
                         std::vector<uint8_t> tb((size_t)tx.w * tx.h * 4, 0);

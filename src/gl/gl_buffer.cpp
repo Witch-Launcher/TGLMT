@@ -4,6 +4,7 @@
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 using namespace tglmt;
 
@@ -55,6 +56,15 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     if (buffer && !c.buffers.count(buffer)) { c.errors.Record(0x0502); return; }
     if (target == 0x8A11 /*UNIFORM_BUFFER*/) {
         c.uniformBindPoints[index] = BufferRange{buffer, 0, 0};
+        // Chẩn đoán misbound UBO: point nào trỏ buffer/size nào (40 dòng đầu).
+        static int nUB = 0;
+        if (++nUB <= 40 && buffer) {
+            auto it = c.buffers.find(buffer);
+            size_t sz = (it == c.buffers.end()) ? 0 : it->second.data.size();
+            fprintf(stderr, "[TGLMT] ubobind#%d point %u -> buf %u (%zuB)\n",
+                    nUB, index, buffer, sz);
+            fflush(stderr);
+        }
     } else if (target == 0x90D2 /*SHADER_STORAGE_BUFFER*/) {
         c.storageBindPoints[index] = BufferRange{buffer, 0, 0};
     }

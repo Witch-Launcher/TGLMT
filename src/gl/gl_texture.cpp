@@ -193,13 +193,14 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     TextureObject* tp = BoundTex(c, target);
     if (!tp) return; // lỗi đã record trong BoundTex
     auto& tx = *tp;
-    // Chẩn đoán texture lớn rỗng (logo 512): log 8 lần upload đầu ≥256px.
+    // Chẩn đoán texture lớn rỗng (logo 512, widgets 256): log 12 lần upload
+    // đầu ≥256px kèm internalformat/format/type (soi BGRA/UINT).
     if ((w >= 256 || h >= 256)) {
         static int nBig = 0;
-        if (++nBig <= 8) {
+        if (++nBig <= 12) {
             fprintf(stderr,
-                    "[TGLMT] bigTexImage#%d id=%u tgt=0x%x lv=%d %dx%d fmt=0x%x ty=0x%x %s\n",
-                    nBig, tp->id, target, level, w, h, internalformat, format,
+                    "[TGLMT] bigTexImage#%d id=%u tgt=0x%x lv=%d %dx%d ifmt=0x%x fmt=0x%x ty=0x%x %s\n",
+                    nBig, tp->id, target, level, w, h, internalformat, format, type,
                     pixels ? "data" : "NULL");
             fflush(stderr);
         }
