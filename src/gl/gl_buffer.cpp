@@ -139,6 +139,13 @@ void glNamedBufferSubData(GLuint b, GLintptr off, GLsizeiptr size, const void* d
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     if (off < 0 || size < 0 || (size_t)(off + size) > it->second.data.size()) { c.errors.Record(0x0501); return; }
     memcpy(it->second.data.data() + off, data, (size_t)size);
+    // Game 26.x update buffer per-frame qua writeToBuffer → glNamedBufferSubData
+    // (javap GlCommandEncoder/DirectStateAccess). Thiếu sync GPU dưới đây từng
+    // làm GPU stale (0) → đỉnh rác/clip toàn bộ → đen màn hình mà không error nào.
+    if (it->second.gpu && (size_t)(off + size) <= it->second.gpu->length()) {
+        memcpy((uint8_t*)it->second.gpu->contents() + off, data, (size_t)size);
+        it->second.gpu->didModifyRange((size_t)off, (size_t)size);
+    }
 }
 void glGetBufferSubData(GLenum target, GLintptr off, GLsizeiptr size, void* data) {
     Context& c = Context::Current();
@@ -163,6 +170,11 @@ void glCopyBufferSubData(GLenum rt, GLenum wt, GLintptr ro, GLintptr wo, GLsizei
     // Metal: blit copyFromBuffer — ở Null backend copy CPU
     if ((size_t)(ro + size) > itR->second.data.size() || (size_t)(wo + size) > itW->second.data.size()) { c.errors.Record(0x0501); return; }
     memmove(itW->second.data.data() + wo, itR->second.data.data() + ro, (size_t)size);
+    if (itW->second.gpu && (size_t)(wo + size) <= itW->second.gpu->length()) {
+        memmove((uint8_t*)itW->second.gpu->contents() + wo, itR->second.data.data() + ro,
+                (size_t)size);
+        itW->second.gpu->didModifyRange((size_t)wo, (size_t)size);
+    }
 }
 void glCopyNamedBufferSubData(GLuint r, GLuint w, GLintptr ro, GLintptr wo, GLsizeiptr size) {
     Context& c = Context::Current();
@@ -170,6 +182,11 @@ void glCopyNamedBufferSubData(GLuint r, GLuint w, GLintptr ro, GLintptr wo, GLsi
     if (itR == c.buffers.end() || itW == c.buffers.end()) { c.errors.Record(0x0502); return; }
     if ((size_t)(ro + size) > itR->second.data.size() || (size_t)(wo + size) > itW->second.data.size()) { c.errors.Record(0x0501); return; }
     memmove(itW->second.data.data() + wo, itR->second.data.data() + ro, (size_t)size);
+    if (itW->second.gpu && (size_t)(wo + size) <= itW->second.gpu->length()) {
+        memmove((uint8_t*)itW->second.gpu->contents() + wo, itR->second.data.data() + ro,
+                (size_t)size);
+        itW->second.gpu->didModifyRange((size_t)wo, (size_t)size);
+    }
 }
 void* glMapBuffer(GLenum target, GLenum access) {
     Context& c = Context::Current();
@@ -193,7 +210,13 @@ void* glMapNamedBuffer(GLuint b, GLenum access) {
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return nullptr; }
-    (void)access; it->second.mapped = true;
+    (void)access;
+    it->second.mapped = true;
+    it->second.mapOffset = 0;
+    it->second.mapLength = it->second.data.size();
+    // Trả con trỏ GPU khi có (như bản bound) để write thấy ngay trên GPU;
+    // Unmap sẽ didModify + chép ngược shadow.
+    if (it->second.gpu) return it->second.gpu->contents();
     return it->second.data.data();
 }
 void* glMapNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len, GLbitfield access) {
@@ -203,6 +226,10 @@ void* glMapNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len, GLbitfield a
     (void)access;
     if (off < 0 || len < 0 || (size_t)(off + len) > it->second.data.size()) { c.errors.Record(0x0501); return nullptr; }
     it->second.mapped = true;
+    it->second.mapOffset = (size_t)off;
+    it->second.mapLength = (size_t)len;
+    it->second.mapAccess = access;
+    if (it->second.gpu) return (uint8_t*)it->second.gpu->contents() + off;
     return it->second.data.data() + off;
 }
 GLboolean glUnmapBuffer(GLenum target) {
@@ -227,6 +254,16 @@ GLboolean glUnmapNamedBuffer(GLuint b) {
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return 0; }
     it->second.mapped = false;
+    // Mirror bản bound: didModify + chép ngược shadow (map trả con trỏ GPU).
+    if (it->second.gpu) {
+        it->second.gpu->didModifyRange(it->second.mapOffset, it->second.mapLength);
+        size_t end = std::min(it->second.mapOffset + it->second.mapLength, it->second.data.size());
+        end = std::min(end, it->second.gpu->length());
+        if (end > it->second.mapOffset && it->second.mapOffset < it->second.data.size())
+            memcpy(it->second.data.data() + it->second.mapOffset,
+                   (const uint8_t*)it->second.gpu->contents() + it->second.mapOffset,
+                   end - it->second.mapOffset);
+    }
     return 1;
 }
 void glFlushMappedBufferRange(GLenum target, GLintptr off, GLsizeiptr len) {
@@ -274,6 +311,10 @@ void glClearNamedBufferData(GLuint b, GLenum inf, GLenum f, GLenum ty, const voi
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     uint8_t fill = d ? *(const uint8_t*)d : 0;
     std::fill(it->second.data.begin(), it->second.data.end(), fill);
+    if (it->second.gpu) {
+        memset(it->second.gpu->contents(), fill, std::min(it->second.data.size(), it->second.gpu->length()));
+        it->second.gpu->didModifyRange(0, std::min(it->second.data.size(), it->second.gpu->length()));
+    }
 }
 void glClearNamedBufferSubData(GLuint b, GLenum inf, GLintptr off, GLsizeiptr size, GLenum f, GLenum ty, const void* d) {
     (void)inf; (void)f; (void)ty;
@@ -283,6 +324,10 @@ void glClearNamedBufferSubData(GLuint b, GLenum inf, GLintptr off, GLsizeiptr si
     uint8_t fill = d ? *(const uint8_t*)d : 0;
     if (off < 0 || size < 0 || (size_t)(off + size) > it->second.data.size()) { c.errors.Record(0x0501); return; }
     std::fill(it->second.data.begin() + off, it->second.data.begin() + off + size, fill);
+    if (it->second.gpu && (size_t)(off + size) <= it->second.gpu->length()) {
+        memset((uint8_t*)it->second.gpu->contents() + off, fill, (size_t)size);
+        it->second.gpu->didModifyRange((size_t)off, (size_t)size);
+    }
 }
 void glInvalidateBufferData(GLuint b) {
     Context& c = Context::Current();

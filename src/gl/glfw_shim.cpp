@@ -109,7 +109,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             }
             ViewportState vp = st.renderer->context().state.GetViewport(0);
             fprintf(stderr,
-                    "[TGLMT] build=b3-blackdiag2 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
+                    "[TGLMT] build=b3-blackdiag3 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
                     "misc=%llu target=%ux%u vp=%.0fx%.0f@%.0f,%.0f present=%d\n",
                     (unsigned long long)nSwap, dt, (unsigned long long)(a.drawsAttempted - pAtt),

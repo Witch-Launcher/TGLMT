@@ -324,9 +324,31 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
     Context& c = Context::Current();
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
-    (void)l;(void)x;(void)y;
+    if (!p) { c.errors.Record(0x0501); return; }
+    auto& tx = it->second;
+    // Mirror bản bound (glTexSubImage2D): tôn trọng x/y + unpack pitch, sync GPU.
+    // Game 26.x upload texture qua DSA khi direct_state_access bật.
     size_t bpp = Bpp(f, ty);
-    if (p && it->second.pixels.size() >= (size_t)w*h*bpp) memcpy(it->second.pixels.data(), p, (size_t)w*h*bpp);
+    if (x < 0 || y < 0 || w < 0 || h < 0 || (size_t)(x + w) > tx.w || (size_t)(y + h) > tx.h) {
+        c.errors.Record(0x0501);
+        return;
+    }
+    GLint align = c.state.PixelStore().unpackAlignment;
+    size_t rowLen = ((size_t)w * bpp + (size_t)align - 1) / (size_t)align * (size_t)align;
+    if (tx.pixels.size() < (size_t)tx.w * tx.h * bpp) tx.pixels.resize((size_t)tx.w * tx.h * bpp, 0);
+    const uint8_t* src = (const uint8_t*)p;
+    for (GLsizei r = 0; r < h; ++r) {
+        uint8_t* dst = tx.pixels.data() + ((size_t)(y + r) * tx.w + (size_t)x) * bpp;
+        memcpy(dst, src + r * rowLen, (size_t)w * bpp);
+    }
+    if (tx.gpu && bpp == 4) {
+        std::vector<uint8_t> tight((size_t)w * h * 4);
+        for (GLsizei r = 0; r < h; ++r)
+            memcpy(tight.data() + (size_t)r * w * 4, src + r * rowLen, (size_t)w * 4);
+        c.device->updateTexture(tx.gpu.get(), (uint32_t)x, (uint32_t)y, (uint32_t)w,
+                                (uint32_t)h, tight.data(), (size_t)w * 4);
+    }
+    (void)l;
 }
 void glTextureSubImage3D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLenum j, const void* k) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; }
 } // namespace tglmt::gl
