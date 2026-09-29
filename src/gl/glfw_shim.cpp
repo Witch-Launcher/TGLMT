@@ -5,6 +5,7 @@
 #include "tglmt/gl46.h"
 
 #include <cstring>
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -83,15 +84,22 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
     if (st.renderer->hasRealGPU())
         st.renderer->context().device->commitAndWait();
     bool ok = st.renderer->EndFrame(metalLayer);
-    // Chẩn đoán đen màn hình trên máy thật: log counters throttled (~10s/lần).
+    // Chẩn đoán đen màn hình trên máy thật: log counters throttled.
     // drawsEnc < drawsAtt nhiều => pipeline/target rớt ở AppleDrawGL;
     // drawsEnc ~= drawsAtt mà vẫn đen => dữ liệu (vertex/uniform/texture).
+    // Treo (không thêm dòng) vs chậm (dt lớn) phân biệt bằng timestamp từng swap
+    // đầu + viewport (viewport rỗng => không fragment nào qua).
     // stderr được launcher ghi vào latestlog (dòng [gc] là bằng chứng).
-    // Log cả swap đầu để mọi latestlog đều lộ build-tag (chống nhầm bản test).
     {
+        using clock = std::chrono::steady_clock;
         static uint64_t nSwap = 0;
+        static uint64_t pAtt = 0, pEnc = 0;
+        static clock::time_point pT = clock::now();
         ++nSwap;
-        if (nSwap == 1 || nSwap % 600 == 0) {
+        bool first12 = nSwap <= 12;
+        if (first12 || nSwap % 600 == 0) {
+            auto now = clock::now();
+            long dt = (long)std::chrono::duration_cast<std::chrono::milliseconds>(now - pT).count();
             auto& a = st.renderer->context().appleStats;
             uint32_t tw = 0, th = 0;
             auto tgt = st.renderer->context().device->defaultRenderTarget();
@@ -99,15 +107,21 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                 tw = tgt->width();
                 th = tgt->height();
             }
+            ViewportState vp = st.renderer->context().state.GetViewport(0);
             fprintf(stderr,
-                    "[TGLMT] build=b3-blackdiag1 frame=%llu att=%llu enc=%llu progs=%zu "
-                    "noProg=%llu noTgt=%llu noPipe=%llu misc=%llu target=%ux%u present=%d\n",
-                    (unsigned long long)nSwap, (unsigned long long)a.drawsAttempted,
-                    (unsigned long long)a.drawsEncoded, a.progEncoded.size(),
-                    (unsigned long long)a.noProgram, (unsigned long long)a.noTarget,
-                    (unsigned long long)a.noPipeline, (unsigned long long)a.miscFail, tw,
-                    th, (int)ok);
+                    "[TGLMT] build=b3-blackdiag2 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
+                    "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
+                    "misc=%llu target=%ux%u vp=%.0fx%.0f@%.0f,%.0f present=%d\n",
+                    (unsigned long long)nSwap, dt, (unsigned long long)(a.drawsAttempted - pAtt),
+                    (unsigned long long)(a.drawsEncoded - pEnc),
+                    (unsigned long long)a.drawsAttempted, (unsigned long long)a.drawsEncoded,
+                    a.progEncoded.size(), (unsigned long long)a.noProgram,
+                    (unsigned long long)a.noTarget, (unsigned long long)a.noPipeline,
+                    (unsigned long long)a.miscFail, tw, th, vp.x, vp.y, vp.w, vp.h, (int)ok);
             fflush(stderr);
+            pAtt = a.drawsAttempted;
+            pEnc = a.drawsEncoded;
+            pT = now;
         }
     }
     // Frame kế tiếp: BeginFrame để target/load sẵn sàng (giữ quy ước Begin→gl→End).

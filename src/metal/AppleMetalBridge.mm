@@ -8,6 +8,7 @@
 #import <QuartzCore/CAMetalLayer.h> // presentTarget (cả iOS lẫn macOS đều có QuartzCore)
 #import <TargetConditionals.h> // phân biệt iOS/macOS: synchronizeResource chỉ tồn tại trên macOS
 #include "tglmt/MetalInterface.h"
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -477,7 +478,17 @@ public:
     std::shared_ptr<ILibrary> compileLibrary(const std::string& msl, std::string& err) override {
         NSError* e = nil;
         NSString* src = [NSString stringWithUTF8String:msl.c_str()];
+        auto t0 = std::chrono::steady_clock::now();
         id<MTLLibrary> lib = [dev_ newLibraryWithSource:src options:nil error:&e];
+        long ms =
+            (long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+        // MSL vanilla lớn (terrain/entity) compile hàng giây trên A11 — log để
+        // biết render thread có đang kẹt ở đây (đen màn hình + ít swap).
+        static int nLib = 0;
+        if (log_ && (++nLib <= 80 || ms > 500))
+            log_("[TGLMT] mslLib #" + std::to_string(nLib) + " " + std::to_string(ms) +
+                 "ms bytes=" + std::to_string(msl.size()) + (lib ? "" : " NIL"));
         if (!lib) {
             err = e ? [[e localizedDescription] UTF8String] : "unknown metal compile error";
             return nullptr;
@@ -971,7 +982,19 @@ public:
             d.colorAttachments[0].alphaBlendOperation = ToMTLBlendOp(b.alphaOp);
         }
         NSError* e = nil;
+        // Chẩn đoán đen màn hình: PSO compile đồng bộ trên render thread, A11 có
+        // thể mất hàng giây/shader đầu. Log mỗi lần miss để latestlog thấy được
+        // game có đang kẹt ở compile hay không.
+        auto t0 = std::chrono::steady_clock::now();
         id<MTLRenderPipelineState> pso = [dev_ newRenderPipelineStateWithDescriptor:d error:&e];
+        long ms =
+            (long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+        static int nCustomPSO = 0;
+        if (log_ && (++nCustomPSO <= 60 || ms > 200))
+            log_("[TGLMT] customPSO #" + std::to_string(nCustomPSO) + " " + vsFn + "+" +
+                 fsFn + " attrs=" + std::to_string(nAttribs) + " " + std::to_string(ms) +
+                 "ms" + (pso ? "" : " NIL"));
         if (!pso) {
             if (log_ && e) log_("custom pipeline error: " + std::string([[e localizedDescription] UTF8String]));
             return nullptr;
