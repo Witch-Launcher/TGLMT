@@ -85,10 +85,27 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
         key = ((uint64_t)tex.id << 32) | 0x54455800u; // 'TEX\0'
         key ^= ((uint64_t)minF << 48) ^ ((uint64_t)magF << 52);
     }
+    // Texture 1 level + minfilter mipmap (logo/widgets/sprite/blur-src UI):
+    // tắt lọc mip để A11 không fetch LOD>0 (fault SubmissionsIgnored/đen).
+    // Sampler cache phải phân biệt (cùng texture, khác noMip).
+    bool singleLevel = !tex.gpu || tex.gpu->levelCount() <= 1;
+    bool mipMin = (minF == 0x2700 || minF == 0x2701 || minF == 0x2702 || minF == 0x2703);
+    bool noMip = singleLevel;
+    if (noMip) key ^= (uint64_t)1 << 62;
+    if (noMip && mipMin) {
+        static std::set<uint32_t> loggedMip;
+        if (loggedMip.size() < 16 && loggedMip.insert(tex.id).second) {
+            char b[128];
+            snprintf(b, sizeof(b), "AppleDrawGL: mip->base tex#%u min=0x%x (1 level)",
+                     tex.id, minF);
+            c.LogDebug(0, 0, 0, 0, b);
+        }
+    }
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
     metal::SamplerDesc d;
     d.minFilter = minF; d.magFilter = magF; d.sWrap = sW; d.tWrap = tW; d.maxAniso = aniso;
+    d.noMip = noMip;
     auto s = c.device->makeSampler(d);
     if (s) cache[key] = s;
     return s;

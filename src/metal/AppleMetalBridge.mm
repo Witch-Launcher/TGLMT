@@ -140,6 +140,9 @@ public:
     uint32_t width() const override { return w_; }
     uint32_t height() const override { return h_; }
     PixelFormat pixelFormat() const override { return f_; }
+    uint32_t levelCount() const override {
+        @try { return (uint32_t)[tex_ mipmapLevelCount]; } @catch (NSException*) { return 1; }
+    }
     id<MTLTexture> get() const { return tex_; }
 private:
     id<MTLTexture> tex_;
@@ -1114,8 +1117,9 @@ public:
         d.magFilter = ToMTLFilter(sd.magFilter);
         d.sAddressMode = ToMTLWrap(sd.sWrap);
         d.tAddressMode = ToMTLWrap(sd.tWrap);
-        // Mipmap default linear (đúng GL khi generateMipmap); aniso theo ARB_anisotropy.
-        d.mipFilter = MTLSamplerMipFilterLinear;
+        // Mipmap linear khi đủ levels; texture 1 level thì tắt lọc mip để
+        // A11 không fetch LOD>0 (fault/đen với minfilter mipmap).
+        d.mipFilter = sd.noMip ? MTLSamplerMipFilterNotMipmapped : MTLSamplerMipFilterLinear;
         d.maxAnisotropy = (NSUInteger)(sd.maxAniso >= 1.0f ? sd.maxAniso : 1);
         d.lodMinClamp = 0.0f; d.lodMaxClamp = 1000.0f;
         id<MTLSamplerState> s = [dev_ newSamplerStateWithDescriptor:d];

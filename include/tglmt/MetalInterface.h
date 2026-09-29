@@ -35,6 +35,9 @@ struct SamplerDesc {
     uint32_t sWrap = 0x2901;     // GL_REPEAT
     uint32_t tWrap = 0x2901;     // GL_REPEAT
     float maxAniso = 1.0f;
+    // noMip=true: texture chỉ có 1 level → tắt lọc mip (NotMipmapped) để
+    // A11 không fetch LOD>0 (fault/đen). Đúng cho mọi texture UI 1-level.
+    bool noMip = false;
 };
 struct ScissorRect {
     uint32_t x = 0;
@@ -103,6 +106,8 @@ public:
     virtual uint32_t width() const = 0;
     virtual uint32_t height() const = 0;
     virtual PixelFormat pixelFormat() const = 0;
+    // Số mip level trên GPU (quyết định lọc mip an toàn; default 1).
+    virtual uint32_t levelCount() const { return 1; }
 };
 
 using LogFn = std::function<void(const std::string&)>;
