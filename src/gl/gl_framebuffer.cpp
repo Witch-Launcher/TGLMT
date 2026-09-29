@@ -133,6 +133,24 @@ void glNamedFramebufferReadBuffer(GLuint f, GLenum b) { (void)f; glReadBuffer(b)
 // cả shadow lẫn GPU, không flip ở upload/copy; chỉ glReadPixels flip cho đúng
 // spec §18.2) nên GPU copy thô là đúng hướng — CPU fallback cũng copy thô để
 // nhất quán với đường FBO→FBO (`ws->second.pixels = rs->second.pixels`).
+// Làm tươi shadow CPU từ GPU trước khi CPU fallback đọc pixels.
+// Draws Apple đi thẳng vào texture GPU (wrapAsTarget) mà không cập nhật
+// tx.pixels → shadow cũ toàn 0 → fallback CPU copy đen (blur downsample
+// scaled/LINEAR, menu composite...). Readback thô (không flip) đúng quy ước.
+static void RefreshShadowFromGPU(Context& c, TextureObject& tx) {
+    if (!tx.gpu || !tx.w || !tx.h) return;
+    if (c.device->isNull()) return;
+    // Chỉ sync khi shadow đã có đủ chỗ RGBA8 4B (R8/RG8 font không phải đích blit).
+    if (tx.pixels.size() < (size_t)tx.w * tx.h * 4) return;
+    if (!(tx.internalFormat == 0x8058 || tx.internalFormat == 0x8C43 ||
+          tx.internalFormat == 0))
+        return;
+    auto wrapped = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
+    if (!wrapped) return;
+    std::vector<uint8_t> full((size_t)tx.w * tx.h * 4, 0);
+    if (wrapped->readback(full.data(), (size_t)tx.w * 4))
+        tx.pixels = std::move(full);
+}
 static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d1, GLint d2, GLint d3,
         GLenum filter, GLbitfield mask) {
@@ -180,7 +198,10 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         }
         // CPU fallback: nearest-scale shadow nguồn qua texture tạm (định dạng
         // của default target để blitToTarget chấp nhận) rồi GPU copy vào màn hình.
+        // Shadow có thể cũ (draws đi GPU-only) → làm tươi từ GPU trước.
         auto& tx = tit->second;
+        c.device->commitAndWait();
+        RefreshShadowFromGPU(c, tx);
         if (tx.pixels.empty() || !tx.w || !tx.h) {
             c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: blit ra màn hình thiếu shadow, bỏ qua");
             return;
@@ -291,17 +312,22 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
         if (rs != c.textures.end() && ws != c.textures.end() && rs->second.gpu && ws->second.gpu) {
             if (!scaled && f == 0x2600 /*NEAREST*/) {
                 // cùng size + NEAREST → blitCopy GPU thật (A11 TBDR copy, không resolve scale)
+                // Fast path: pure GPU, không readback (giữ 60fps; sampling dùng GPU mới).
                 uint32_t sx = s0 < 0 ? 0 : (uint32_t)s0;
                 uint32_t sy = s1 < 0 ? 0 : (uint32_t)s1;
                 if (c.device->blitCopy(rs->second.gpu.get(), ws->second.gpu.get(),
                                        sx, sy, (uint32_t)sw, (uint32_t)sh, (uint32_t)d0, (uint32_t)d1)) {
-                    // sync shadow CPU (đúng GL: GetTexImage/ReadPixels sau blit thấy mới)
-                    ws->second.pixels = rs->second.pixels;
                     return;
                 }
                 c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: GPU blit fail, fallback CPU shadow");
+                // Rơi xuống CPU: cần shadow tươi.
+                c.device->commitAndWait();
+                RefreshShadowFromGPU(c, rs->second);
             } else {
                 c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: scaled/LINEAR fallback CPU shadow (M5c sampled-quad)");
+                // Downsample blur/post: shadow cũ toàn 0 → đen. Làm tươi từ GPU.
+                c.device->commitAndWait();
+                RefreshShadowFromGPU(c, rs->second);
             }
         }
         // CPU shadow copy (đúng khi cùng format RGBA8; khác size thì nearest đơn giản)

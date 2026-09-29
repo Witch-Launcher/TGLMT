@@ -2,8 +2,10 @@
 // Spec §8 (Textures). PixelStore alignment áp dụng khi upload (spec Table 8.x).
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 using namespace tglmt;
 
 // internalFormat GL (giá trị đã đối chiếu gl46_types.h) → PixelFormat Metal.
@@ -55,6 +57,7 @@ static size_t UnpackRowLen(Context& c, size_t w, size_t bpp) {
 // Sync 1 vùng pixels lên GPU: RGBA/RED/RG/UBYTE raw (tight), RGB/UBYTE expand
 // alpha 255. srcRows trỏ vùng (xoff,yoff,w,h) với pitch srcRowLen. Trả true
 // nếu đã sync. RED/RG raw đúng cho R8/RG8 GPU (font RED8 của game).
+// BGRA/UBYTE (widgets/gui trên một số path Blaze3D) → swizzle R<->B sang RGBA.
 static bool SyncRegionToGPU(Context& c, TextureObject& tx, GLint xoff, GLint yoff, GLsizei w,
                             GLsizei h, const uint8_t* srcRows, size_t srcRowLen, GLenum format,
                             GLenum type) {
@@ -70,6 +73,21 @@ static bool SyncRegionToGPU(Context& c, TextureObject& tx, GLint xoff, GLint yof
                                        (uint32_t)w, (uint32_t)h, tight.data(),
                                        (size_t)w * bpp);
     }
+    // BGRA/UBYTE (0x80E1): GPU TGLMT là RGBA8 → đảo R/B. Trước đây rơi vào
+    // "giữ shadow" (GPU đen) trong khi shadow có data → quad textured (widgets
+    // nút menu) sample đen/alpha 0 → discard → nút chỉ còn chữ.
+    if (type == 0x1401 && format == 0x80E1) {
+        std::vector<uint8_t> rgba((size_t)w * h * 4);
+        for (GLsizei r = 0; r < h; ++r)
+            for (GLsizei x = 0; x < w; ++x) {
+                const uint8_t* s = srcRows + r * srcRowLen + (size_t)x * 4;
+                uint8_t* d = rgba.data() + ((size_t)r * w + x) * 4;
+                d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+            }
+        return c.device->updateTexture(tx.gpu.get(), (uint32_t)xoff, (uint32_t)yoff,
+                                       (uint32_t)w, (uint32_t)h, rgba.data(),
+                                       (size_t)w * 4);
+    }
     if (format == 0x1907 && type == 0x1401) {
         std::vector<uint8_t> rgba((size_t)w * h * 4);
         for (GLsizei r = 0; r < h; ++r)
@@ -81,6 +99,28 @@ static bool SyncRegionToGPU(Context& c, TextureObject& tx, GLint xoff, GLint yof
             }
         return c.device->updateTexture(tx.gpu.get(), (uint32_t)xoff, (uint32_t)yoff,
                                        (uint32_t)w, (uint32_t)h, rgba.data(), (size_t)w * 4);
+    }
+    // Fallback cuối cho RGBA/BGRA 4B với type UINT đóng gói (REV,...):
+    // upload raw còn hơn đen (nút xám không lệch màu nhiều; alpha sai vẫn hơn
+    // discard toàn bộ). Ghi log 1 lần để chẩn đoán.
+    if ((format == 0x1908 || format == 0x80E1) &&
+        (type == 0x8367 || type == 0x8368 || type == 0x1405 || type == 0x1404)) {
+        static bool loggedRaw = false;
+        if (!loggedRaw) {
+            loggedRaw = true;
+            c.LogDebug(0, 0, 0, 0, "SyncRegionToGPU: RGBA/BGRA UINT raw upload (màu có thể lệch)");
+        }
+        std::vector<uint8_t> tight((size_t)w * h * 4);
+        for (GLsizei r = 0; r < h; ++r)
+            memcpy(tight.data() + (size_t)r * w * 4, srcRows + r * srcRowLen,
+                   (size_t)w * 4);
+        // BGRA + UINT: đảo R/B cho đúng RGBA GPU.
+        if (format == 0x80E1) {
+            for (size_t i = 0; i < (size_t)w * h; ++i) std::swap(tight[i * 4], tight[i * 4 + 2]);
+        }
+        return c.device->updateTexture(tx.gpu.get(), (uint32_t)xoff, (uint32_t)yoff,
+                                       (uint32_t)w, (uint32_t)h, tight.data(),
+                                       (size_t)w * 4);
     }
     return false;
 }
@@ -228,7 +268,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
     // Upload base level lên GPU (bug cũ: tạo texture rỗng → sampling đen).
     // Vanilla atlas RGBA/UBYTE tight; JPG panorama là RGB/UBYTE → expand alpha 255.
-    // Font RED8 (LUMINANCE) → R8 raw. Mọi format khác giữ shadow + log.
+    // Font RED8 (LUMINANCE) → R8 raw. BGRA/UBYTE (widgets/gui) → swizzle R<->B.
+    // Mọi format khác giữ shadow + log.
     if (tx.gpu && pixels && w > 0 && h > 0) {
         if ((format == 0x1908 || format == 0x1903 || format == 0x8227) && type == 0x1401) {
             // pixels đã unpack vào tx.pixels tight → upload trực tiếp
@@ -236,6 +277,17 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
             if (tx.pixels.size() >= (size_t)w * h * bpp)
                 c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
                                         tx.pixels.data(), (size_t)w * bpp);
+        } else if (format == 0x80E1 && type == 0x1401) {
+            // BGRA → RGBA (đảo R/B). tx.pixels đang giữ BGRA raw; dựng RGBA tight.
+            std::vector<uint8_t> rgba((size_t)w * h * 4);
+            for (GLsizei r = 0; r < h; ++r)
+                for (GLsizei x = 0; x < w; ++x) {
+                    const uint8_t* s = tx.pixels.data() + ((size_t)r * w + x) * 4;
+                    uint8_t* d = rgba.data() + ((size_t)r * w + x) * 4;
+                    d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+                }
+            c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
+                                    rgba.data(), (size_t)w * 4);
         } else if (format == 0x1907 && type == 0x1401) {
             // RGB → RGBA (alpha 255), tôn trọng unpack pitch của source
             size_t rowLen = UnpackRowLen(c, (size_t)w, 3);
@@ -252,6 +304,18 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
                 }
             c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
                                     rgba.data(), (size_t)w * 4);
+        } else if ((format == 0x1908 || format == 0x80E1) &&
+                   (type == 0x8367 || type == 0x8368 || type == 0x1405 || type == 0x1404)) {
+            // RGBA/BGRA UINT đóng gói: upload raw (BGRA đảo R/B). Còn hơn đen.
+            std::vector<uint8_t> raw((size_t)w * h * 4);
+            for (GLsizei r = 0; r < h; ++r)
+                memcpy(raw.data() + (size_t)r * w * 4,
+                       tx.pixels.data() + (size_t)r * w * 4, (size_t)w * 4);
+            if (format == 0x80E1)
+                for (size_t i = 0; i < (size_t)w * h; ++i) std::swap(raw[i * 4], raw[i * 4 + 2]);
+            c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
+                                    raw.data(), (size_t)w * 4);
+            c.LogDebug(0, 0, 0, 0, "glTexImage2D: RGBA/BGRA UINT raw upload");
         } else {
             c.LogDebug(0, 0, 0, 0, "glTexImage2D: format/type chưa upload GPU (giữ shadow)");
         }
@@ -404,26 +468,206 @@ void glPixelStorei(GLenum pname, GLint param) {
 void glCopyTexImage1D(GLenum a, GLint b, GLenum d, GLint e, GLint f, GLsizei g, GLint h) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h; }
 void glCopyTexImage2D(GLenum a, GLint b, GLenum d, GLint e, GLint f, GLsizei g, GLsizei h, GLint i) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
 void glCopyTexSubImage1D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLsizei f) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f; }
-void glCopyTexSubImage2D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLint f, GLsizei g, GLsizei h) {
+// Copy framebuffer (READ) → texture (blur/post-chain, menu loading đen nếu stub).
+// Quy ước thô như blit (không flip; chỉ ReadPixels flip): copy raw GPU→GPU khi
+// cùng format, rồi sync shadow từ GPU để GetTexImage/ReadPixels sau đó thấy mới.
+static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
+                            GLint xoff, GLint yoff, GLint x, GLint y,
+                            GLsizei w, GLsizei h) {
+    if (level != 0) {
+        c.LogDebug(0, 0, 0, 0, "glCopyTexSubImage: level>0 bỏ qua (GPU base-level)");
+        return;
+    }
+    if (w <= 0 || h <= 0) { c.errors.Record(0x0501); return; }
+    if (xoff < 0 || yoff < 0 || x < 0 || y < 0 ||
+        (size_t)(xoff + w) > dst.w || (size_t)(yoff + h) > dst.h) {
+        c.errors.Record(0x0501); return;
+    }
+    GLuint readFbo = c.state.BoundReadFBO();
+    if (!c.device || c.device->isNull()) {
+        // Null backend: copy shadow nếu nguồn là FBO texture.
+        if (readFbo != 0) {
+            auto fit = c.fbos.find(readFbo);
+            if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
+            auto cit = fit->second.colorTex.find(0);
+            if (cit == fit->second.colorTex.end()) return;
+            auto sit = c.textures.find(cit->second);
+            if (sit == c.textures.end() || sit->second.pixels.empty()) return;
+            auto& src = sit->second;
+            size_t bpp = 4;
+            if (dst.pixels.size() < (size_t)dst.w * dst.h * bpp)
+                dst.pixels.resize((size_t)dst.w * dst.h * bpp, 0);
+            if (src.pixels.size() < (size_t)src.w * src.h * bpp) return;
+            for (GLsizei r = 0; r < h; ++r) {
+                if ((size_t)(y + r) >= src.h || (size_t)(yoff + r) >= dst.h) break;
+                memcpy(dst.pixels.data() + ((size_t)(yoff + r) * dst.w + xoff) * bpp,
+                       src.pixels.data() + ((size_t)(y + r) * src.w + x) * bpp,
+                       (size_t)w * bpp);
+            }
+        }
+        return;
+    }
+    if (!dst.gpu) { c.errors.Record(0x0502); return; }
+    c.device->commitAndWait(); // xả draws NoWait trước khi copy (không stale TBDR)
+    bool gpuOk = false;
+    if (readFbo == 0) {
+        auto def = c.device->defaultRenderTarget();
+        if (!def) { c.errors.Record(0x0502); return; }
+        if ((uint32_t)(x + w) > def->width() || (uint32_t)(y + h) > def->height()) {
+            c.errors.Record(0x0501); return;
+        }
+        if (def->pixelFormat() == dst.gpu->pixelFormat()) {
+            gpuOk = c.device->blitFromTarget(def.get(), dst.gpu.get(),
+                                             (uint32_t)x, (uint32_t)y,
+                                             (uint32_t)w, (uint32_t)h,
+                                             (uint32_t)xoff, (uint32_t)yoff);
+        }
+        if (!gpuOk) {
+            // Khác format (default RGBA8 vs dest sRGB/R8...) hoặc blit fail:
+            // readback màn hình rồi update vùng (đúng pixels, hơi chậm nhưng hiếm).
+            std::vector<uint8_t> scr((size_t)def->width() * def->height() * 4, 0);
+            if (def->readback(scr.data(), (size_t)def->width() * 4)) {
+                std::vector<uint8_t> region((size_t)w * h * 4);
+                for (GLsizei r = 0; r < h; ++r)
+                    memcpy(region.data() + (size_t)r * w * 4,
+                           scr.data() + ((size_t)(y + r) * def->width() + x) * 4,
+                           (size_t)w * 4);
+                // Dest sRGB/R8: upload raw 4B (sai nhẹ màu còn hơn đen); R8/RG8
+                // chỉ lấy kênh R (blur/menu không dùng R8 làm đích copy).
+                if (dst.gpu->pixelFormat() == metal::PixelFormat::R8Unorm) {
+                    std::vector<uint8_t> r1((size_t)w * h);
+                    for (size_t i = 0; i < (size_t)w * h; ++i) r1[i] = region[i * 4];
+                    gpuOk = c.device->updateTexture(dst.gpu.get(), (uint32_t)xoff,
+                                                    (uint32_t)yoff, (uint32_t)w,
+                                                    (uint32_t)h, r1.data(), (size_t)w);
+                } else {
+                    gpuOk = c.device->updateTexture(dst.gpu.get(), (uint32_t)xoff,
+                                                    (uint32_t)yoff, (uint32_t)w,
+                                                    (uint32_t)h, region.data(),
+                                                    (size_t)w * 4);
+                }
+            }
+            if (!gpuOk)
+                c.LogDebug(0, 0, 0, 0, "glCopyTexSubImage: default→tex fallback fail");
+        }
+    } else {
+        auto fit = c.fbos.find(readFbo);
+        if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
+        auto cit = fit->second.colorTex.find(0);
+        if (cit == fit->second.colorTex.end()) return;
+        auto sit = c.textures.find(cit->second);
+        if (sit == c.textures.end() || !sit->second.gpu) return;
+        auto& src = sit->second;
+        if ((size_t)(x + w) > src.w || (size_t)(y + h) > src.h) {
+            c.errors.Record(0x0501); return;
+        }
+        if (src.gpu->pixelFormat() == dst.gpu->pixelFormat()) {
+            gpuOk = c.device->blitCopy(src.gpu.get(), dst.gpu.get(),
+                                       (uint32_t)x, (uint32_t)y,
+                                       (uint32_t)w, (uint32_t)h,
+                                       (uint32_t)xoff, (uint32_t)yoff);
+        }
+        if (!gpuOk) {
+            c.LogDebug(0, 0, 0, 0, "glCopyTexSubImage: FBO→tex khác format/fail, CPU shadow");
+            size_t bpp = 4;
+            if (src.pixels.size() >= (size_t)src.w * src.h * bpp &&
+                dst.pixels.size() >= (size_t)dst.w * dst.h * bpp) {
+                for (GLsizei r = 0; r < h; ++r)
+                    memcpy(dst.pixels.data() + ((size_t)(yoff + r) * dst.w + xoff) * bpp,
+                           src.pixels.data() + ((size_t)(y + r) * src.w + x) * bpp,
+                           (size_t)w * bpp);
+                c.device->updateTexture(dst.gpu.get(), 0, 0, dst.w, dst.h,
+                                        dst.pixels.data(), (size_t)dst.w * bpp);
+                gpuOk = true;
+            }
+        }
+    }
+    // Không sync shadow đích từ GPU ở đây (giữ 60fps): sampling blur/post dùng
+    // GPU mới; GetTexImage lên blur texture hiếm. Shadow cũ không ảnh hưởng draw.
+    (void)gpuOk;
+}
+void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff,
+                         GLint x, GLint y, GLsizei w, GLsizei h) {
     Context& c = Context::Current();
-    // Chẩn đoán đen màn hình: post chain có thể copy default-FB → texture qua đây.
-    // Stub (dưới) mà game dùng đường này thì texture toàn 0 → đen.
     {
         static uint64_t n = 0;
         if (++c.appleStats.copyTex, ++n <= 5) {
-            fprintf(stderr, "[TGLMT] copyTexSub#%llu level=%d off=(%d,%d) size=%dx%d\n",
-                    (unsigned long long)n, b, c_, d, f, g);
+            fprintf(stderr, "[TGLMT] copyTexSub#%llu tgt=0x%x level=%d off=(%d,%d) src=(%d,%d) size=%dx%d readFbo=%u\n",
+                    (unsigned long long)n, target, level, xoff, yoff, x, y, w, h,
+                    c.state.BoundReadFBO());
             fflush(stderr);
         }
     }
-    (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;
+    TextureObject* tp = BoundTex(c, target);
+    if (!tp) return;
+    CopyFBToTexture(c, *tp, level, xoff, yoff, x, y, w, h);
 }
 void glCopyTexSubImage3D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLint f, GLint g, GLsizei h, GLsizei i) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
 void glCopyTextureSubImage1D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f; }
-void glCopyTextureSubImage2D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLint f, GLsizei g, GLsizei h) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h; }
+void glCopyTextureSubImage2D(GLuint tex, GLint level, GLint xoff, GLint yoff,
+                             GLint x, GLint y, GLsizei w, GLsizei h) {
+    Context& c = Context::Current();
+    ++c.appleStats.copyTex;
+    auto it = c.textures.find(tex);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    CopyFBToTexture(c, it->second, level, xoff, yoff, x, y, w, h);
+}
 void glCopyTextureSubImage3D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLint f, GLint g, GLsizei h, GLsizei i) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
-void glCopyImageSubData(GLuint a, GLenum b, GLint c_, GLint d, GLint e, GLint f, GLuint g, GLenum h, GLint i, GLint j, GLint k, GLint l, GLsizei m, GLsizei n, GLsizei o) {
-    (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;(void)m;(void)n;(void)o;
+void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
+                        GLint srcX, GLint srcY, GLint srcZ,
+                        GLuint dstName, GLenum dstTarget, GLint dstLevel,
+                        GLint dstX, GLint dstY, GLint dstZ,
+                        GLsizei w, GLsizei h, GLsizei d) {
+    Context& c = Context::Current();
+    (void)srcTarget; (void)dstTarget; (void)srcZ; (void)dstZ; (void)d;
+    if (srcLevel != 0 || dstLevel != 0) {
+        c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: level>0 bỏ qua (GPU base-level)");
+        return;
+    }
+    if (w <= 0 || h <= 0) { c.errors.Record(0x0501); return; }
+    auto sit = c.textures.find(srcName);
+    auto dit = c.textures.find(dstName);
+    if (sit == c.textures.end() || dit == c.textures.end()) {
+        c.errors.Record(0x0502); return;
+    }
+    auto& src = sit->second;
+    auto& dst = dit->second;
+    if (srcX < 0 || srcY < 0 || dstX < 0 || dstY < 0 ||
+        (size_t)(srcX + w) > src.w || (size_t)(srcY + h) > src.h ||
+        (size_t)(dstX + w) > dst.w || (size_t)(dstY + h) > dst.h) {
+        c.errors.Record(0x0501); return;
+    }
+    if (!c.device || c.device->isNull()) {
+        if (!src.pixels.empty() && !dst.pixels.empty() &&
+            src.pixels.size() >= (size_t)src.w * src.h * 4 &&
+            dst.pixels.size() >= (size_t)dst.w * dst.h * 4) {
+            for (GLsizei r = 0; r < h; ++r)
+                memcpy(dst.pixels.data() + ((size_t)(dstY + r) * dst.w + dstX) * 4,
+                       src.pixels.data() + ((size_t)(srcY + r) * src.w + srcX) * 4,
+                       (size_t)w * 4);
+        }
+        return;
+    }
+    if (!src.gpu || !dst.gpu) { c.errors.Record(0x0502); return; }
+    c.device->commitAndWait();
+    if (src.gpu->pixelFormat() == dst.gpu->pixelFormat() &&
+        c.device->blitCopy(src.gpu.get(), dst.gpu.get(),
+                           (uint32_t)srcX, (uint32_t)srcY,
+                           (uint32_t)w, (uint32_t)h,
+                           (uint32_t)dstX, (uint32_t)dstY)) {
+        // GPU-only, không readback (giữ fps; sampling dùng GPU).
+        return;
+    }
+    c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: khác format/fail, CPU shadow");
+    if (src.pixels.size() >= (size_t)src.w * src.h * 4 &&
+        dst.pixels.size() >= (size_t)dst.w * dst.h * 4) {
+        for (GLsizei r = 0; r < h; ++r)
+            memcpy(dst.pixels.data() + ((size_t)(dstY + r) * dst.w + dstX) * 4,
+                   src.pixels.data() + ((size_t)(srcY + r) * src.w + srcX) * 4,
+                   (size_t)w * 4);
+        c.device->updateTexture(dst.gpu.get(), 0, 0, dst.w, dst.h,
+                                dst.pixels.data(), (size_t)dst.w * 4);
+    }
 }
 void glCompressedTexImage1D(GLenum a, GLint b, GLenum d, GLsizei e, GLint f, GLsizei g, const void* h) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h; }
 void glCompressedTexImage2D(GLenum a, GLint b, GLenum d, GLsizei e, GLsizei f, GLint g, GLsizei h, const void* i) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
