@@ -5,6 +5,7 @@
 #include "tglmt/gl46.h"
 
 #include <cstring>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -82,6 +83,31 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
     if (st.renderer->hasRealGPU())
         st.renderer->context().device->commitAndWait();
     bool ok = st.renderer->EndFrame(metalLayer);
+    // Chẩn đoán đen màn hình trên máy thật: log counters throttled (~10s/lần).
+    // drawsEnc < drawsAtt nhiều => pipeline/target rớt ở AppleDrawGL;
+    // drawsEnc ~= drawsAtt mà vẫn đen => dữ liệu (vertex/uniform/texture).
+    // stderr được launcher ghi vào latestlog (dòng [gc] là bằng chứng).
+    {
+        static uint64_t nSwap = 0;
+        if (++nSwap % 600 == 0) {
+            auto& a = st.renderer->context().appleStats;
+            uint32_t tw = 0, th = 0;
+            auto tgt = st.renderer->context().device->defaultRenderTarget();
+            if (tgt) {
+                tw = tgt->width();
+                th = tgt->height();
+            }
+            fprintf(stderr,
+                    "[TGLMT] frame=%llu att=%llu enc=%llu progs=%zu noProg=%llu "
+                    "noTgt=%llu noPipe=%llu misc=%llu target=%ux%u present=%d\n",
+                    (unsigned long long)nSwap, (unsigned long long)a.drawsAttempted,
+                    (unsigned long long)a.drawsEncoded, a.progEncoded.size(),
+                    (unsigned long long)a.noProgram, (unsigned long long)a.noTarget,
+                    (unsigned long long)a.noPipeline, (unsigned long long)a.miscFail, tw,
+                    th, (int)ok);
+            fflush(stderr);
+        }
+    }
     // Frame kế tiếp: BeginFrame để target/load sẵn sàng (giữ quy ước Begin→gl→End).
     st.renderer->BeginFrame();
     Context::MakeCurrent(&st.renderer->context());
