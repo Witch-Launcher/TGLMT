@@ -531,6 +531,47 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             };
             fprintf(stderr, "[TGLMT] draw prog@%u vao@%u mode=0x%x count=%d indexed=%d inst=%d\n",
                     prog, vao, mode, count, (int)indexed, inst);
+            // Index/EBO/baseVertex/first: draw indexed sai ở đây là đen toàn bộ
+            // mà không error nào (indices rác → degenerate).
+            {
+                GLint bv = baseVertex, fst = first;
+                GLuint ebo = eboId;
+                fprintf(stderr, "[TGLMT]   idx baseVertex=%d first=%d ebo=%u idxOff=%zu type=0x%x\n",
+                        bv, fst, ebo, indexByteOff, indexType);
+                if (indexed && (indexType == 0x1403 || indexType == 0x1405)) {
+                    size_t elem = (indexType == 0x1403) ? 2 : 4;
+                    const uint8_t* srcBytes = nullptr;
+                    size_t avail = 0;
+                    auto bit = c.buffers.find(ebo);
+                    if (bit != c.buffers.end()) {
+                        if (bit->second.gpu &&
+                            indexByteOff < bit->second.gpu->length()) {
+                            srcBytes = (const uint8_t*)bit->second.gpu->contents() + indexByteOff;
+                            avail = bit->second.gpu->length() - indexByteOff;
+                        } else if (indexByteOff < bit->second.data.size()) {
+                            srcBytes = bit->second.data.data() + indexByteOff;
+                            avail = bit->second.data.size() - indexByteOff;
+                        }
+                    } else if (indexData && ebo == 0) {
+                        srcBytes = (const uint8_t*)indexData;
+                        avail = (size_t)count * elem;
+                    }
+                    std::string idxs;
+                    for (GLsizei k = 0; k < count && k < 6; ++k) {
+                        if (!srcBytes || (size_t)(k + 1) * elem > avail) {
+                            idxs += "? ";
+                            continue;
+                        }
+                        int64_t v = (elem == 2)
+                                        ? (int64_t)(srcBytes[2 * k] | (srcBytes[2 * k + 1] << 8))
+                                        : (int64_t)(srcBytes[4 * k] | (srcBytes[4 * k + 1] << 8) |
+                                                    (srcBytes[4 * k + 2] << 16) |
+                                                    (srcBytes[4 * k + 3] << 24));
+                        idxs += std::to_string(v + (int64_t)bv) + " ";
+                    }
+                    fprintf(stderr, "[TGLMT]   idx first6(base applied)=[%s]\n", idxs.c_str());
+                }
+            }
             // Attributes: tên (tra từ attribLoc), format, binding/rel/stride,
             // buffer + 24 byte đầu đỉnh 0 (đọc từ GPU = sự thật card thấy).
             for (int i = 0; i < 16; ++i) {
