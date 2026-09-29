@@ -146,6 +146,11 @@ struct ProgramObject {
         bool isVS = true;
     };
     std::vector<UniformBlock> uniformBlocks;
+    // Thứ tự block KHAI BÁO RIÊNG mỗi stage (khớp [[buffer(17+bi)]] mà converter
+    // gán trong MSL mỗi stage). AppleDrawGL bind per-stage theo 2 list này;
+    // uniformBlocks gộp chỉ còn dùng tra binding point theo tên.
+    std::vector<std::string> vsBlocks;
+    std::vector<std::string> fsBlocks;
 };
 
 struct FramebufferObject {
@@ -223,6 +228,7 @@ public:
         uint64_t copyTex = 0;        // số lần glCopyTexSubImage2D (post chain?)
         uint64_t rangeWarn = 0;      // draw đọc đỉnh/index vượt buffer (TBDR fault?)
         uint64_t hazardWarn = 0;     // draw vừa render vừa sample cùng texture
+        uint64_t mipBase = 0;        // sampler 1-level + minfilter mipmap → base (fix A11)
         std::map<GLuint, uint64_t> progEncoded; // program id -> số draw đã encode
     };
     AppleStats appleStats;

@@ -129,9 +129,10 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                 }
             }
             fprintf(stderr,
-                    "[TGLMT] build=b3-copyblur1 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
+                    "[TGLMT] build=b3-ubopad1 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
-                    "misc=%llu clears=%llu blits=%llu copyTex=%llu target=%p %ux%u "
+                    "misc=%llu clears=%llu blits=%llu copyTex=%llu mipBase=%llu "
+                    "range=%llu hazard=%llu target=%p %ux%u "
                     "vp=%.0fx%.0f@%.0f,%.0f center=(%u,%u,%u,%u) present=%d\n",
                     (unsigned long long)nSwap, dt, (unsigned long long)(a.drawsAttempted - pAtt),
                     (unsigned long long)(a.drawsEncoded - pEnc),
@@ -140,6 +141,8 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.noTarget, (unsigned long long)a.noPipeline,
                     (unsigned long long)a.miscFail, (unsigned long long)a.glClears,
                     (unsigned long long)a.blits, (unsigned long long)a.copyTex,
+                    (unsigned long long)a.mipBase,
+                    (unsigned long long)a.rangeWarn, (unsigned long long)a.hazardWarn,
                     (const void*)tgt.get(), tw, th, vp.x, vp.y, vp.w, vp.h, center[0],
                     center[1], center[2], center[3], (int)ok);
             fflush(stderr);

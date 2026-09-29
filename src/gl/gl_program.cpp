@@ -214,8 +214,16 @@ void glLinkProgram(GLuint p) {
         }
     }
     // 4c. Uniform blocks (UBO read-only): gộp vs+fs theo thứ tự khai báo, index ổn định.
+    // Đồng thời giữ thứ tự RIÊNG mỗi stage (vsBlocks/fsBlocks) khớp
+    // [[buffer(17+bi)]] mà converter gán trong MSL từng stage (bi = thứ tự khai
+    // báo TRONG stage đó). Gộp thứ tự (vs trước) bind chung cho cả 2 stage sẽ
+    // lệch slot khi vs/fs khai báo khác nhau (vd post blur: vs dùng
+    // SamplerInfo+RotScale, fs dùng Globals+SamplerInfo+BlurConfig) → fs đọc
+    // nhầm buffer (Radius rác → loop treo GPU → iOS ban submissions, đen màn).
     {
         pr.uniformBlocks.clear();
+        pr.vsBlocks.clear();
+        pr.fsBlocks.clear();
         GLuint idx = 0;
         auto addBlock = [&](const std::string& nm, bool isVS) {
             for (auto& b : pr.uniformBlocks) if (b.name == nm) return;
@@ -224,8 +232,14 @@ void glLinkProgram(GLuint p) {
             // giữ binding đã gọi glUniformBlockBinding trước link (nếu có)
             pr.uniformBlocks.push_back(ub);
         };
-        for (auto& b : vsC.blocks) addBlock(b.name, true);
-        for (auto& b : fsC.blocks) addBlock(b.name, false);
+        for (auto& b : vsC.blocks) {
+            addBlock(b.name, true);
+            pr.vsBlocks.push_back(b.name);
+        }
+        for (auto& b : fsC.blocks) {
+            addBlock(b.name, false);
+            pr.fsBlocks.push_back(b.name);
+        }
         // ZERO_TO_ONE cảnh báo: shader đã bake z-convert mặc định; app đổi ClipControl
         // depth cần relink (hiện log, M5c recompile tự động).
         if (c.state.ClipDepth() == 0x935F)

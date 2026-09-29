@@ -93,6 +93,7 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
     bool noMip = singleLevel;
     if (noMip) key ^= (uint64_t)1 << 62;
     if (noMip && mipMin) {
+        ++c.appleStats.mipBase; // đếm để frame log chứng minh fix có chạy trên máy
         static std::set<uint32_t> loggedMip;
         if (loggedMip.size() < 16 && loggedMip.insert(tex.id).second) {
             char b[128];
@@ -435,50 +436,99 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         enc->setVertexBuffer(vsUbuf.get(), 0, 16);
         enc->setFragmentBuffer(fsUbuf.get(), 0, 16);
     }
-    // UBO read-only (vanilla 1.17+/Sodium): mỗi block bind buffer(17+k) per-stage.
-    // Block → bindingPoint (glUniformBlockBinding) → GL buffer (BindBufferBase/Range).
-    // Block thiếu buffer → bind zero fallback (đúng hơn fault GPU; slot vẫn tiến
-    // để khớp MSL buffer index).
+    // UBO read-only (vanilla 1.17+/Sodium): bind PER-STAGE theo thứ tự khai báo
+    // của stage đó (khớp [[buffer(17+bi)]] trong MSL: bi = index trong stage).
+    // Block → (tên → bindingPoint từ glUniformBlockBinding) → GL buffer
+    // (BindBufferBase/Range). Gộp thứ tự vs-trước bind chung cả 2 stage sẽ lệch
+    // khi vs/fs khai báo khác nhau (post blur) → đọc nhầm buffer → treo GPU.
+    // Block thiếu buffer → bind zero fallback (đúng hơn fault GPU).
     std::vector<std::shared_ptr<metal::IBuffer>> uboKeep;
     {
-        int slot = 17;
-        auto bindZero = [&](int s) {
+        auto bindZeroV = [&](int s) {
             auto z = FallbackZeroBuf(c);
             if (!z) return;
             uboKeep.push_back(z);
             enc->setVertexBuffer(z.get(), 0, (uint32_t)s);
+        };
+        auto bindZeroF = [&](int s) {
+            auto z = FallbackZeroBuf(c);
+            if (!z) return;
+            uboKeep.push_back(z);
             enc->setFragmentBuffer(z.get(), 0, (uint32_t)s);
         };
-        for (auto& b : pr.uniformBlocks) {
-            if (slot > 30) break; // Metal tối đa 31 slot, giữ 31 dự phòng
-            auto bit = c.uniformBindPoints.find(b.binding);
+        auto bindingOf = [&](const std::string& nm, GLuint& out) -> bool {
+            for (auto& b : pr.uniformBlocks)
+                if (b.name == nm) { out = b.binding; return true; }
+            return false;
+        };
+        auto uploadBlock = [&](const std::string& nm) -> std::shared_ptr<metal::IBuffer> {
+            GLuint point = 0;
+            if (!bindingOf(nm, point)) return nullptr;
+            auto bit = c.uniformBindPoints.find(point);
             if (bit == c.uniformBindPoints.end() || !bit->second.buffer) {
-                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + b.name + " unbound, zero fallback");
-                bindZero(slot++);
-                continue;
+                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " unbound, zero fallback");
+                return nullptr;
             }
             auto t = c.buffers.find(bit->second.buffer);
             if (t == c.buffers.end() || t->second.data.empty()) {
-                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + b.name + " nodata, zero fallback");
-                bindZero(slot++);
-                continue;
+                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " nodata, zero fallback");
+                return nullptr;
             }
             size_t off = (size_t)bit->second.offset;
-            size_t len = bit->second.size ? (size_t)bit->second.size
-                                          : t->second.data.size() - std::min(off, t->second.data.size());
             if (off >= t->second.data.size()) {
-                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + b.name + " offset vuot, zero fallback");
-                bindZero(slot++);
-                continue;
+                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " offset vuot, zero fallback");
+                return nullptr;
             }
+            size_t len = bit->second.size ? (size_t)bit->second.size
+                                          : t->second.data.size() - off;
             len = std::min(len, t->second.data.size() - off);
-            if (!len) { bindZero(slot++); continue; }
-            auto ub = TempUpload(c, t->second.data.data() + off, len);
-            uboKeep.push_back(ub);
-            // UBO dùng chung cả 2 stage (đúng GL: block visible cả vs+fs)
-            enc->setVertexBuffer(ub.get(), 0, (uint32_t)slot);
-            enc->setFragmentBuffer(ub.get(), 0, (uint32_t)slot);
-            ++slot;
+            if (!len) return nullptr;
+            // Pad 0 lên bội số 16 (std140 pad; A11 TBDR nghiêm OOB).
+            size_t padded = (len + 15) & ~((size_t)15);
+            std::vector<uint8_t> ubPad(padded, 0);
+            memcpy(ubPad.data(), t->second.data.data() + off, len);
+            auto ub = TempUpload(c, ubPad.data(), padded);
+            if (ub) uboKeep.push_back(ub);
+            return ub;
+        };
+        // Tương thích ngược: program link trước khi có vsBlocks/fsBlocks
+        // (link cũ) → vsBlocks/fsBlocks rỗng → dùng merged order cho cả 2 stage.
+        bool legacy = pr.vsBlocks.empty() && pr.fsBlocks.empty();
+        if (legacy) {
+            int slot = 17;
+            for (auto& b : pr.uniformBlocks) {
+                if (slot > 30) break;
+                auto ub = uploadBlock(b.name);
+                if (!ub) {
+                    auto z = FallbackZeroBuf(c);
+                    if (z) {
+                        uboKeep.push_back(z);
+                        enc->setVertexBuffer(z.get(), 0, (uint32_t)slot);
+                        enc->setFragmentBuffer(z.get(), 0, (uint32_t)slot);
+                    }
+                } else {
+                    enc->setVertexBuffer(ub.get(), 0, (uint32_t)slot);
+                    enc->setFragmentBuffer(ub.get(), 0, (uint32_t)slot);
+                }
+                ++slot;
+            }
+        } else {
+            int slot = 17;
+            for (auto& nm : pr.vsBlocks) {
+                if (slot > 30) break;
+                auto ub = uploadBlock(nm);
+                if (ub) enc->setVertexBuffer(ub.get(), 0, (uint32_t)slot);
+                else bindZeroV(slot);
+                ++slot;
+            }
+            slot = 17;
+            for (auto& nm : pr.fsBlocks) {
+                if (slot > 30) break;
+                auto ub = uploadBlock(nm);
+                if (ub) enc->setFragmentBuffer(ub.get(), 0, (uint32_t)slot);
+                else bindZeroF(slot);
+                ++slot;
+            }
         }
     }
     // Sampler/texture theo glUniform1i unit → MSL slot k (fix bug bind theo unit):
@@ -694,6 +744,13 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     else enc->drawPrimitives(prim, (uint32_t)first, (uint32_t)count, (uint32_t)inst);
     // Commit không đợi từng draw (throughput benchmark); thứ tự đảm bảo bởi cùng
     // queue; readback/present cuối frame đồng bộ đúng (commitAndWait/present).
+    // Ngữ cảnh cho FIRST-fault handler bất đồng bộ (A11 ban sau fault hàng loạt).
+    {
+        char b[160];
+        snprintf(b, sizeof(b), "prog@%u vao@%u mode=0x%x count=%d idx=%d fbo=%u",
+                 prog, vao, mode, count, (int)indexed, c.state.BoundDrawFBO());
+        c.device->noteDrawContext(b);
+    }
     if (!enc->endAndCommitNoWait()) {
         c.appleStats.miscFail++;
         c.LogDebug(0, 0, 0, 0, "AppleDrawGL: commit fail");
@@ -810,14 +867,20 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                         i, nm.c_str(), a.size, a.type, a.normalized ? "N" : "", a.binding,
                         a.relativeOffset, a.stride, a.buffer, base, bytes.c_str());
             }
-            // UBO: diagonal + hàng 0 (đọc từ shadow = nguồn TempUpload khi draw).
-            // Ngưỡng trung thực theo have thực (Fog 40B/SamplerInfo 16B từng bị
-            // báo NODATA oan vì đòi 64B).
+            // UBO per-stage (vsSlots/fsSlots khớp [[buffer(17+bi)]] MSL).
+            auto slotOf = [&](const std::vector<std::string>& lst,
+                              const std::string& nm) -> int {
+                for (size_t i = 0; i < lst.size(); ++i)
+                    if (lst[i] == nm) return 17 + (int)i;
+                return -1;
+            };
             for (auto& b : pr.uniformBlocks) {
+                int vsSlot = slotOf(pr.vsBlocks, b.name);
+                int fsSlot = slotOf(pr.fsBlocks, b.name);
                 auto bit = c.uniformBindPoints.find(b.binding);
                 if (bit == c.uniformBindPoints.end() || !bit->second.buffer) {
-                    fprintf(stderr, "[TGLMT]   ubo %s: UNBOUND (binding %u)\n", b.name.c_str(),
-                            b.binding);
+                    fprintf(stderr, "[TGLMT]   ubo %s: UNBOUND (binding %u vsSlot=%d fsSlot=%d)\n",
+                            b.name.c_str(), b.binding, vsSlot, fsSlot);
                     continue;
                 }
                 auto t = c.buffers.find(bit->second.buffer);
@@ -826,9 +889,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     (t == c.buffers.end() || off >= t->second.data.size())
                         ? 0
                         : t->second.data.size() - off;
-                if (have < 16) {
-                    fprintf(stderr, "[TGLMT]   ubo %s: NODATA (have %zuB)\n", b.name.c_str(),
-                            have);
+                if (!have) {
+                    fprintf(stderr, "[TGLMT]   ubo %s: NODATA (have 0B)\n", b.name.c_str());
                     continue;
                 }
                 const float* m = (const float*)(t->second.data.data() + off);
@@ -846,9 +908,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     full += fb;
                 }
                 fprintf(stderr,
-                        "[TGLMT]   ubo %s (bindpt %u, buf %u+%zu, have %zuB): "
+                        "[TGLMT]   ubo %s (bindpt %u vsSlot=%d fsSlot=%d, buf %u+%zu, have %zuB): "
                         "diag=(%g,%g,%g,%g) row0=(%g,%g,%g,%g)\n[TGLMT]     full=[%s]\n",
-                        b.name.c_str(), b.binding, bit->second.buffer, off, have, F(0), F(5),
+                        b.name.c_str(), b.binding, vsSlot, fsSlot, bit->second.buffer, off,
+                        have, F(0), F(5),
                         F(10), F(15), F(0), F(1), F(2), F(3), full.c_str());
             }
             // Texture theo sampler (unit, id, WxH, format, gpu?, pixel đầu).

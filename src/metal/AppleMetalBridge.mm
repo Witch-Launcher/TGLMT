@@ -292,9 +292,15 @@ private:
 
 class AppleRenderEncoder : public IRenderEncoder {
 public:
+    struct SharedDiag {
+        std::mutex mu;
+        std::string lastCtx;
+        bool firstErrLogged = false;
+    };
     AppleRenderEncoder(id<MTLCommandBuffer> cb, id<MTLRenderCommandEncoder> enc,
-                       id<MTLTexture> target, LogFn log = nullptr)
-        : cb_(cb), enc_(enc), target_(target), log_(log), ok_(cb && enc) {}
+                       id<MTLTexture> target, LogFn log = nullptr,
+                       std::shared_ptr<SharedDiag> diag = nullptr)
+        : cb_(cb), enc_(enc), target_(target), log_(log), diag_(diag), ok_(cb && enc) {}
     void setViewport(const Viewport& vp) override {
         if (!ok_) return;
         MTLViewport m = {vp.x, vp.y, vp.w, vp.h, vp.n, vp.f};
@@ -406,17 +412,36 @@ public:
         [enc_ endEncoding];
         enc_ = nil;
         // Chẩn đoán đen màn hình: GPU có thể error CB mà CPU không hay (A11).
-        // Sample 1/120 CB, chỉ log khi không Completed.
+        // Bắt fault ĐẦU TIÊN kèm ngữ cảnh draw (prog/vao) rồi mới sample 1/120.
+        // (Ban submissions của iOS làm mọi CB sau đều status=5 "prior errors",
+        // che mất nguyên nhân gốc.)
         {
             static int nNoWait = 0;
-            if ((++nNoWait % 120) == 0 && log_) {
+            ++nNoWait;
+            bool needFirst = false;
+            if (diag_) {
+                std::lock_guard<std::mutex> l(diag_->mu);
+                needFirst = !diag_->firstErrLogged;
+            }
+            if ((needFirst || (nNoWait % 120) == 0) && log_) {
                 LogFn log = log_;
+                std::shared_ptr<SharedDiag> diag = diag_;
                 [cb_ addCompletedHandler:^(id<MTLCommandBuffer> b) {
                   if ([b status] != MTLCommandBufferStatusCompleted && log) {
                       NSString* e = [[b error] localizedDescription];
-                      log("[TGLMT] drawCB status=" +
+                      std::string ctx;
+                      bool first = false;
+                      if (diag) {
+                          std::lock_guard<std::mutex> l(diag->mu);
+                          ctx = diag->lastCtx;
+                          first = !diag->firstErrLogged;
+                          if (first) diag->firstErrLogged = true;
+                      }
+                      std::string msg = std::string(first ? "[TGLMT] FIRST drawCB fault ctx={" : "[TGLMT] drawCB status=") +
+                          (first ? ctx + "} status=" : "") +
                           std::to_string((long)[b status]) + " err=" +
-                          (e ? [e UTF8String] : "?"));
+                          (e ? [e UTF8String] : "?");
+                      log(msg);
                   }
                 }];
             }
@@ -443,13 +468,20 @@ private:
     id<MTLRenderCommandEncoder> enc_;
     id<MTLTexture> target_;
     LogFn log_;
+    std::shared_ptr<SharedDiag> diag_;
     bool ok_;
 };
 
 class AppleDevice : public IDevice {
 public:
     explicit AppleDevice(id<MTLDevice> d, LogFn log)
-        : dev_(d), queue_([d newCommandQueue]), log_(log) {}
+        : dev_(d), queue_([d newCommandQueue]), log_(log),
+          diag_(std::make_shared<AppleRenderEncoder::SharedDiag>()) {}
+    void noteDrawContext(const std::string& s) override {
+        if (!diag_) return;
+        std::lock_guard<std::mutex> l(diag_->mu);
+        diag_->lastCtx = s;
+    }
     std::string name() const override {
         return std::string("TGLMT Apple (") +
             ([dev_.name UTF8String] ? [dev_.name UTF8String] : "MTLDevice") + ")";
@@ -1198,7 +1230,7 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_);
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_);
     }
     static MTLLoadAction ToMTLLoad(LoadOp o) {
         switch (o) {
@@ -1236,7 +1268,7 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_);
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_);
     }
     std::shared_ptr<IRenderEncoder> makeRenderEncoderLoad(IRenderTarget* target,
             IRenderPipeline* pipeline) override {
@@ -1264,7 +1296,7 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_);
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_);
     }
 private:
     id<MTLDevice> dev_;
@@ -1273,6 +1305,7 @@ private:
     std::vector<DrawTrace> trace_;
     std::map<std::string, id<MTLRenderPipelineState>> pcache_;
     std::shared_ptr<IRenderTarget> defaultTarget_;
+    std::shared_ptr<AppleRenderEncoder::SharedDiag> diag_;
     std::mutex pmu_;
 };
 

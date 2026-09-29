@@ -333,6 +333,9 @@ public:
     // Default target cho FBO 0 (app/shell đặt; GL render vào đây).
     virtual void setDefaultRenderTarget(std::shared_ptr<IRenderTarget> t) { (void)t; }
     virtual std::shared_ptr<IRenderTarget> defaultRenderTarget() { return nullptr; }
+    // Ghi nhận draw gần nhất (prog/vao/fbo) để handler lỗi GPU bất đồng bộ có
+    // ngữ cảnh prog đầu tiên fault (A11 ban submissions sau fault hàng loạt).
+    virtual void noteDrawContext(const std::string& s) { (void)s; }
     // Present target lên màn hình qua CAMetalLayer* (void* để giữ header thuần C++).
     // Trả false khi layer/target không hợp lệ.
     virtual bool presentTarget(IRenderTarget* target, void* metalLayer) {
