@@ -153,6 +153,17 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     TextureObject* tp = BoundTex(c, target);
     if (!tp) return; // lỗi đã record trong BoundTex
     auto& tx = *tp;
+    // Chẩn đoán texture lớn rỗng (logo 512): log 8 lần upload đầu ≥256px.
+    if ((w >= 256 || h >= 256)) {
+        static int nBig = 0;
+        if (++nBig <= 8) {
+            fprintf(stderr,
+                    "[TGLMT] bigTexImage#%d id=%u tgt=0x%x lv=%d %dx%d fmt=0x%x ty=0x%x %s\n",
+                    nBig, tp->id, target, level, w, h, internalformat, format,
+                    pixels ? "data" : "NULL");
+            fflush(stderr);
+        }
+    }
     // Mip levels >0: chỉ ghi nhận số levels, KHÔNG đụng base (bug cũ: ghi đè
     // w/h/pixels bằng level nhỏ nhất → TexSubImage level 0 fail bounds →
     // texture rỗng. Game 26.x alloc mọi mip qua TexImage2D NULL trước).
@@ -261,6 +272,17 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     TextureObject* tp = BoundTex(c, target);
     if (!tp || !pixels) { if (!pixels) c.errors.Record(0x0501); return; }
     auto& t = *tp;
+    if ((w >= 256 || h >= 256)) {
+        static int nBigSub = 0;
+        if (++nBigSub <= 8) {
+            fprintf(stderr,
+                    "[TGLMT] bigTexSub#%d id=%u tgt=0x%x lv=%d off=(%d,%d) %dx%d fmt=0x%x "
+                    "ty=0x%x tex=%ux%u\n",
+                    nBigSub, tp->id, target, level, xoff, yoff, w, h, format, type, t.w,
+                    t.h);
+            fflush(stderr);
+        }
+    }
     // Level>0: GPU chỉ giữ base, không corrupt base shadow (xem TexImage).
     if (level > 0) {
         c.LogDebug(0, 0, 0, 0, "glTexSubImage2D: mip level>0 bỏ qua (GPU base-level)");
@@ -445,6 +467,16 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
     if (!p) { c.errors.Record(0x0501); return; }
+    if ((w >= 256 || h >= 256)) {
+        static int nBigDSA = 0;
+        if (++nBigDSA <= 8) {
+            fprintf(stderr,
+                    "[TGLMT] bigTexSubDSA#%d id=%u lv=%d off=(%d,%d) %dx%d fmt=0x%x ty=0x%x "
+                    "tex=%ux%u\n",
+                    nBigDSA, t, l, x, y, w, h, f, ty, it->second.w, it->second.h);
+            fflush(stderr);
+        }
+    }
     if (l > 0) {
         c.LogDebug(0, 0, 0, 0, "glTextureSubImage2D: mip level>0 bỏ qua (GPU base-level)");
         return;

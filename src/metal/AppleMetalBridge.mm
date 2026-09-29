@@ -662,6 +662,19 @@ public:
             NSUInteger dw = drawable.texture.width, dh = drawable.texture.height;
             NSUInteger cw = at->width() < dw ? at->width() : dw;
             NSUInteger ch = at->height() < dh ? at->height() : dh;
+            // Chẩn đoán tỉ lệ màn hình: log size drawable vs target (3 lần đầu +
+            // khi lệch — lệch là zoom/crop toàn màn hình ở khâu present).
+            {
+                static int nPres = 0;
+                if ((++nPres <= 3 || at->width() != dw || at->height() != dh) && log_) {
+                    char b[128];
+                    snprintf(b, sizeof(b),
+                             "[TGLMT] present #%d drawable=%lux%lu target=%ux%u copy=%lux%lu",
+                             nPres, (unsigned long)dw, (unsigned long)dh, at->width(),
+                             at->height(), (unsigned long)cw, (unsigned long)ch);
+                    log_(b);
+                }
+            }
             if (cw == 0 || ch == 0) return false;
             if (drawable.texture.pixelFormat != at->resolve().pixelFormat) {
                 if (log_) log_("presentTarget: drawable/target format lệch");
