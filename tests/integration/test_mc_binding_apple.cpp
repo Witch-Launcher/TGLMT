@@ -174,6 +174,40 @@ int main() {
     };
     drawCheck(0, 0, "offset0");
     drawCheck(16, 16, "offset16");
+    // Case UBYTE normalized color (đúng menu: Color 4x0x1401N, stride 16).
+    {
+        GLuint vao, vbo;
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        struct V {
+            float p[3];
+            uint8_t c[4];
+        };
+        V tri[3] = {{{-1, -1, 0}, {255, 0, 0, 255}},
+                    {{3, -1, 0}, {255, 0, 0, 255}},
+                    {{-1, 3, 0}, {255, 0, 0, 255}}};
+        glGenBuffers(1, &vbo);
+        glBindBuffer(0x8892, vbo);
+        glBufferData(0x8892, sizeof(tri), tri, 0x88E4);
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribFormat(0, 3, 0x1406, 0, 0);
+        glVertexAttribFormat(1, 4, 0x1401, 1, 12);
+        glVertexAttribBinding(0, 0);
+        glVertexAttribBinding(1, 0);
+        glBindVertexBuffer(0, vbo, 0, 16);
+        glUseProgram(prog);
+        glViewport(0, 0, 256, 256);
+        glClearColor(0, 0, 1, 1);
+        glClear(0x00004000);
+        glDrawArrays(0x0004, 0, 3);
+        unsigned char px[256 * 256 * 4];
+        memset(px, 0, sizeof(px));
+        glReadPixels(0, 0, 256, 256, 0x1908, 0x1401, px);
+        unsigned char* mid = px + (128 * 256 + 128) * 4;
+        printf("[ubyte] mid=(%u,%u,%u,%u)\n", mid[0], mid[1], mid[2], mid[3]);
+        Check(mid[0] > 200 && mid[1] < 50 && mid[2] < 50, "ubyte color do");
+    }
     if (gFails) return 1;
     if (ctx.appleStats.drawsEncoded == 0) {
         printf("test_mc_binding_apple FAIL: draw not encoded\n");

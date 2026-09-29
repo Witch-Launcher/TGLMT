@@ -176,9 +176,12 @@ int main() {
     glUseProgram(prog);
     GLint locS = glGetUniformLocation(prog, "Sampler0");
     glUniform1i(locS, 0);
-    // Blend như GUI: SRC_ALPHA, ONE_MINUS_SRC_ALPHA.
+    // Blend như GUI: SRC_ALPHA, ONE_MINUS_SRC_ALPHA. CULL_FACE bật như game
+    // (menu nào cũng cull BACK): hồi quy đen màn hình do thiếu Y-flip
+    // (GL y-up → Metal y-down mirror winding → cull nhầm toàn bộ).
     glEnable(0x0BE2);
     glBlendFuncSeparate(0x0302, 0x0303, 0x0001, 0x0303);
+    glEnable(0x0B44); // CULL_FACE (mặc định cull BACK, front CCW)
     glViewport(0, 0, 256, 256);
     glClearColor(0, 0, 1, 1);
     glClearDepthf(1.0f);

@@ -2,7 +2,10 @@
 // Spec §9 (Framebuffer). Metal: colorAttachments[i]/depth/stencil, load/store.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 using namespace tglmt;
 
 namespace tglmt::gl {
@@ -125,12 +128,138 @@ void glNamedFramebufferDrawBuffers(GLuint f, GLsizei n, const GLenum* b) {
 }
 void glReadBuffer(GLenum b) { Context::Current().state.SetShadow(0x0C02 /*READ_BUFFER*/, &b, 4); }
 void glNamedFramebufferReadBuffer(GLuint f, GLenum b) { (void)f; glReadBuffer(b); }
+// Blit có default framebuffer tham gia (composite cuối menu/post chain ra màn
+// hình). Toàn bộ pipeline TGLMT lưu pixels theo quy ước thô (byte đầu = row 0
+// cả shadow lẫn GPU, không flip ở upload/copy; chỉ glReadPixels flip cho đúng
+// spec §18.2) nên GPU copy thô là đúng hướng — CPU fallback cũng copy thô để
+// nhất quán với đường FBO→FBO (`ws->second.pixels = rs->second.pixels`).
+static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
+        GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d1, GLint d2, GLint d3,
+        GLenum filter, GLbitfield mask) {
+    if (readFbo == 0 && drawFbo == 0) return; // cùng target, không có gì để copy
+    int sw = s2 - s0, sh = s3 - s1, dw = d2 - d0, dh = d3 - d1;
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) { c.errors.Record(0x0501); return; }
+    bool scaled = (sw != dw || sh != dh);
+    bool linear = (filter != 0x2600 /*NEAREST*/);
+    if (!c.device || c.device->isNull()) return; // Null backend: trace-only
+    auto def = c.device->defaultRenderTarget();
+    if (!def) { c.errors.Record(0x0502); return; }
+    if (!(mask & 0x00004000u)) {
+        // DEPTH/STENCIL với default FB: default target của Renderer có depth
+        // riêng nhưng game không attach depth vào default FB theo nghĩa GL
+        // (draw vào default luôn tắt depth test) → bỏ qua trung thực.
+        if (mask & (0x00000100u | 0x00000400u))
+            c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: depth/stencil blit với default FB bỏ qua");
+        return;
+    }
+    uint32_t sx = s0 < 0 ? 0 : (uint32_t)s0;
+    uint32_t sy = s1 < 0 ? 0 : (uint32_t)s1;
+    uint32_t dx = d0 < 0 ? 0 : (uint32_t)d0;
+    uint32_t dy = d1 < 0 ? 0 : (uint32_t)d1;
+    // FBO→màn hình (composite cuối menu: game render offscreen rồi blit
+    // read=N draw=0 mỗi frame — đường này từng bị return sớm = đen chắc).
+    if (readFbo != 0 && drawFbo == 0) {
+        auto rit = c.fbos.find(readFbo);
+        if (rit == c.fbos.end()) { c.errors.Record(0x0502); return; }
+        auto cit = rit->second.colorTex.find(0);
+        if (cit == rit->second.colorTex.end()) return;
+        auto tit = c.textures.find(cit->second);
+        if (tit == c.textures.end() || !tit->second.gpu) return;
+        uint32_t cw = std::min({(uint32_t)sw, tit->second.w > sx ? tit->second.w - sx : 0,
+                                def->width() > dx ? def->width() - dx : 0});
+        uint32_t ch = std::min({(uint32_t)sh, tit->second.h > sy ? tit->second.h - sy : 0,
+                                def->height() > dy ? def->height() - dy : 0});
+        if (!cw || !ch) { c.errors.Record(0x0501); return; }
+        if (!scaled && !linear) {
+            if (c.device->blitToTarget(tit->second.gpu.get(), def.get(), sx, sy, cw, ch,
+                                       dx, dy))
+                return; // fast path (đúng case máy thật: full-size NEAREST)
+            c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: GPU blitToTarget fail, fallback CPU");
+        } else {
+            c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: scaled/LINEAR blit ra màn hình, CPU nearest");
+        }
+        // CPU fallback: nearest-scale shadow nguồn qua texture tạm (định dạng
+        // của default target để blitToTarget chấp nhận) rồi GPU copy vào màn hình.
+        auto& tx = tit->second;
+        if (tx.pixels.empty() || !tx.w || !tx.h) {
+            c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: blit ra màn hình thiếu shadow, bỏ qua");
+            return;
+        }
+        if (tx.pixels.size() < (size_t)tx.w * tx.h * 4) {
+            c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: shadow nguồn ngắn, bỏ qua");
+            return;
+        }
+        std::vector<uint8_t> tmp((size_t)dw * (size_t)dh * 4, 0);
+        for (int y = 0; y < dh; ++y)
+            for (int x = 0; x < dw; ++x) {
+                uint32_t sxp = (uint32_t)s0 + (uint32_t)x * (uint32_t)sw / (uint32_t)dw;
+                uint32_t syp = (uint32_t)s1 + (uint32_t)y * (uint32_t)sh / (uint32_t)dh;
+                if (sxp >= tx.w || syp >= tx.h) continue;
+                memcpy(tmp.data() + ((size_t)y * dw + x) * 4,
+                       tx.pixels.data() + ((size_t)syp * tx.w + sxp) * 4, 4);
+            }
+        auto ttmp = c.device->newTextureWithBytes((uint32_t)dw, (uint32_t)dh,
+                                                  def->pixelFormat(), tmp.data(),
+                                                  (size_t)dw * 4);
+        if (!ttmp) {
+            c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: không tạo được texture tạm cho blit màn hình");
+            return;
+        }
+        if (!c.device->blitToTarget(ttmp.get(), def.get(), 0, 0, (uint32_t)dw, (uint32_t)dh,
+                                    dx, dy))
+            c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: blitToTarget fallback fail");
+        return;
+    }
+    // Màn hình→FBO (screenshot/capture): GPU copy rồi sync shadow thô.
+    if (readFbo == 0 && drawFbo != 0) {
+        auto wit = c.fbos.find(drawFbo);
+        if (wit == c.fbos.end()) { c.errors.Record(0x0502); return; }
+        auto cit = wit->second.colorTex.find(0);
+        if (cit == wit->second.colorTex.end()) return;
+        auto tit = c.textures.find(cit->second);
+        if (tit == c.textures.end() || !tit->second.gpu) return;
+        auto& tx = tit->second;
+        uint32_t cw = std::min({(uint32_t)sw, def->width() > sx ? def->width() - sx : 0,
+                                tx.w > dx ? tx.w - dx : 0});
+        uint32_t ch = std::min({(uint32_t)sh, def->height() > sy ? def->height() - sy : 0,
+                                tx.h > dy ? tx.h - dy : 0});
+        if (!cw || !ch) { c.errors.Record(0x0501); return; }
+        if (!scaled && !linear &&
+            c.device->blitFromTarget(def.get(), tx.gpu.get(), sx, sy, cw, ch, dx, dy)) {
+            // sync shadow thô từ GPU (đúng GL cho GetTexImage/ReadPixels sau blit)
+            std::vector<uint8_t> full((size_t)tx.w * tx.h * 4, 0);
+            auto wrapped = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
+            if (wrapped && wrapped->readback(full.data(), (size_t)tx.w * 4))
+                tx.pixels = std::move(full);
+            return;
+        }
+        c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: blit màn hình→FBO scaled/LINEAR/fail, CPU shadow");
+        std::vector<uint8_t> scr((size_t)def->width() * def->height() * 4, 0);
+        if (!def->readback(scr.data(), (size_t)def->width() * 4)) {
+            c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: readback màn hình fail");
+            return;
+        }
+        if (tx.pixels.size() < (size_t)tx.w * tx.h * 4) tx.pixels.resize((size_t)tx.w * tx.h * 4, 0);
+        uint32_t scrW = def->width(), scrH = def->height();
+        for (int y = 0; y < dh && (uint32_t)(d1 + y) < tx.h; ++y)
+            for (int x = 0; x < dw && (uint32_t)(d0 + x) < tx.w; ++x) {
+                uint32_t sxp = (uint32_t)s0 + (uint32_t)x * (uint32_t)sw / (uint32_t)dw;
+                uint32_t syp = (uint32_t)s1 + (uint32_t)y * (uint32_t)sh / (uint32_t)dh;
+                if (sxp >= scrW || syp >= scrH) continue;
+                memcpy(tx.pixels.data() + (((size_t)(d1 + y) * tx.w + (d0 + x)) * 4),
+                       scr.data() + ((size_t)syp * scrW + sxp) * 4, 4);
+            }
+        if (!tx.pixels.empty())
+            c.device->updateTexture(tx.gpu.get(), 0, 0, tx.w, tx.h, tx.pixels.data(),
+                                    (size_t)tx.w * 4);
+        return;
+    }
+}
 void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d1, GLint d2, GLint d3, GLbitfield m, GLenum f) {
     Context& c = Context::Current();
     GLuint readFbo = c.state.BoundReadFBO();
     GLuint drawFbo = c.state.BoundDrawFBO();
     // Chẩn đoán đen màn hình: composite cuối menu có thể qua đây (FBO→0).
-    // Stub với default FB (dưới) mà game dùng đường này là đen chắc.
     {
         static uint64_t n = 0;
         if (++c.appleStats.blits, ++n <= 5) {
@@ -142,8 +271,11 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
             fflush(stderr);
         }
     }
+    // Composite cuối (menu/post chain ra màn hình): 1 phía là default FB.
+    // Từng return sớm ở đây (đen tuyệt đối từ frame đầu dù mọi draw đều khỏe:
+    // game render vào FBO rồi blit read=2 draw=0 mỗi frame).
     if (readFbo == 0 || drawFbo == 0) {
-        c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: default-FB blit giữ shadow (present xử lý ở SwapBuffers)");
+        BlitWithDefault(c, readFbo, drawFbo, s0, s1, s2, s3, d0, d1, d2, d3, f, m);
         return;
     }
     auto rit = c.fbos.find(readFbo);

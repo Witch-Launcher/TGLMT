@@ -349,6 +349,21 @@ public:
         (void)src; (void)dst; (void)sx; (void)sy; (void)w; (void)h; (void)dx; (void)dy;
         return false;
     }
+    // Blit với default framebuffer tham gia (composite cuối menu ra màn hình):
+    // FBO→màn hình và màn hình→FBO. Cùng size + COLOR → GPU copy thật;
+    // còn lại false để caller giữ hành vi cũ + log rõ.
+    virtual bool blitToTarget(ITexture* src, IRenderTarget* dst,
+            uint32_t sx, uint32_t sy, uint32_t w, uint32_t h,
+            uint32_t dx, uint32_t dy) {
+        (void)src; (void)dst; (void)sx; (void)sy; (void)w; (void)h; (void)dx; (void)dy;
+        return false;
+    }
+    virtual bool blitFromTarget(IRenderTarget* src, ITexture* dst,
+            uint32_t sx, uint32_t sy, uint32_t w, uint32_t h,
+            uint32_t dx, uint32_t dy) {
+        (void)src; (void)dst; (void)sx; (void)sy; (void)w; (void)h; (void)dx; (void)dy;
+        return false;
+    }
     // Sinh mipmap GPU (glGenerateMipmap → generateMipmapsForTexture).
     // Texture phải được tạo với mipmapped=YES + đủ levels, không thì trả false.
     virtual bool generateMipmaps(ITexture* tex) {

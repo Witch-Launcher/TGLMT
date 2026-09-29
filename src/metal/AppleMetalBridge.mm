@@ -764,8 +764,15 @@ public:
             uint32_t dx, uint32_t dy) override {
         AppleTexture* a = dynamic_cast<AppleTexture*>(src);
         AppleTexture* b = dynamic_cast<AppleTexture*>(dst);
-        if (!a || !b || !queue_ || !w || !h) return false;
+        if (!a || !b || !w || !h) return false;
         if (a->pixelFormat() != b->pixelFormat()) return false; // khác format → caller fallback CPU
+        return blitTex(a->get(), b->get(), sx, sy, w, h, dx, dy);
+    }
+    // Helper dùng chung cho blitCopy + blitTo/FromTarget (target cũng là texture).
+    bool blitTex(id<MTLTexture> s, id<MTLTexture> d, uint32_t sx, uint32_t sy, uint32_t w,
+                 uint32_t h, uint32_t dx, uint32_t dy) {
+        if (!s || !d || !queue_ || !w || !h) return false;
+        if (s.pixelFormat != d.pixelFormat) return false;
         @try {
             id<MTLCommandBuffer> cb = [queue_ commandBuffer];
             if (!cb) return false;
@@ -774,13 +781,29 @@ public:
             MTLOrigin so = {(NSUInteger)sx, (NSUInteger)sy, 0};
             MTLSize ss = {(NSUInteger)w, (NSUInteger)h, 1};
             MTLOrigin dd = {(NSUInteger)dx, (NSUInteger)dy, 0};
-            [blit copyFromTexture:a->get() sourceSlice:0 sourceLevel:0 sourceOrigin:so sourceSize:ss
-                        toTexture:b->get() destinationSlice:0 destinationLevel:0 destinationOrigin:dd];
+            [blit copyFromTexture:s sourceSlice:0 sourceLevel:0 sourceOrigin:so sourceSize:ss
+                        toTexture:d destinationSlice:0 destinationLevel:0 destinationOrigin:dd];
             [blit endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
             return [cb status] == MTLCommandBufferStatusCompleted;
         } @catch (NSException*) { return false; }
+    }
+    bool blitToTarget(ITexture* src, IRenderTarget* dst, uint32_t sx, uint32_t sy, uint32_t w,
+                      uint32_t h, uint32_t dx, uint32_t dy) override {
+        AppleTexture* a = dynamic_cast<AppleTexture*>(src);
+        AppleTarget* t = dynamic_cast<AppleTarget*>(dst);
+        if (!a || !t || !w || !h) return false;
+        if (a->pixelFormat() != t->pixelFormat()) return false;
+        return blitTex(a->get(), t->color(), sx, sy, w, h, dx, dy);
+    }
+    bool blitFromTarget(IRenderTarget* src, ITexture* dst, uint32_t sx, uint32_t sy, uint32_t w,
+                        uint32_t h, uint32_t dx, uint32_t dy) override {
+        AppleTarget* t = dynamic_cast<AppleTarget*>(src);
+        AppleTexture* b = dynamic_cast<AppleTexture*>(dst);
+        if (!t || !b || !w || !h) return false;
+        if (t->pixelFormat() != b->pixelFormat()) return false;
+        return blitTex(t->resolve(), b->get(), sx, sy, w, h, dx, dy);
     }
     bool generateMipmaps(ITexture* tex) override {
         AppleTexture* a = dynamic_cast<AppleTexture*>(tex);
