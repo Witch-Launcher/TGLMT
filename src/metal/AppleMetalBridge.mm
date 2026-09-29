@@ -626,6 +626,10 @@ public:
             if (cw == 0 || ch == 0) return false;
             if (drawable.texture.pixelFormat != at->resolve().pixelFormat) {
                 if (log_) log_("presentTarget: drawable/target format lệch");
+                fprintf(stderr, "[TGLMT] presentTarget FORMAT MISMATCH drawable=%u target=%u\n",
+                        (unsigned)drawable.texture.pixelFormat,
+                        (unsigned)at->resolve().pixelFormat);
+                fflush(stderr);
                 return false;
             }
             MTLOrigin origin = {0, 0, 0};

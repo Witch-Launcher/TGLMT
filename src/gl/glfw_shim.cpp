@@ -87,9 +87,11 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
     // drawsEnc < drawsAtt nhiều => pipeline/target rớt ở AppleDrawGL;
     // drawsEnc ~= drawsAtt mà vẫn đen => dữ liệu (vertex/uniform/texture).
     // stderr được launcher ghi vào latestlog (dòng [gc] là bằng chứng).
+    // Log cả swap đầu để mọi latestlog đều lộ build-tag (chống nhầm bản test).
     {
         static uint64_t nSwap = 0;
-        if (++nSwap % 600 == 0) {
+        ++nSwap;
+        if (nSwap == 1 || nSwap % 600 == 0) {
             auto& a = st.renderer->context().appleStats;
             uint32_t tw = 0, th = 0;
             auto tgt = st.renderer->context().device->defaultRenderTarget();
@@ -98,8 +100,8 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                 th = tgt->height();
             }
             fprintf(stderr,
-                    "[TGLMT] frame=%llu att=%llu enc=%llu progs=%zu noProg=%llu "
-                    "noTgt=%llu noPipe=%llu misc=%llu target=%ux%u present=%d\n",
+                    "[TGLMT] build=b3-blackdiag1 frame=%llu att=%llu enc=%llu progs=%zu "
+                    "noProg=%llu noTgt=%llu noPipe=%llu misc=%llu target=%ux%u present=%d\n",
                     (unsigned long long)nSwap, (unsigned long long)a.drawsAttempted,
                     (unsigned long long)a.drawsEncoded, a.progEncoded.size(),
                     (unsigned long long)a.noProgram, (unsigned long long)a.noTarget,
