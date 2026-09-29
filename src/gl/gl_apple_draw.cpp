@@ -541,6 +541,28 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             fprintf(stderr,
                     "[TGLMT] prog@%u attrs=[%s] vsSamp=[%s] fsSamp=[%s] blocks=[%s]\n", prog,
                     attrs.c_str(), vsS.c_str(), fsS.c_str(), blks.c_str());
+            // Dump diagonal mat4 đầu mỗi UBO bound (ortho/identity nhận ra ngay;
+            // toàn 0 => upload/binding hỏng dù draw encode bình thường).
+            for (auto& b : pr.uniformBlocks) {
+                auto bit = c.uniformBindPoints.find(b.binding);
+                if (bit == c.uniformBindPoints.end() || !bit->second.buffer) {
+                    fprintf(stderr, "[TGLMT] prog@%u ubo %s: UNBOUND (binding %u)\n", prog,
+                            b.name.c_str(), b.binding);
+                    continue;
+                }
+                auto t = c.buffers.find(bit->second.buffer);
+                size_t off =
+                    (bit->second.offset > 0) ? (size_t)bit->second.offset : 0;
+                if (t == c.buffers.end() || t->second.data.size() < off + 64) {
+                    fprintf(stderr, "[TGLMT] prog@%u ubo %s: NODATA\n", prog, b.name.c_str());
+                    continue;
+                }
+                const float* m = (const float*)(t->second.data.data() + off);
+                fprintf(stderr,
+                        "[TGLMT] prog@%u ubo %s (bindpt %u, buf %u+%zu): diag=(%g,%g,%g,%g)\n",
+                        prog, b.name.c_str(), b.binding, bit->second.buffer, off, m[0], m[5],
+                        m[10], m[15]);
+            }
             fflush(stderr);
         }
     }
