@@ -832,6 +832,35 @@ public:
             return true;
         } @catch (NSException*) { return false; }
     }
+    std::shared_ptr<ITexture> newCubeTexture(uint32_t size, PixelFormat f) override {
+        if (!size) return nullptr;
+        MTLPixelFormat m = ToMTL(f);
+        if (m == MTLPixelFormatInvalid) return nullptr;
+        // Chỉ RGBA8/R8 cubemap (panorama vanilla); depth/cube không hỗ trợ.
+        if (m != MTLPixelFormatRGBA8Unorm && m != MTLPixelFormatRGBA8Unorm_sRGB &&
+            m != MTLPixelFormatR8Unorm)
+            return nullptr;
+        MTLTextureDescriptor* d = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:m
+                                                 size:size mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead;
+        d.storageMode = MTLStorageModeShared;
+        id<MTLTexture> t = nil;
+        @try { t = [dev_ newTextureWithDescriptor:d]; } @catch (NSException*) { return nullptr; }
+        if (!t) return nullptr;
+        return std::make_shared<AppleTexture>(t, size, size, f);
+    }
+    bool updateCubeFace(ITexture* tex, uint32_t face, const void* data,
+            size_t bytesPerRow) override {
+        AppleTexture* a = dynamic_cast<AppleTexture*>(tex);
+        if (!a || !data || face >= 6) return false;
+        @try {
+            if ([a->get() textureType] != MTLTextureTypeCube) return false;
+            uint32_t s = a->width();
+            [a->get() replaceRegion:MTLRegionMake2D(0, 0, s, s) mipmapLevel:0 slice:face
+                          withBytes:data bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * s];
+            return true;
+        } @catch (NSException*) { return false; }
+    }
     std::shared_ptr<IRenderPipeline> makeMeshPipeline(ILibrary* meshLib, const char* meshFn,
             ILibrary* fsLib, const char* fsFn, PixelFormat fmt) override {
         AppleLibrary* alMesh = dynamic_cast<AppleLibrary*>(meshLib);

@@ -376,6 +376,18 @@ public:
         (void)tex; (void)x; (void)y; (void)w; (void)h; (void)data; (void)bytesPerRow;
         return false;
     }
+    // Cubemap cho panorama vanilla (samplerCube + texturecube<float> MSL):
+    // 6 faces RGBA8/R8, upload từng face. Không hỗ trợ → nullptr/false để
+    // caller giữ hành vi cũ + log rõ (trước đây placeholder 2D + skip bind =
+    // panorama đen + có thể GPU fault trên A11).
+    virtual std::shared_ptr<ITexture> newCubeTexture(uint32_t size, PixelFormat f) {
+        (void)size; (void)f; return nullptr;
+    }
+    virtual bool updateCubeFace(ITexture* tex, uint32_t face, const void* data,
+            size_t bytesPerRow) {
+        (void)tex; (void)face; (void)data; (void)bytesPerRow;
+        return false;
+    }
 };
 
 // Factory: backend="null" luôn có; backend="apple" chỉ khả dụng trên macOS/iOS (USE_APPLE_METAL=1).

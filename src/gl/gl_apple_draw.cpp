@@ -21,6 +21,42 @@ static std::shared_ptr<metal::IBuffer> TempUpload(Context& c, const void* data, 
     return c.device->newBufferWithBytes(data, n ? n : 1, metal::StorageMode::Shared);
 }
 
+// Fallback chống GPU fault trên A11 (status=5 SubmissionsIgnored đã quan sát):
+// argument texture/buffer KHÔNG BAO GIỜ được để trống — GL quy định incomplete
+// texture = (0,0,0,1), UBO unbound = undefined (ta chọn 0, an toàn hơn fault).
+// Cache theo device (thread_local như SamplerForUnit).
+static std::shared_ptr<metal::ITexture> FallbackBlackTex(Context& c) {
+    static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::ITexture>> cache;
+    auto it = cache.find(c.device.get());
+    if (it != cache.end() && it->second) return it->second;
+    uint8_t black[4] = {0, 0, 0, 255};
+    auto t = c.device->newTextureWithBytes(1, 1, metal::PixelFormat::RGBA8Unorm, black, 4);
+    if (t) cache[c.device.get()] = t;
+    return t;
+}
+static std::shared_ptr<metal::ITexture> FallbackBlackCube(Context& c) {
+    static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::ITexture>> cache;
+    auto it = cache.find(c.device.get());
+    if (it != cache.end() && it->second) return it->second;
+    auto t = c.device->newCubeTexture(1, metal::PixelFormat::RGBA8Unorm);
+    if (t) {
+        uint8_t black[4] = {0, 0, 0, 255};
+        for (uint32_t f = 0; f < 6; ++f)
+            c.device->updateCubeFace(t.get(), f, black, 4);
+        cache[c.device.get()] = t;
+    }
+    return t;
+}
+static std::shared_ptr<metal::IBuffer> FallbackZeroBuf(Context& c) {
+    static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::IBuffer>> cache;
+    auto it = cache.find(c.device.get());
+    if (it != cache.end() && it->second) return it->second;
+    uint8_t z[256] = {0};
+    auto b = c.device->newBufferWithBytes(z, sizeof(z), metal::StorageMode::Shared);
+    if (b) cache[c.device.get()] = b;
+    return b;
+}
+
 // Sampler state cho 1 unit: SamplerObject đã bind, else dựng từ TextureObject.params
 // (glTexParameter), else default LINEAR/REPEAT. Cache theo khóa đơn giản.
 static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint unit,
@@ -358,20 +394,42 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     // UBO read-only (vanilla 1.17+/Sodium): mỗi block bind buffer(17+k) per-stage.
     // Block → bindingPoint (glUniformBlockBinding) → GL buffer (BindBufferBase/Range).
+    // Block thiếu buffer → bind zero fallback (đúng hơn fault GPU; slot vẫn tiến
+    // để khớp MSL buffer index).
     std::vector<std::shared_ptr<metal::IBuffer>> uboKeep;
     {
         int slot = 17;
+        auto bindZero = [&](int s) {
+            auto z = FallbackZeroBuf(c);
+            if (!z) return;
+            uboKeep.push_back(z);
+            enc->setVertexBuffer(z.get(), 0, (uint32_t)s);
+            enc->setFragmentBuffer(z.get(), 0, (uint32_t)s);
+        };
         for (auto& b : pr.uniformBlocks) {
             if (slot > 30) break; // Metal tối đa 31 slot, giữ 31 dự phòng
             auto bit = c.uniformBindPoints.find(b.binding);
-            if (bit == c.uniformBindPoints.end() || !bit->second.buffer) { ++slot; continue; }
+            if (bit == c.uniformBindPoints.end() || !bit->second.buffer) {
+                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + b.name + " unbound, zero fallback");
+                bindZero(slot++);
+                continue;
+            }
             auto t = c.buffers.find(bit->second.buffer);
-            if (t == c.buffers.end() || t->second.data.empty()) { ++slot; continue; }
+            if (t == c.buffers.end() || t->second.data.empty()) {
+                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + b.name + " nodata, zero fallback");
+                bindZero(slot++);
+                continue;
+            }
             size_t off = (size_t)bit->second.offset;
             size_t len = bit->second.size ? (size_t)bit->second.size
                                           : t->second.data.size() - std::min(off, t->second.data.size());
-            if (off >= t->second.data.size()) { ++slot; continue; }
+            if (off >= t->second.data.size()) {
+                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + b.name + " offset vuot, zero fallback");
+                bindZero(slot++);
+                continue;
+            }
             len = std::min(len, t->second.data.size() - off);
+            if (!len) { bindZero(slot++); continue; }
             auto ub = TempUpload(c, t->second.data.data() + off, len);
             uboKeep.push_back(ub);
             // UBO dùng chung cả 2 stage (đúng GL: block visible cả vs+fs)
@@ -383,15 +441,16 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // Sampler/texture theo glUniform1i unit → MSL slot k (fix bug bind theo unit):
     // FS samplers (theo thứ tự khai báo) → fragment texture(k)/sampler(k).
     // VS samplers → vertex texture(k)/sampler(k). Mặc định unit 0 đúng GL.
-    // Target không khớp loại sampler (cube/array gắn texture 2D...) → BỎ bind
-    // để Metal không abort encoder (đen đúng sampler đó, P1 làm cube/array thật).
+    // Thiếu texture/không khớp loại → bind fallback ĐEN (đúng GL incomplete =
+    // (0,0,0,1)) thay vì bỏ trống argument gây GPU fault trên A11.
+    // Cube (panorama samplerCube) bind được khi texture là CUBE thật.
     auto kindOk = [&](const std::string& name, GLenum target) {
         auto kit = pr.samplerKind.find(name);
         char kind = (kit == pr.samplerKind.end()) ? '2' : kit->second;
-        // Cube/Array: chưa có GPU texture đúng loại (placeholder 2D gắn vào
-        // texturecube param sẽ abort encoder) → bỏ bind, đen đúng sampler đó.
-        // P1: MTLTextureTypeCube/Array thật.
-        if (kind == 'C' || kind == 'A') return false;
+        // Array: chưa có GPU texture đúng loại → đen an toàn (giữ skip).
+        if (kind == 'A') return false;
+        // Cube: chỉ khi target là CUBE (GPU luôn là cube thật sau fix).
+        if (kind == 'C') return target == 0x8513;
         // target==0: DSA bind (glBindTextureUnit) không ghi target → tin tưởng.
         // Chỉ chặn mismatch CHẮC CHẮN (cả hai đã biết mà khác nhau).
         if (target == 0) return true;
@@ -404,34 +463,66 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         const std::string& name = pr.vsSamplers[k];
         auto uit = pr.samplerUnits.find(name);
         GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
-        if (unit >= 32) continue;
-        GLuint texId = c.state.BoundTexture(unit);
-        if (!texId) continue;
-        auto tit = c.textures.find(texId);
-        if (tit == c.textures.end() || !tit->second.gpu) continue;
-        if (!kindOk(name, tit->second.target)) {
-            c.LogDebug(0, 0, 0, 0, "AppleDrawGL: bo bind VS sampler " + name + " (target khong khop)");
-            continue;
+        auto kit = pr.samplerKind.find(name);
+        char kind = (kit == pr.samplerKind.end()) ? '2' : kit->second;
+        if (kind == 'A') continue; // array: chưa có fallback đúng loại (giữ skip)
+        const TextureObject* txp = nullptr;
+        metal::ITexture* gpu = nullptr;
+        if (unit < 32) {
+            GLuint texId = c.state.BoundTexture(unit);
+            auto tit = c.textures.find(texId);
+            if (tit != c.textures.end() && tit->second.gpu &&
+                kindOk(name, tit->second.target)) {
+                txp = &tit->second;
+                gpu = txp->gpu.get();
+            } else if (tit != c.textures.end()) {
+                c.LogDebug(0, 0, 0, 0,
+                           "AppleDrawGL: VS sampler " + name + " thieu/khop, fallback den");
+            }
         }
-        enc->setVertexTexture(tit->second.gpu.get(), (uint32_t)k);
-        auto ss = SamplerForUnit(c, unit, tit->second);
+        std::shared_ptr<metal::ISamplerState> ss;
+        if (!gpu) {
+            gpu = (kind == 'C' ? FallbackBlackCube(c) : FallbackBlackTex(c)).get();
+            if (!gpu) continue; // backend nghẽn, bỏ qua trung thực
+            static thread_local TextureObject dummyTex;
+            ss = SamplerForUnit(c, 0, dummyTex);
+        } else {
+            ss = SamplerForUnit(c, unit, *txp);
+        }
+        enc->setVertexTexture(gpu, (uint32_t)k);
         if (ss) enc->setVertexSamplerState(ss.get(), (uint32_t)k);
     }
     for (size_t k = 0; k < pr.fsSamplers.size(); ++k) {
         const std::string& name = pr.fsSamplers[k];
         auto uit = pr.samplerUnits.find(name);
         GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
-        if (unit >= 32) continue;
-        GLuint texId = c.state.BoundTexture(unit);
-        if (!texId) continue;
-        auto tit = c.textures.find(texId);
-        if (tit == c.textures.end() || !tit->second.gpu) continue;
-        if (!kindOk(name, tit->second.target)) {
-            c.LogDebug(0, 0, 0, 0, "AppleDrawGL: bo bind FS sampler " + name + " (target khong khop)");
-            continue;
+        auto kit = pr.samplerKind.find(name);
+        char kind = (kit == pr.samplerKind.end()) ? '2' : kit->second;
+        if (kind == 'A') continue; // array: chưa có fallback đúng loại (giữ skip)
+        const TextureObject* txp = nullptr;
+        metal::ITexture* gpu = nullptr;
+        if (unit < 32) {
+            GLuint texId = c.state.BoundTexture(unit);
+            auto tit = c.textures.find(texId);
+            if (tit != c.textures.end() && tit->second.gpu &&
+                kindOk(name, tit->second.target)) {
+                txp = &tit->second;
+                gpu = txp->gpu.get();
+            } else if (tit != c.textures.end()) {
+                c.LogDebug(0, 0, 0, 0,
+                           "AppleDrawGL: FS sampler " + name + " thieu/khop, fallback den");
+            }
         }
-        enc->setFragmentTexture(tit->second.gpu.get(), (uint32_t)k);
-        auto ss = SamplerForUnit(c, unit, tit->second);
+        std::shared_ptr<metal::ISamplerState> ss;
+        if (!gpu) {
+            gpu = (kind == 'C' ? FallbackBlackCube(c) : FallbackBlackTex(c)).get();
+            if (!gpu) continue; // backend nghẽn, bỏ qua trung thực
+            static thread_local TextureObject dummyTex;
+            ss = SamplerForUnit(c, 0, dummyTex);
+        } else {
+            ss = SamplerForUnit(c, unit, *txp);
+        }
+        enc->setFragmentTexture(gpu, (uint32_t)k);
         if (ss) enc->setFragmentSamplerState(ss.get(), (uint32_t)k);
     }
     // Tương thích ngược: program cũ không có sampler list (link trước fix) → bind legacy theo unit
@@ -612,6 +703,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                         a.relativeOffset, a.stride, a.buffer, base, bytes.c_str());
             }
             // UBO: diagonal + hàng 0 (đọc từ shadow = nguồn TempUpload khi draw).
+            // Ngưỡng trung thực theo have thực (Fog 40B/SamplerInfo 16B từng bị
+            // báo NODATA oan vì đòi 64B).
             for (auto& b : pr.uniformBlocks) {
                 auto bit = c.uniformBindPoints.find(b.binding);
                 if (bit == c.uniformBindPoints.end() || !bit->second.buffer) {
@@ -621,29 +714,34 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 }
                 auto t = c.buffers.find(bit->second.buffer);
                 size_t off = (bit->second.offset > 0) ? (size_t)bit->second.offset : 0;
-                if (t == c.buffers.end() || t->second.data.size() < off + 64) {
-                    fprintf(stderr, "[TGLMT]   ubo %s: NODATA\n", b.name.c_str());
+                size_t have =
+                    (t == c.buffers.end() || off >= t->second.data.size())
+                        ? 0
+                        : t->second.data.size() - off;
+                if (have < 16) {
+                    fprintf(stderr, "[TGLMT]   ubo %s: NODATA (have %zuB)\n", b.name.c_str(),
+                            have);
                     continue;
                 }
                 const float* m = (const float*)(t->second.data.data() + off);
+                size_t nf = have / 4;
+                auto F = [&](size_t k) { return k < nf ? m[k] : 0.0f; };
                 // Full vec4 đầu (11 vec4 = 176B: ModelViewMat + ColorModulator +
                 // ModelOffset + TextureMat cho DynamicTransforms): ColorModulator
                 // = 0 là đen toàn bộ menu dù matrices đúng (mọi FS đều nhân nó).
-                size_t have = t->second.data.size() - off;
                 int nvec = (int)std::min<size_t>(have / 16, 11);
                 std::string full;
                 char fb[48];
                 for (int vi = 0; vi < nvec; ++vi) {
-                    snprintf(fb, sizeof(fb), "%s(%.4g,%.4g,%.4g,%.4g)", vi ? " " : "",
-                             m[vi * 4], m[vi * 4 + 1], m[vi * 4 + 2], m[vi * 4 + 3]);
+                    snprintf(fb, sizeof(fb), "%s(%.4g,%.4g,%.4g,%.4g)", vi ? " " : "", F(vi * 4),
+                             F(vi * 4 + 1), F(vi * 4 + 2), F(vi * 4 + 3));
                     full += fb;
                 }
                 fprintf(stderr,
-                        "[TGLMT]   ubo %s (bindpt %u, buf %u+%zu, %zub): diag=(%g,%g,%g,%g) "
-                        "row0=(%g,%g,%g,%g)\n[TGLMT]     full=[%s]\n",
-                        b.name.c_str(), b.binding, bit->second.buffer, off,
-                        t->second.data.size(), m[0], m[5], m[10], m[15], m[0], m[1], m[2],
-                        m[3], full.c_str());
+                        "[TGLMT]   ubo %s (bindpt %u, buf %u+%zu, have %zuB): "
+                        "diag=(%g,%g,%g,%g) row0=(%g,%g,%g,%g)\n[TGLMT]     full=[%s]\n",
+                        b.name.c_str(), b.binding, bit->second.buffer, off, have, F(0), F(5),
+                        F(10), F(15), F(0), F(1), F(2), F(3), full.c_str());
             }
             // Texture theo sampler (unit, id, WxH, format, gpu?, pixel đầu).
             auto dumpSamp = [&](const std::string& name, bool isVS) {
@@ -658,6 +756,21 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     return;
                 }
                 auto& tx = tit->second;
+                // Minfilter thực (quyết định mipmap completeness): sampler object
+                // đã bind, else texture params, else default GL (NEAREST_MIPMAP).
+                uint32_t minF = 0x2601, magF = 0x2601;
+                {
+                    GLuint sid = c.state.BoundSampler(unit);
+                    auto sit = c.samplers.find(sid);
+                    const std::unordered_map<GLenum, GLint>* pp = &tx.params;
+                    if (sid && sit != c.samplers.end()) pp = &sit->second.iparams;
+                    auto g = [&](GLenum k, uint32_t d) {
+                        auto it = pp->find(k);
+                        return it == pp->end() ? d : (uint32_t)it->second;
+                    };
+                    minF = g(0x2801, minF);
+                    magF = g(0x2800, magF);
+                }
                 std::string px0 = "none";
                 if (!tx.pixels.empty() && tx.pixels.size() >= 4) {
                     char b[32];
@@ -678,9 +791,12 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                         }
                     }
                 }
-                fprintf(stderr, "[TGLMT]   samp %s (%s): unit=%u tex=%u %ux%u fmt=0x%x gpu=%d px0=%s\n",
+                fprintf(stderr,
+                        "[TGLMT]   samp %s (%s): unit=%u tex=%u %ux%u fmt=0x%x gpu=%d "
+                        "min=0x%x mag=0x%x lv=%d tgt=0x%x px0=%s\n",
                         name.c_str(), isVS ? "vs" : "fs", unit, texId, tx.w, tx.h,
-                        tx.internalFormat, (int)(tx.gpu != nullptr), px0.c_str());
+                        tx.internalFormat, (int)(tx.gpu != nullptr), minF, magF, tx.levels,
+                        tx.target, px0.c_str());
             };
             for (auto& s : pr.vsSamplers) dumpSamp(s, true);
             for (auto& s : pr.fsSamplers) dumpSamp(s, false);

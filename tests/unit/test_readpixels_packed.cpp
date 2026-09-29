@@ -66,7 +66,7 @@ int main() {
     glGenTextures(1, &t2);
     glBindTexture(0x0DE1, t2);
     unsigned char img[16] = {9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 11, 12, 13, 14, 15, 16};
-    glPixelStorei(0x0CF2, 1);
+    glPixelStorei(0x0CF5, 1); // UNPACK_ALIGNMENT=1 (tight; 0x0CF2 là ROW_LENGTH)
     glTexImage2D(0x0DE1, 0, 0x8058, 2, 2, 0, 0x1908, 0x1401, img);
     unsigned char back[16] = {0};
     glGetTexImage(0x0DE1, 0, 0x1908, 0x1401, back);

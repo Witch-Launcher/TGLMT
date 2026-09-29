@@ -34,21 +34,41 @@ static size_t Bpp(GLenum format, GLenum type) {
         case 0x1902: return 1; // DEPTH
         case 0x1901: return 1; // STENCIL
         case 0x1909: return 1; // LUMINANCE-ish
+        case 0x1903: return 1; // RED (font RED8 — LUMINANCE upload của game)
+        case 0x1906: return 1; // ALPHA
+        case 0x1904: return 1; // GREEN (legacy)
+        case 0x1905: return 1; // BLUE (legacy)
+        case 0x8227: return 2; // RG (LUMINANCE_ALPHA upload của game)
         default: return 4;
     }
 }
-// Sync 1 vùng pixels lên GPU: RGBA/UBYTE direct, RGB/UBYTE expand alpha 255.
-// srcRows trỏ vùng (xoff,yoff,w,h) với pitch srcRowLen. Trả true nếu đã sync.
+// Pitch unpack đúng spec §8.5: ROW_LENGTH (pixel, 0 = width) rồi align.
+// Game 26.x set ROW_LENGTH = image width qua GlCommandEncoder.writeToTexture
+// (font glyph sub-upload) — bỏ qua là đọc sai hàng (chữ hỏng).
+static size_t UnpackRowLen(Context& c, size_t w, size_t bpp) {
+    GLint rl = c.state.PixelStore().unpackRowLength;
+    size_t elems = (rl > 0) ? (size_t)rl : w;
+    GLint al = c.state.PixelStore().unpackAlignment;
+    size_t align = (al == 1 || al == 2 || al == 4 || al == 8) ? (size_t)al : 4;
+    return ((elems * bpp + align - 1) / align) * align;
+}
+// Sync 1 vùng pixels lên GPU: RGBA/RED/RG/UBYTE raw (tight), RGB/UBYTE expand
+// alpha 255. srcRows trỏ vùng (xoff,yoff,w,h) với pitch srcRowLen. Trả true
+// nếu đã sync. RED/RG raw đúng cho R8/RG8 GPU (font RED8 của game).
 static bool SyncRegionToGPU(Context& c, TextureObject& tx, GLint xoff, GLint yoff, GLsizei w,
                             GLsizei h, const uint8_t* srcRows, size_t srcRowLen, GLenum format,
                             GLenum type) {
     if (!tx.gpu || w <= 0 || h <= 0) return false;
-    if (format == 0x1908 && type == 0x1401) {
-        std::vector<uint8_t> tight((size_t)w * h * 4);
+    if (type == 0x1401 &&
+        (format == 0x1908 || format == 0x1903 || format == 0x8227 || format == 0x1906)) {
+        size_t bpp = Bpp(format, type);
+        std::vector<uint8_t> tight((size_t)w * h * bpp);
         for (GLsizei r = 0; r < h; ++r)
-            memcpy(tight.data() + (size_t)r * w * 4, srcRows + r * srcRowLen, (size_t)w * 4);
+            memcpy(tight.data() + (size_t)r * w * bpp, srcRows + r * srcRowLen,
+                   (size_t)w * bpp);
         return c.device->updateTexture(tx.gpu.get(), (uint32_t)xoff, (uint32_t)yoff,
-                                       (uint32_t)w, (uint32_t)h, tight.data(), (size_t)w * 4);
+                                       (uint32_t)w, (uint32_t)h, tight.data(),
+                                       (size_t)w * bpp);
     }
     if (format == 0x1907 && type == 0x1401) {
         std::vector<uint8_t> rgba((size_t)w * h * 4);
@@ -133,8 +153,18 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     TextureObject* tp = BoundTex(c, target);
     if (!tp) return; // lỗi đã record trong BoundTex
     auto& tx = *tp;
-    // Upload face cubemap: mỗi face shadow riêng, GPU placeholder = face 0.
-    // (Cube Metal thật + sample vec3 là P1.) Không lỗi để GlDevice qua được.
+    // Mip levels >0: chỉ ghi nhận số levels, KHÔNG đụng base (bug cũ: ghi đè
+    // w/h/pixels bằng level nhỏ nhất → TexSubImage level 0 fail bounds →
+    // texture rỗng. Game 26.x alloc mọi mip qua TexImage2D NULL trước).
+    // GPU TGLMT chỉ giữ base level (generateMipmap cần texture mipmapped).
+    if (level > 0) {
+        if (level + 1 > tx.levels) tx.levels = level + 1;
+        c.LogDebug(0, 0, 0, 0, "glTexImage2D: mip level>0 giữ base (GPU base-level)");
+        (void)border;
+        return;
+    }
+    // Upload face cubemap: mỗi face shadow riêng + GPU cube thật (panorama
+    // vanilla samplerCube). Trước đây placeholder 2D + skip bind = đen.
     if (IsCubeFace(target) && tx.target == 0x8513) {
         int face = (int)(target - 0x8515);
         size_t bpp = Bpp(format, type);
@@ -145,25 +175,30 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
         tx.w = w; tx.h = h; tx.internalFormat = internalformat; tx.levels = level + 1;
         tx.faces[face].assign((size_t)w * h * bpp, 0);
         if (pixels) {
-            GLint align = c.state.PixelStore().unpackAlignment;
-            size_t rowLen = (((size_t)w * bpp + (size_t)align - 1) / (size_t)align) * (size_t)align;
-            const uint8_t* src = (const uint8_t*)pixels;
+            size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+            size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                          (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+            const uint8_t* src = (const uint8_t*)pixels + skip;
             for (GLsizei r = 0; r < h; ++r)
-                memcpy(tx.faces[face].data() + (size_t)r * w * bpp, src + r * rowLen, (size_t)w * bpp);
+                memcpy(tx.faces[face].data() + (size_t)r * w * bpp, src + r * rowLen,
+                       (size_t)w * bpp);
         }
-        if (face == 0) { // mirror face 0 cho GetTexImage + GPU placeholder
-            tx.pixels = tx.faces[0];
-            tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
-            if (tx.gpu && pixels && format == 0x1908 && type == 0x1401 && w > 0 && h > 0)
-                c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
-                                        tx.pixels.data(), (size_t)w * 4);
-        } else if (!tx.gpu) {
-            tx.pixels = tx.faces[face]; // chưa có face 0: mirror tạm để không đọc rác
-            tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
+        if (!tx.gpu) // tạo 1 lần ở face đầu tiên thấy
+            tx.gpu = c.device->newCubeTexture((uint32_t)w, ToMetalFormat(internalformat));
+        if (tx.gpu && pixels && type == 0x1401 && w > 0 && h > 0 &&
+            (format == 0x1908 || format == 0x1903) && (uint32_t)w == tx.w) {
+            size_t bpr = (size_t)w * bpp;
+            std::vector<uint8_t> tight((size_t)w * h * bpp);
+            for (GLsizei r = 0; r < h; ++r)
+                memcpy(tight.data() + (size_t)r * w * bpp,
+                       tx.faces[face].data() + (size_t)r * w * bpp, (size_t)w * bpp);
+            if (!c.device->updateCubeFace(tx.gpu.get(), (uint32_t)face, tight.data(), bpr))
+                c.LogDebug(0, 0, 0, 0, "glTexImage2D cubemap face: GPU upload fail");
+        } else if (pixels && !(format == 0x1908 || format == 0x1903)) {
+            c.LogDebug(0, 0, 0, 0, "glTexImage2D cubemap face: format chưa upload GPU (giữ shadow)");
         }
-        if (face != 0)
-            c.LogDebug(0, 0, 0, 0, "glTexImage2D cubemap face: shadow only, GPU placeholder face 0 (P1 cube)");
-        (void)border; (void)level;
+        tx.pixels = tx.faces[0]; // mirror face 0 cho diag + fallback CPU
+        (void)border;
         return;
     }
     tx.isCube = false;
@@ -171,28 +206,31 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     size_t n = (size_t)w * h * Bpp(format, type);
     tx.pixels.assign(n, 0);
     if (pixels) {
-        // áp unpackAlignment (spec: row pitch = ceil(w*bpp / align)*align)
-        GLint align = c.state.PixelStore().unpackAlignment;
+        // áp unpackAlignment + ROW_LENGTH (spec §8.5)
         size_t bpp = Bpp(format, type);
-        size_t rowLen = ((w * bpp + align - 1) / align) * align;
-        const uint8_t* src = (const uint8_t*)pixels;
+        size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+        size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                      (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+        const uint8_t* src = (const uint8_t*)pixels + skip;
         for (GLsizei r = 0; r < h; ++r) memcpy(tx.pixels.data() + r * w * bpp, src + r * rowLen, (size_t)w * bpp);
     }
     tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
     // Upload base level lên GPU (bug cũ: tạo texture rỗng → sampling đen).
     // Vanilla atlas RGBA/UBYTE tight; JPG panorama là RGB/UBYTE → expand alpha 255.
-    // Mọi format khác giữ shadow + log (trước đây im lặng đen).
+    // Font RED8 (LUMINANCE) → R8 raw. Mọi format khác giữ shadow + log.
     if (tx.gpu && pixels && w > 0 && h > 0) {
-        if (format == 0x1908 && type == 0x1401) {
+        if ((format == 0x1908 || format == 0x1903 || format == 0x8227) && type == 0x1401) {
             // pixels đã unpack vào tx.pixels tight → upload trực tiếp
-            if (tx.pixels.size() >= (size_t)w * h * 4)
+            size_t bpp = Bpp(format, type);
+            if (tx.pixels.size() >= (size_t)w * h * bpp)
                 c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
-                                        tx.pixels.data(), (size_t)w * 4);
+                                        tx.pixels.data(), (size_t)w * bpp);
         } else if (format == 0x1907 && type == 0x1401) {
             // RGB → RGBA (alpha 255), tôn trọng unpack pitch của source
-            GLint align = c.state.PixelStore().unpackAlignment;
-            size_t rowLen = (((size_t)w * 3 + (size_t)align - 1) / (size_t)align) * (size_t)align;
-            const uint8_t* src = (const uint8_t*)pixels;
+            size_t rowLen = UnpackRowLen(c, (size_t)w, 3);
+            size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                          (size_t)c.state.PixelStore().unpackSkipPixels * 3;
+            const uint8_t* src = (const uint8_t*)pixels + skip;
             std::vector<uint8_t> rgba((size_t)w * h * 4);
             for (GLsizei r = 0; r < h; ++r)
                 for (GLsizei x = 0; x < w; ++x) {
@@ -223,13 +261,17 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     TextureObject* tp = BoundTex(c, target);
     if (!tp || !pixels) { if (!pixels) c.errors.Record(0x0501); return; }
     auto& t = *tp;
-    // SubImage lên face cubemap: ghi vào face slot, sync GPU chỉ khi face 0.
+    // Level>0: GPU chỉ giữ base, không corrupt base shadow (xem TexImage).
+    if (level > 0) {
+        c.LogDebug(0, 0, 0, 0, "glTexSubImage2D: mip level>0 bỏ qua (GPU base-level)");
+        return;
+    }
+    // SubImage lên face cubemap: ghi vào face slot + sync GPU face đó.
     std::vector<uint8_t>* dstPix = &t.pixels;
-    bool syncGPU = true;
+    int cubeFace = -1;
     if (IsCubeFace(target) && t.target == 0x8513 && t.isCube) {
-        int face = (int)(target - 0x8515);
-        dstPix = &t.faces[face];
-        syncGPU = (face == 0);
+        cubeFace = (int)(target - 0x8515);
+        dstPix = &t.faces[cubeFace];
     }
     size_t bpp = Bpp(format, type);
     // Copy đúng vùng (xoff,yoff), kẹp biên theo spec §8.5 (lệch biên → INVALID_VALUE)
@@ -237,9 +279,10 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
         (size_t)(xoff + w) > t.w || (size_t)(yoff + h) > t.h) {
         c.errors.Record(0x0501); return;
     }
-    GLint align = c.state.PixelStore().unpackAlignment;
-    size_t rowLen = ((size_t)w * bpp + (size_t)align - 1) / (size_t)align * (size_t)align;
-    const uint8_t* src = (const uint8_t*)pixels;
+    size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+    size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                  (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+    const uint8_t* src = (const uint8_t*)pixels + skip;
     if (dstPix->size() < (size_t)t.w * t.h * bpp) dstPix->resize((size_t)t.w * t.h * bpp, 0);
     for (GLsizei r = 0; r < h; ++r) {
         uint8_t* dst = dstPix->data() + ((size_t)(yoff + r) * t.w + (size_t)xoff) * bpp;
@@ -247,8 +290,19 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     }
     if (dstPix != &t.pixels && !t.faces[0].empty()) t.pixels = t.faces[0]; // mirror face 0
     // Sync GPU vùng đã đổi (chunk atlas streaming mỗi frame) — A11 Shared coherent
-    if (syncGPU) SyncRegionToGPU(c, t, xoff, yoff, w, h, src, rowLen, format, type);
-    (void)level;
+    if (cubeFace >= 0) {
+        if (t.gpu && (format == 0x1908 || format == 0x1903) && type == 0x1401) {
+            size_t bpr = (size_t)t.w * bpp;
+            std::vector<uint8_t> tight((size_t)t.w * t.h * bpp);
+            for (uint32_t r = 0; r < t.h; ++r)
+                memcpy(tight.data() + (size_t)r * t.w * bpp,
+                       dstPix->data() + (size_t)r * t.w * bpp, (size_t)t.w * bpp);
+            if (!c.device->updateCubeFace(t.gpu.get(), (uint32_t)cubeFace, tight.data(), bpr))
+                c.LogDebug(0, 0, 0, 0, "glTexSubImage2D: cube face GPU sync fail");
+        }
+    } else {
+        SyncRegionToGPU(c, t, xoff, yoff, w, h, src, rowLen, format, type);
+    }
 }
 void glTexSubImage1D(GLenum t, GLint l, GLint x, GLsizei w, GLenum f, GLenum ty, const void* p) {
     glTexSubImage2D(t, l, x, 0, w, 1, f, ty, p);
@@ -307,9 +361,21 @@ void glPixelStoref(GLenum p, GLfloat v) { glPixelStorei(p, (GLint)v); }
 void glPixelStorei(GLenum pname, GLint param) {
     Context& c = Context::Current();
     auto& ps = c.state.PixelStore();
+    // Enum đúng spec Table 8.x (đã đối chiếu client.jar 26.1.2:
+    // GlCommandEncoder.writeToTexture set ROW_LENGTH/ALIGNMENT/SKIPs).
+    // Bug cũ: 0x0CF2 (ROW_LENGTH) nhầm thành unpackAlignment,
+    // 0x0CF5 (UNPACK_ALIGNMENT) nhầm sang pack → glyph upload sai pitch.
     switch (pname) {
-        case 0x0CF5: ps.packAlignment = param; break;   // PACK_ALIGNMENT
-        case 0x0CF2: ps.unpackAlignment = param; break; // UNPACK_ALIGNMENT
+        case 0x0CF2: ps.unpackRowLength = param; break;   // UNPACK_ROW_LENGTH
+        case 0x0CF3: ps.unpackSkipRows = param; break;    // UNPACK_SKIP_ROWS
+        case 0x0CF4: ps.unpackSkipPixels = param; break;  // UNPACK_SKIP_PIXELS
+        case 0x0CF5: ps.unpackAlignment = param; break;   // UNPACK_ALIGNMENT
+        case 0x0CF6: ps.unpackImageHeight = param; break; // UNPACK_IMAGE_HEIGHT
+        case 0x0CF7: ps.unpackSkipImages = param; break;  // UNPACK_SKIP_IMAGES
+        case 0x0D02: ps.packRowLength = param; break;     // PACK_ROW_LENGTH
+        case 0x0D03: ps.packSkipRows = param; break;      // PACK_SKIP_ROWS
+        case 0x0D04: ps.packSkipPixels = param; break;    // PACK_SKIP_PIXELS
+        case 0x0D05: ps.packAlignment = param; break;     // PACK_ALIGNMENT
         default: c.state.SetShadow(pname, &param, 4); break;
     }
 }
@@ -379,6 +445,10 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
     if (!p) { c.errors.Record(0x0501); return; }
+    if (l > 0) {
+        c.LogDebug(0, 0, 0, 0, "glTextureSubImage2D: mip level>0 bỏ qua (GPU base-level)");
+        return;
+    }
     auto& tx = it->second;
     // Mirror bản bound (glTexSubImage2D): tôn trọng x/y + unpack pitch, sync GPU.
     // Game 26.x upload texture qua DSA khi direct_state_access bật.
@@ -387,16 +457,16 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
         c.errors.Record(0x0501);
         return;
     }
-    GLint align = c.state.PixelStore().unpackAlignment;
-    size_t rowLen = ((size_t)w * bpp + (size_t)align - 1) / (size_t)align * (size_t)align;
+    size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
     if (tx.pixels.size() < (size_t)tx.w * tx.h * bpp) tx.pixels.resize((size_t)tx.w * tx.h * bpp, 0);
-    const uint8_t* src = (const uint8_t*)p;
+    size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                  (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+    const uint8_t* src = (const uint8_t*)p + skip;
     for (GLsizei r = 0; r < h; ++r) {
         uint8_t* dst = tx.pixels.data() + ((size_t)(y + r) * tx.w + (size_t)x) * bpp;
         memcpy(dst, src + r * rowLen, (size_t)w * bpp);
     }
     SyncRegionToGPU(c, tx, x, y, w, h, src, rowLen, f, ty);
-    (void)l;
 }
 void glTextureSubImage3D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLenum j, const void* k) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; }
 } // namespace tglmt::gl

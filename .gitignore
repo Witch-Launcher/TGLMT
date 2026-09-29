@@ -14,3 +14,4 @@ tests/corpus/.extract
 .tmp/
 Testing/
 *.ipa
+/tests/corpus/mc-26.1.2-shaders
