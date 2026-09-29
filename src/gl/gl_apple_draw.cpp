@@ -224,7 +224,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         c.LogDebug(0, 0, 0, 0, "AppleDrawGL: attributeless draw (vertex_id)");
     }
     for (auto& ca : cas) {
-        if (ca.stride == 0) ca.stride = ca.offset + ca.size * GLTypeSize(ca.type);
+        // stride 0 = tightly packed theo chính attribute (spec §10.3.1), không
+        // cộng offset (bug cũ cộng relative vào stride làm đỉnh thưa sai).
+        if (ca.stride == 0) ca.stride = ca.size * GLTypeSize(ca.type);
     }
     // 3. Target: FBO 0 → default; khác → wrap colorTex[0] (+depth nếu có)
     std::shared_ptr<metal::IRenderTarget> target;
@@ -510,58 +512,132 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     c.appleStats.drawsEncoded++;
     c.appleStats.progEncoded[prog]++;
-    // Chẩn đoán đen màn hình: định danh program 1 lần (tên attribute/sampler/
-    // block) để đối chiếu với pipeline vanilla nào đang vẽ trên máy.
+    // Chẩn đoán đen màn hình: dump TOÀN BỘ draw-state lần đầu mỗi (program,VAO)
+    // (thừa còn hơn thiếu): attribute + byte đỉnh đầu trên GPU, UBO, texture,
+    // blend/cull/depth/scissor. Cap 48 combo để log không phình.
     {
-        static std::set<GLuint> logged;
-        if (!logged.count(prog)) {
-            logged.insert(prog);
-            std::string attrs, vsS, fsS, blks;
-            for (auto& kv : pr.attribLoc) {
-                if (!attrs.empty()) attrs += ",";
-                attrs += kv.first + "@" + std::to_string(kv.second);
+        static std::set<std::pair<GLuint, GLuint>> loggedDraws;
+        auto key = std::make_pair(prog, vao);
+        if (loggedDraws.size() < 48 && !loggedDraws.count(key)) {
+            loggedDraws.insert(key);
+            auto hex = [](const uint8_t* d, size_t n) {
+                static const char* H = "0123456789ABCDEF";
+                std::string s;
+                for (size_t i = 0; i < n; ++i) {
+                    s += H[(d[i] >> 4) & 15];
+                    s += H[d[i] & 15];
+                }
+                return s;
+            };
+            fprintf(stderr, "[TGLMT] draw prog@%u vao@%u mode=0x%x count=%d indexed=%d inst=%d\n",
+                    prog, vao, mode, count, (int)indexed, inst);
+            // Attributes: tên (tra từ attribLoc), format, binding/rel/stride,
+            // buffer + 24 byte đầu đỉnh 0 (đọc từ GPU = sự thật card thấy).
+            for (int i = 0; i < 16; ++i) {
+                const VertexAttrib& a = v.attribs[i];
+                if (!a.enabled) continue;
+                std::string nm = "?";
+                for (auto& kv : pr.attribLoc)
+                    if ((int)kv.second == i) {
+                        nm = kv.first;
+                        break;
+                    }
+                size_t base = 0;
+                if (a.binding < v.bindings.size() && v.bindings[a.binding].offset > 0)
+                    base = (size_t)v.bindings[a.binding].offset;
+                std::string bytes = "nogpu";
+                auto bbit = c.buffers.find(a.buffer);
+                if (bbit != c.buffers.end()) {
+                    size_t avail = 0;
+                    const uint8_t* ptr = nullptr;
+                    if (bbit->second.gpu && bbit->second.gpu->length() > base) {
+                        ptr = (const uint8_t*)bbit->second.gpu->contents() + base;
+                        avail = bbit->second.gpu->length() - base;
+                    } else if (bbit->second.data.size() > base) {
+                        ptr = bbit->second.data.data() + base;
+                        avail = bbit->second.data.size() - base;
+                    }
+                    if (ptr) bytes = hex(ptr, std::min<size_t>(avail, 24));
+                }
+                fprintf(stderr,
+                        "[TGLMT]   attr slot%d=%s %dx0x%x%s bind=%u rel=%zu stride=%d "
+                        "buf=%u base=%zu v0=[%s]\n",
+                        i, nm.c_str(), a.size, a.type, a.normalized ? "N" : "", a.binding,
+                        a.relativeOffset, a.stride, a.buffer, base, bytes.c_str());
             }
-            for (auto& s : pr.vsSamplers) {
-                if (!vsS.empty()) vsS += ",";
-                vsS += s;
-            }
-            for (auto& s : pr.fsSamplers) {
-                if (!fsS.empty()) fsS += ",";
-                fsS += s;
-            }
-            for (auto& b : pr.uniformBlocks) {
-                if (!blks.empty()) blks += ",";
-                blks += b.name;
-            }
-            c.LogDebug(0, 0, 0, 0,
-                       "AppleDrawGL prog@" + std::to_string(prog) + " attrs=[" + attrs +
-                           "] vsSamp=[" + vsS + "] fsSamp=[" + fsS + "] blocks=[" + blks + "]");
-            // LogDebug chỉ tới debugCb (game có thể không đăng ký) → stderr luôn
-            // để latestlog thấy được.
-            fprintf(stderr,
-                    "[TGLMT] prog@%u attrs=[%s] vsSamp=[%s] fsSamp=[%s] blocks=[%s]\n", prog,
-                    attrs.c_str(), vsS.c_str(), fsS.c_str(), blks.c_str());
-            // Dump diagonal mat4 đầu mỗi UBO bound (ortho/identity nhận ra ngay;
-            // toàn 0 => upload/binding hỏng dù draw encode bình thường).
+            // UBO: diagonal + hàng 0 (đọc từ shadow = nguồn TempUpload khi draw).
             for (auto& b : pr.uniformBlocks) {
                 auto bit = c.uniformBindPoints.find(b.binding);
                 if (bit == c.uniformBindPoints.end() || !bit->second.buffer) {
-                    fprintf(stderr, "[TGLMT] prog@%u ubo %s: UNBOUND (binding %u)\n", prog,
-                            b.name.c_str(), b.binding);
+                    fprintf(stderr, "[TGLMT]   ubo %s: UNBOUND (binding %u)\n", b.name.c_str(),
+                            b.binding);
                     continue;
                 }
                 auto t = c.buffers.find(bit->second.buffer);
-                size_t off =
-                    (bit->second.offset > 0) ? (size_t)bit->second.offset : 0;
+                size_t off = (bit->second.offset > 0) ? (size_t)bit->second.offset : 0;
                 if (t == c.buffers.end() || t->second.data.size() < off + 64) {
-                    fprintf(stderr, "[TGLMT] prog@%u ubo %s: NODATA\n", prog, b.name.c_str());
+                    fprintf(stderr, "[TGLMT]   ubo %s: NODATA\n", b.name.c_str());
                     continue;
                 }
                 const float* m = (const float*)(t->second.data.data() + off);
                 fprintf(stderr,
-                        "[TGLMT] prog@%u ubo %s (bindpt %u, buf %u+%zu): diag=(%g,%g,%g,%g)\n",
-                        prog, b.name.c_str(), b.binding, bit->second.buffer, off, m[0], m[5],
-                        m[10], m[15]);
+                        "[TGLMT]   ubo %s (bindpt %u, buf %u+%zu, %zub): diag=(%g,%g,%g,%g) "
+                        "row0=(%g,%g,%g,%g)\n",
+                        b.name.c_str(), b.binding, bit->second.buffer, off,
+                        t->second.data.size(), m[0], m[5], m[10], m[15], m[0], m[1], m[2],
+                        m[3]);
+            }
+            // Texture theo sampler (unit, id, WxH, format, gpu?, pixel đầu).
+            auto dumpSamp = [&](const std::string& name, bool isVS) {
+                GLuint unit = 0;
+                auto uit = pr.samplerUnits.find(name);
+                if (uit != pr.samplerUnits.end()) unit = uit->second;
+                GLuint texId = c.state.BoundTexture(unit);
+                auto tit = c.textures.find(texId);
+                if (tit == c.textures.end()) {
+                    fprintf(stderr, "[TGLMT]   samp %s: unit=%u tex#%u MISSING\n", name.c_str(),
+                            unit, texId);
+                    return;
+                }
+                auto& tx = tit->second;
+                std::string px0 = "none";
+                if (!tx.pixels.empty() && tx.pixels.size() >= 4) {
+                    char b[32];
+                    snprintf(b, sizeof(b), "%02X%02X%02X%02X", tx.pixels[0], tx.pixels[1],
+                             tx.pixels[2], tx.pixels[3]);
+                    px0 = std::string("shadow") + b;
+                }
+                // Ground truth GPU cho texture nhỏ (atlas lớn đọc tốn RAM).
+                if (tx.gpu && tx.w <= 256 && tx.h <= 256 && tx.w > 0 && tx.h > 0) {
+                    auto wt = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
+                    if (wt) {
+                        std::vector<uint8_t> tb((size_t)tx.w * tx.h * 4, 0);
+                        if (wt->readback(tb.data(), (size_t)tx.w * 4)) {
+                            char b[32];
+                            snprintf(b, sizeof(b), "gpu%02X%02X%02X%02X", tb[0], tb[1], tb[2],
+                                     tb[3]);
+                            px0 += std::string("+") + b;
+                        }
+                    }
+                }
+                fprintf(stderr, "[TGLMT]   samp %s (%s): unit=%u tex=%u %ux%u fmt=0x%x gpu=%d px0=%s\n",
+                        name.c_str(), isVS ? "vs" : "fs", unit, texId, tx.w, tx.h,
+                        tx.internalFormat, (int)(tx.gpu != nullptr), px0.c_str());
+            };
+            for (auto& s : pr.vsSamplers) dumpSamp(s, true);
+            for (auto& s : pr.fsSamplers) dumpSamp(s, false);
+            // State raster.
+            {
+                float bc[4];
+                c.state.GetBlendColor(bc);
+                auto sc = c.state.GetScissor();
+                fprintf(stderr,
+                        "[TGLMT]   state blend=%d cull=%d/%d depth=%d scissor=%d[%d,%d,%d,%d] "
+                        "clear=(%.2f,%.2f,%.2f,%.2f)\n",
+                        (int)c.state.IsEnabled(0x0BE2), (int)c.state.IsEnabled(0x0B44),
+                        c.state.CullMode(), (int)c.state.IsEnabled(0x0B71),
+                        (int)c.state.IsEnabled(0x0C11), sc.x, sc.y, sc.w, sc.h, c.clearColor[0],
+                        c.clearColor[1], c.clearColor[2], c.clearColor[3]);
             }
             fflush(stderr);
         }
