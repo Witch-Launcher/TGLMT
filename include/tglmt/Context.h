@@ -218,6 +218,7 @@ public:
         uint64_t noTarget = 0;       // thiếu default target / wrap fail
         uint64_t noPipeline = 0;     // pipeline nil (format attrib lạ...)
         uint64_t miscFail = 0;       // còn lại (VAO, buffer, commit...)
+        uint64_t glClears = 0;       // số lần glClear (đối chiếu pendingClear)
         std::map<GLuint, uint64_t> progEncoded; // program id -> số draw đã encode
     };
     AppleStats appleStats;

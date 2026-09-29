@@ -123,16 +123,17 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                 }
             }
             fprintf(stderr,
-                    "[TGLMT] build=b3-blackdiag7 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
+                    "[TGLMT] build=b3-blackdiag8 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
-                    "misc=%llu target=%ux%u vp=%.0fx%.0f@%.0f,%.0f center=(%u,%u,%u,%u) "
-                    "present=%d\n",
+                    "misc=%llu clears=%llu target=%p %ux%u vp=%.0fx%.0f@%.0f,%.0f "
+                    "center=(%u,%u,%u,%u) present=%d\n",
                     (unsigned long long)nSwap, dt, (unsigned long long)(a.drawsAttempted - pAtt),
                     (unsigned long long)(a.drawsEncoded - pEnc),
                     (unsigned long long)a.drawsAttempted, (unsigned long long)a.drawsEncoded,
                     a.progEncoded.size(), (unsigned long long)a.noProgram,
                     (unsigned long long)a.noTarget, (unsigned long long)a.noPipeline,
-                    (unsigned long long)a.miscFail, tw, th, vp.x, vp.y, vp.w, vp.h, center[0],
+                    (unsigned long long)a.miscFail, (unsigned long long)a.glClears,
+                    (const void*)tgt.get(), tw, th, vp.x, vp.y, vp.w, vp.h, center[0],
                     center[1], center[2], center[3], (int)ok);
             fflush(stderr);
             pAtt = a.drawsAttempted;

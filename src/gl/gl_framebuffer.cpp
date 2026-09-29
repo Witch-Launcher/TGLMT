@@ -211,6 +211,7 @@ void glClear(GLbitfield m) {
     c.state.SetShadow(0x0B00 /*CLEAR_STATE_MARKER*/, &m, 4);
     c.applePendingClear = true; // M5b: draw Apple kế tiếp clear, sau đó LOAD
     c.appleClearMask |= m;
+    c.appleStats.glClears++; // chẩn đoán đen màn hình: clear có được gọi không
 }
 void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
     Context& c = Context::Current();
