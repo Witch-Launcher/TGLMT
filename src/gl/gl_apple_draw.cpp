@@ -531,6 +531,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             };
             fprintf(stderr, "[TGLMT] draw prog@%u vao@%u mode=0x%x count=%d indexed=%d inst=%d\n",
                     prog, vao, mode, count, (int)indexed, inst);
+            // FBO đích: menu 26.x render qua post chain (offscreen) rồi composite
+            // ra màn hình. Nếu draw vào FBO != 0 mà composite cuối (blit/copy)
+            // bị stub thì màn hình đen dù mọi draw đều khỏe.
+            fprintf(stderr, "[TGLMT]   target fbo=%u (0 = default/màn hình)\n",
+                    c.state.BoundDrawFBO());
             // Index/EBO/baseVertex/first: draw indexed sai ở đây là đen toàn bộ
             // mà không error nào (indices rác → degenerate).
             {

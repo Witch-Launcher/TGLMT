@@ -219,6 +219,8 @@ public:
         uint64_t noPipeline = 0;     // pipeline nil (format attrib lạ...)
         uint64_t miscFail = 0;       // còn lại (VAO, buffer, commit...)
         uint64_t glClears = 0;       // số lần glClear (đối chiếu pendingClear)
+        uint64_t blits = 0;          // số lần glBlitFramebuffer (composite cuối?)
+        uint64_t copyTex = 0;        // số lần glCopyTexSubImage2D (post chain?)
         std::map<GLuint, uint64_t> progEncoded; // program id -> số draw đã encode
     };
     AppleStats appleStats;

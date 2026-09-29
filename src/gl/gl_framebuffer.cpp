@@ -2,6 +2,7 @@
 // Spec §9 (Framebuffer). Metal: colorAttachments[i]/depth/stencil, load/store.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <cstdio>
 using namespace tglmt;
 
 namespace tglmt::gl {
@@ -128,7 +129,19 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
     Context& c = Context::Current();
     GLuint readFbo = c.state.BoundReadFBO();
     GLuint drawFbo = c.state.BoundDrawFBO();
-    // Default FB (0) tham gia blit: headless/present path, hiện sync shadow + log (M5c present-blit).
+    // Chẩn đoán đen màn hình: composite cuối menu có thể qua đây (FBO→0).
+    // Stub với default FB (dưới) mà game dùng đường này là đen chắc.
+    {
+        static uint64_t n = 0;
+        if (++c.appleStats.blits, ++n <= 5) {
+            fprintf(stderr,
+                    "[TGLMT] blit#%llu read=%u draw=%u src=(%d,%d)-(%d,%d) dst=(%d,%d)-(%d,%d) "
+                    "mask=0x%x filter=0x%x\n",
+                    (unsigned long long)n, readFbo, drawFbo, s0, s1, s2, s3, d0, d1, d2, d3,
+                    m, f);
+            fflush(stderr);
+        }
+    }
     if (readFbo == 0 || drawFbo == 0) {
         c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: default-FB blit giữ shadow (present xử lý ở SwapBuffers)");
         return;

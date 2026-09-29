@@ -2,6 +2,7 @@
 // Spec §8 (Textures). PixelStore alignment áp dụng khi upload (spec Table 8.x).
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <cstdio>
 #include <cstring>
 using namespace tglmt;
 
@@ -315,7 +316,20 @@ void glPixelStorei(GLenum pname, GLint param) {
 void glCopyTexImage1D(GLenum a, GLint b, GLenum d, GLint e, GLint f, GLsizei g, GLint h) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h; }
 void glCopyTexImage2D(GLenum a, GLint b, GLenum d, GLint e, GLint f, GLsizei g, GLsizei h, GLint i) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
 void glCopyTexSubImage1D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLsizei f) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f; }
-void glCopyTexSubImage2D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLint f, GLsizei g, GLsizei h) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h; }
+void glCopyTexSubImage2D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLint f, GLsizei g, GLsizei h) {
+    Context& c = Context::Current();
+    // Chẩn đoán đen màn hình: post chain có thể copy default-FB → texture qua đây.
+    // Stub (dưới) mà game dùng đường này thì texture toàn 0 → đen.
+    {
+        static uint64_t n = 0;
+        if (++c.appleStats.copyTex, ++n <= 5) {
+            fprintf(stderr, "[TGLMT] copyTexSub#%llu level=%d off=(%d,%d) size=%dx%d\n",
+                    (unsigned long long)n, b, c_, d, f, g);
+            fflush(stderr);
+        }
+    }
+    (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;
+}
 void glCopyTexSubImage3D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLint f, GLint g, GLsizei h, GLsizei i) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
 void glCopyTextureSubImage1D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f; }
 void glCopyTextureSubImage2D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLint f, GLsizei g, GLsizei h) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h; }
