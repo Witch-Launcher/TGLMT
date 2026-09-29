@@ -621,12 +621,24 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     continue;
                 }
                 const float* m = (const float*)(t->second.data.data() + off);
+                // Full vec4 đầu (11 vec4 = 176B: ModelViewMat + ColorModulator +
+                // ModelOffset + TextureMat cho DynamicTransforms): ColorModulator
+                // = 0 là đen toàn bộ menu dù matrices đúng (mọi FS đều nhân nó).
+                size_t have = t->second.data.size() - off;
+                int nvec = (int)std::min<size_t>(have / 16, 11);
+                std::string full;
+                char fb[48];
+                for (int vi = 0; vi < nvec; ++vi) {
+                    snprintf(fb, sizeof(fb), "%s(%.4g,%.4g,%.4g,%.4g)", vi ? " " : "",
+                             m[vi * 4], m[vi * 4 + 1], m[vi * 4 + 2], m[vi * 4 + 3]);
+                    full += fb;
+                }
                 fprintf(stderr,
                         "[TGLMT]   ubo %s (bindpt %u, buf %u+%zu, %zub): diag=(%g,%g,%g,%g) "
-                        "row0=(%g,%g,%g,%g)\n",
+                        "row0=(%g,%g,%g,%g)\n[TGLMT]     full=[%s]\n",
                         b.name.c_str(), b.binding, bit->second.buffer, off,
                         t->second.data.size(), m[0], m[5], m[10], m[15], m[0], m[1], m[2],
-                        m[3]);
+                        m[3], full.c_str());
             }
             // Texture theo sampler (unit, id, WxH, format, gpu?, pixel đầu).
             auto dumpSamp = [&](const std::string& name, bool isVS) {
