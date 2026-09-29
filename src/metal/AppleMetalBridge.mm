@@ -290,8 +290,8 @@ private:
 class AppleRenderEncoder : public IRenderEncoder {
 public:
     AppleRenderEncoder(id<MTLCommandBuffer> cb, id<MTLRenderCommandEncoder> enc,
-                       id<MTLTexture> target)
-        : cb_(cb), enc_(enc), target_(target), ok_(cb && enc) {}
+                       id<MTLTexture> target, LogFn log = nullptr)
+        : cb_(cb), enc_(enc), target_(target), log_(log), ok_(cb && enc) {}
     void setViewport(const Viewport& vp) override {
         if (!ok_) return;
         MTLViewport m = {vp.x, vp.y, vp.w, vp.h, vp.n, vp.f};
@@ -390,7 +390,6 @@ public:
             [enc_ setCullMode:MTLCullModeNone];
             return;
         }
-        // GL_FRONT_AND_BACK (cull hết) được xử lý ở GL layer (bỏ draw), không tới đây.
         [enc_ setCullMode:(cullModeGL == 0x0404) ? MTLCullModeFront : MTLCullModeBack];
         [enc_ setFrontFacingWinding:(frontFaceGL == 0x0900) ? MTLWindingClockwise
                                                            : MTLWindingCounterClockwise];
@@ -403,6 +402,22 @@ public:
         if (!enc_ || !cb_) return false;
         [enc_ endEncoding];
         enc_ = nil;
+        // Chẩn đoán đen màn hình: GPU có thể error CB mà CPU không hay (A11).
+        // Sample 1/120 CB, chỉ log khi không Completed.
+        {
+            static int nNoWait = 0;
+            if ((++nNoWait % 120) == 0 && log_) {
+                LogFn log = log_;
+                [cb_ addCompletedHandler:^(id<MTLCommandBuffer> b) {
+                  if ([b status] != MTLCommandBufferStatusCompleted && log) {
+                      NSString* e = [[b error] localizedDescription];
+                      log("[TGLMT] drawCB status=" +
+                          std::to_string((long)[b status]) + " err=" +
+                          (e ? [e UTF8String] : "?"));
+                  }
+                }];
+            }
+        }
         [cb_ commit];
         return ok_;
     }
@@ -424,6 +439,7 @@ private:
     id<MTLCommandBuffer> cb_;
     id<MTLRenderCommandEncoder> enc_;
     id<MTLTexture> target_;
+    LogFn log_;
     bool ok_;
 };
 
@@ -471,6 +487,18 @@ public:
         if (!cb) return;
         [cb commit];
         [cb waitUntilCompleted];
+        // Chẩn đoán đen màn hình: CPU-side đếm encode đủ mà GPU không chạy gì
+        // (A11) thì status ở đây lộ ra (error/timeout/device-removed...).
+        if ([cb status] != MTLCommandBufferStatusCompleted && log_) {
+            static long lastLogged = 0;
+            long st = (long)[cb status];
+            if (st != lastLogged) {
+                lastLogged = st;
+                std::string msg = "[TGLMT] commitAndWait status=" + std::to_string(st);
+                if ([cb error]) msg += " err=" + std::string([[[cb error] localizedDescription] UTF8String] ? [[[cb error] localizedDescription] UTF8String] : "?");
+                log_(msg);
+            }
+        }
     }
     const std::vector<DrawTrace>& drawTrace() const override { return trace_; }
     void clearTrace() override { trace_.clear(); }
@@ -1101,7 +1129,7 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve());
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_);
     }
     static MTLLoadAction ToMTLLoad(LoadOp o) {
         switch (o) {
@@ -1139,7 +1167,7 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve());
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_);
     }
     std::shared_ptr<IRenderEncoder> makeRenderEncoderLoad(IRenderTarget* target,
             IRenderPipeline* pipeline) override {
@@ -1167,7 +1195,7 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve());
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_);
     }
 private:
     id<MTLDevice> dev_;
