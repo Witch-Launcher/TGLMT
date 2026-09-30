@@ -19,6 +19,7 @@ void ErrorTracker::Record(GLenum err) {
             int nb = backtrace(bt, 14);
             // Bỏ 2 frame đầu (Record + hàm gl gọi trực tiếp sẽ hiện tên ở [1..]).
             // In tên symbol cho từng frame để thấy gl... nào ghi lỗi.
+            // (dladdr có thể câm trên máy arm64e do PAC — fallback in raw PC.)
             char line[768];
             int w = snprintf(line, sizeof(line), "[TGLMT] glerr#%d code=0x%x", nErr, err);
             for (int i = 1; i < nb && w < (int)sizeof(line) - 40; ++i) {
@@ -26,6 +27,9 @@ void ErrorTracker::Record(GLenum err) {
                 if (dladdr(bt[i], &info) && info.dli_sname) {
                     w += snprintf(line + w, sizeof(line) - w, " <- %s", info.dli_sname);
                     if (i >= 4) break; // 4 frames gần nhất là đủ (gl* + caller GL)
+                } else {
+                    w += snprintf(line + w, sizeof(line) - w, " <- %p", bt[i]);
+                    if (i >= 4) break;
                 }
             }
             fprintf(stderr, "%s\n", line);

@@ -342,6 +342,7 @@ public:
     // ReadPixels/Blit/finish). Các range kề/chồng được merge → 1 memcpy+didModify.
     struct BufRange { size_t off = 0, len = 0; };
     std::unordered_map<GLuint, std::vector<BufRange>> pendingBufRanges;
+    void StageBufferRange(GLuint buf, size_t off, size_t len); // stage + merge (upload coalescing)
     void FlushBufferStaging(GLuint buf); // flush 1 buffer (merge ranges)
     void FlushAllBufferStaging();        // flush tất cả (finish/readback)
     // Texture: glTexSubImage* chỉ update shadow + ghi region vào staging;

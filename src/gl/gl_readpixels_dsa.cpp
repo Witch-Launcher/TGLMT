@@ -16,7 +16,9 @@ namespace tglmt::gl {
 void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, void* p) {
     Context& c = Context::Current();
     if (w < 0 || h < 0) { c.errors.Record(0x0501); return; }
-    if (!p) { c.errors.Record(0x0501); return; }
+    // PACK PBO bound → p là offset (offset 0 hợp lệ). Không PBO + NULL mới lỗi.
+    GLuint packBuf = c.state.BoundBuffer(0x88EB /*PIXEL_PACK_BUFFER*/);
+    if (!p && !packBuf) { c.errors.Record(0x0501); return; }
     if ((f != 0x1908 /*RGBA*/ && f != 0x80E1 /*BGRA*/) || ty != 0x1401 /*UNSIGNED_BYTE*/) {
         c.errors.Record(0x0502); // M5b mở rộng FLOAT/DEPTH reads
         return;
@@ -50,20 +52,30 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
             size_t need = (size_t)w * h * 4;
             std::vector<uint8_t> full((size_t)tgt->width() * tgt->height() * 4, 0);
             if (tgt->readback(full.data(), (size_t)tgt->width() * 4)) {
+                // Đọc vào buffer tạm tight trước (đúng flip spec §18.2), rồi mới
+                // ghi ra đích (con trỏ thật hoặc PBO offset).
+                std::vector<uint8_t> out((size_t)w * h * 4, 0);
                 // GL origin bottom-left vs Metal top-left: lật hàng (đúng spec §18.2).
                 size_t tw = tgt->width(), th = tgt->height();
                 for (GLsizei r = 0; r < h; ++r) {
                     GLsizei srcRow = (GLsizei)th - 1 - (y + r);
-                    if (srcRow < 0 || (size_t)srcRow >= th) {
-                        memset((uint8_t*)p + (size_t)r * w * 4, 0, (size_t)w * 4);
-                        continue;
-                    }
+                    if (srcRow < 0 || (size_t)srcRow >= th) continue; // hàng ngoài → giữ 0
                     size_t copyW = std::min((size_t)w, tw > (size_t)x ? tw - (size_t)x : 0);
                     if (copyW)
-                        memcpy((uint8_t*)p + (size_t)r * w * 4,
+                        memcpy(out.data() + (size_t)r * w * 4,
                                full.data() + ((size_t)srcRow * tw + (size_t)x) * 4, copyW * 4);
                 }
-                (void)need;
+                if (packBuf) {
+                    auto bit = c.buffers.find(packBuf);
+                    if (bit == c.buffers.end()) { c.errors.Record(0x0502); return; }
+                    size_t pboOff = (size_t)p;
+                    if (pboOff + need > bit->second.data.size())
+                        bit->second.data.resize(pboOff + need, 0);
+                    memcpy(bit->second.data.data() + pboOff, out.data(), need);
+                    c.StageBufferRange(packBuf, pboOff, need);
+                } else {
+                    memcpy(p, out.data(), need);
+                }
                 return;
             }
         }
@@ -71,15 +83,33 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
         c.LogDebug(0, 0, 0, 0, "glReadPixels: GPU readback fail, dùng shadow");
     }
     // Shadow path (Null backend hoặc fallback)
+    // PBO bound → ghi vào PBO shadow + stage (spec §18: p là offset).
+    auto writeOut = [&](const uint8_t* srcBytes, size_t n) {
+        if (packBuf) {
+            auto bit = c.buffers.find(packBuf);
+            if (bit == c.buffers.end()) { c.errors.Record(0x0502); return; }
+            size_t pboOff = (size_t)p;
+            if (pboOff + n > bit->second.data.size())
+                bit->second.data.resize(pboOff + n, 0);
+            memcpy(bit->second.data.data() + pboOff, srcBytes, n);
+            c.StageBufferRange(packBuf, pboOff, n);
+        } else {
+            memcpy(p, srcBytes, n);
+        }
+    };
     if (tex) {
         size_t k = std::min(tex->pixels.size(), (size_t)w * h * 4);
-        memcpy(p, tex->pixels.data(), k);
+        writeOut(tex->pixels.data(), k);
         return;
     }
     // default framebuffer trên Null: trả clear color
-    uint8_t px[4] = {(uint8_t)(c.clearColor[0]*255), (uint8_t)(c.clearColor[1]*255),
-                     (uint8_t)(c.clearColor[2]*255), (uint8_t)(c.clearColor[3]*255)};
-    for (GLsizei i = 0; i < w * h; ++i) memcpy((uint8_t*)p + i * 4, px, 4);
+    {
+        std::vector<uint8_t> px((size_t)w * h * 4);
+        uint8_t c4[4] = {(uint8_t)(c.clearColor[0]*255), (uint8_t)(c.clearColor[1]*255),
+                         (uint8_t)(c.clearColor[2]*255), (uint8_t)(c.clearColor[3]*255)};
+        for (GLsizei i = 0; i < w * h; ++i) memcpy(px.data() + i * 4, c4, 4);
+        writeOut(px.data(), px.size());
+    }
 }
 void glReadnPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, GLsizei n, void* p) {
     if (n < 0) { Context::Current().errors.Record(0x0501); return; }

@@ -18,15 +18,14 @@ static BufferObject* BoundBuf(GLenum target, bool create = false) {
     return &it->second;
 }
 
-// IR staging: ghi nhận range bẩn, merge với range cuối nếu kề/chồng lấn.
-// GPU copy dồn đến FlushBufferStaging (trước draw dùng buffer / readback / finish).
+namespace tglmt {
+// IR staging public: ghi nhận range bẩn, merge với range cuối nếu kề/chồng lấn.
 // Mỗi SubData deferred đều đếm bufferCoalesced (bằng chứng 10 updates → staging).
-// Thứ tự GL: SubData sau draws phải KHÔNG ảnh hưởng draws trước → flush encoder
-// đang mở trước khi stage (draws cũ commit với dữ liệu cũ, đúng semantics).
-static void StageBufRange(Context& c, GLuint bufId, size_t off, size_t len) {
+// Thứ tự GL: stage flush encoder đang mở trước (draws cũ commit với dữ liệu cũ).
+void Context::StageBufferRange(GLuint bufId, size_t off, size_t len) {
     if (!len) return;
-    if (c.pendingEncoder) c.FlushPendingEncoder();
-    auto& vec = c.pendingBufRanges[bufId];
+    if (pendingEncoder) FlushPendingEncoder();
+    auto& vec = pendingBufRanges[bufId];
     if (!vec.empty()) {
         auto& last = vec.back();
         size_t lastEnd = last.off + last.len;
@@ -37,12 +36,18 @@ static void StageBufRange(Context& c, GLuint bufId, size_t off, size_t len) {
             size_t newOff = std::min(last.off, off);
             last.off = newOff;
             last.len = newEnd - newOff;
-            ++c.appleStats.bufferCoalesced;
+            ++appleStats.bufferCoalesced;
             return;
         }
     }
-    vec.push_back(Context::BufRange{off, len});
-    ++c.appleStats.bufferCoalesced;
+    vec.push_back(BufRange{off, len});
+    ++appleStats.bufferCoalesced;
+}
+} // namespace tglmt
+
+// Wrapper nội bộ giữ nguyên mọi call-site trong file.
+static void StageBufRange(Context& c, GLuint bufId, size_t off, size_t len) {
+    c.StageBufferRange(bufId, off, len);
 }
 
 namespace tglmt {

@@ -176,6 +176,21 @@ static size_t UnpackRowLen(Context& c, size_t w, size_t bpp) {
     size_t align = (al == 1 || al == 2 || al == 4 || al == 8) ? (size_t)al : 4;
     return ((elems * bpp + align - 1) / align) * align;
 }
+// PBO unpack (spec §8: PIXEL_UNPACK_BUFFER bound → `pixels` là byte OFFSET).
+// MC 26.x stream texture uploads qua PBO (writeToTexture). Bỏ qua = đọc rác
+// (offset diễn như con trỏ) hoặc alloc rỗng khi offset 0 (bug nút mất + 501).
+// Đọc từ PBO SHADOW (authoritative: SubData/Map-Unmap luôn sync shadow).
+// Trả nullptr + ok=false khi thiếu PBO/vượt biên (caller Record tương ứng).
+static const uint8_t* UnpackBase(Context& c, const void* pixels, size_t total, bool& ok) {
+    GLuint up = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/);
+    if (!up) { ok = true; return (const uint8_t*)pixels; }
+    auto it = c.buffers.find(up);
+    if (it == c.buffers.end()) { ok = false; return nullptr; }
+    size_t off = (size_t)pixels;
+    if (off + total > it->second.data.size()) { ok = false; return nullptr; }
+    ok = true;
+    return it->second.data.data() + off;
+}
 // Sync 1 vùng pixels lên GPU: RGBA/RED/RG/UBYTE raw (tight), RGB/UBYTE expand
 // alpha 255. srcRows trỏ vùng (xoff,yoff,w,h) với pitch srcRowLen. Trả true
 // nếu đã sync. RED/RG raw đúng cho R8/RG8 GPU (font RED8 của game).
@@ -326,15 +341,32 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     TextureObject* tp = BoundTex(c, target);
     if (!tp) return; // lỗi đã record trong BoundTex
     auto& tx = *tp;
+    // PBO unpack (spec §8): pixels là offset khi UNPACK bound. MC 26.x stream
+    // uploads qua PBO — bỏ qua = alloc rỗng (offset 0) / đọc rác (offset !=0).
+    bool hasUnpack = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/) != 0;
+    size_t bppAll = Bpp(format, type);
+    size_t rowLenAll = (w > 0) ? UnpackRowLen(c, (size_t)w, bppAll) : 0;
+    size_t skipAll = (size_t)c.state.PixelStore().unpackSkipRows * rowLenAll +
+                     (size_t)c.state.PixelStore().unpackSkipPixels * bppAll;
+    size_t totalAll = skipAll + ((w > 0 && h > 0) ? ((size_t)(h - 1) * rowLenAll + (size_t)w * bppAll) : 0);
+    const uint8_t* pixBase = (const uint8_t*)pixels;
+    if (hasUnpack) {
+        bool okBase = true;
+        pixBase = UnpackBase(c, pixels, totalAll, okBase);
+        if (!okBase) { c.errors.Record(0x0501); return; }
+    }
+    bool hasData = hasUnpack || pixels;
     // Chẩn đoán texture lớn rỗng (logo 512, widgets 256): log 12 lần upload
     // đầu ≥256px kèm internalformat/format/type (soi BGRA/UINT).
     if ((w >= 256 || h >= 256)) {
         static int nBig = 0;
         if (++nBig <= 12) {
+            char ds[32];
+            if (hasUnpack) snprintf(ds, sizeof(ds), "PBO+%zu", (size_t)pixels);
+            else snprintf(ds, sizeof(ds), "%s", pixels ? "data" : "NULL");
             fprintf(stderr,
                     "[TGLMT] bigTexImage#%d id=%u tgt=0x%x lv=%d %dx%d ifmt=0x%x fmt=0x%x ty=0x%x %s\n",
-                    nBig, tp->id, target, level, w, h, internalformat, format, type,
-                    pixels ? "data" : "NULL");
+                    nBig, tp->id, target, level, w, h, internalformat, format, type, ds);
             fflush(stderr);
         }
     }
@@ -359,18 +391,18 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
         tx.isCube = true;
         tx.w = w; tx.h = h; tx.internalFormat = internalformat; tx.levels = level + 1;
         tx.faces[face].assign((size_t)w * h * bpp, 0);
-        if (pixels) {
+        if (hasData) {
             size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
             size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
                           (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
-            const uint8_t* src = (const uint8_t*)pixels + skip;
+            const uint8_t* src = pixBase + skip;
             for (GLsizei r = 0; r < h; ++r)
                 memcpy(tx.faces[face].data() + (size_t)r * w * bpp, src + r * rowLen,
                        (size_t)w * bpp);
         }
         if (!tx.gpu) // tạo 1 lần ở face đầu tiên thấy
             tx.gpu = c.device->newCubeTexture((uint32_t)w, ToMetalFormat(internalformat));
-        if (tx.gpu && pixels && type == 0x1401 && w > 0 && h > 0 &&
+        if (tx.gpu && hasData && type == 0x1401 && w > 0 && h > 0 &&
             (format == 0x1908 || format == 0x1903) && (uint32_t)w == tx.w) {
             size_t bpr = (size_t)w * bpp;
             std::vector<uint8_t> tight((size_t)w * h * bpp);
@@ -379,7 +411,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
                        tx.faces[face].data() + (size_t)r * w * bpp, (size_t)w * bpp);
             if (!c.device->updateCubeFace(tx.gpu.get(), (uint32_t)face, tight.data(), bpr))
                 c.LogDebug(0, 0, 0, 0, "glTexImage2D cubemap face: GPU upload fail");
-        } else if (pixels && !(format == 0x1908 || format == 0x1903)) {
+        } else if (hasData && !(format == 0x1908 || format == 0x1903)) {
             c.LogDebug(0, 0, 0, 0, "glTexImage2D cubemap face: format chưa upload GPU (giữ shadow)");
         }
         tx.pixels = tx.faces[0]; // mirror face 0 cho diag + fallback CPU
@@ -390,13 +422,13 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     tx.w = w; tx.h = h; tx.internalFormat = internalformat; tx.levels = level + 1;
     size_t n = (size_t)w * h * Bpp(format, type);
     tx.pixels.assign(n, 0);
-    if (pixels) {
+    if (hasData) {
         // áp unpackAlignment + ROW_LENGTH (spec §8.5)
         size_t bpp = Bpp(format, type);
         size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
         size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
                       (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
-        const uint8_t* src = (const uint8_t*)pixels + skip;
+        const uint8_t* src = pixBase + skip;
         for (GLsizei r = 0; r < h; ++r) memcpy(tx.pixels.data() + r * w * bpp, src + r * rowLen, (size_t)w * bpp);
     }
     tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
@@ -405,7 +437,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     // Vanilla atlas RGBA/UBYTE tight; JPG panorama là RGB/UBYTE → expand alpha 255.
     // Font RED8 (LUMINANCE) → R8 raw. BGRA/UBYTE (widgets/gui) → swizzle R<->B.
     // Mọi format khác giữ shadow + log.
-    if (tx.gpu && pixels && w > 0 && h > 0) {
+    if (tx.gpu && hasData && w > 0 && h > 0) {
         if ((format == 0x1908 || format == 0x1903 || format == 0x8227) && type == 0x1401) {
             // pixels đã unpack vào tx.pixels tight → upload trực tiếp
             size_t bpp = Bpp(format, type);
@@ -428,7 +460,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
             size_t rowLen = UnpackRowLen(c, (size_t)w, 3);
             size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
                           (size_t)c.state.PixelStore().unpackSkipPixels * 3;
-            const uint8_t* src = (const uint8_t*)pixels + skip;
+            const uint8_t* src = pixBase + skip;
             std::vector<uint8_t> rgba((size_t)w * h * 4);
             for (GLsizei r = 0; r < h; ++r)
                 for (GLsizei x = 0; x < w; ++x) {
@@ -469,7 +501,10 @@ void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, G
 void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei w, GLsizei h, GLenum format, GLenum type, const void* pixels) {
     Context& c = Context::Current();
     TextureObject* tp = BoundTex(c, target);
-    if (!tp || !pixels) { if (!pixels) c.errors.Record(0x0501); return; }
+    // PBO unpack: pixels là offset khi UNPACK bound (offset 0 hợp lệ).
+    // Bug cũ: !pixels → 0501 oan (501 còn lại trên máy) + offset nonzero đọc rác.
+    bool hasUnpack = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/) != 0;
+    if (!tp || (!pixels && !hasUnpack)) { if (!pixels) c.errors.Record(0x0501); return; }
     auto& t = *tp;
     if ((w >= 256 || h >= 256)) {
         static int nBigSub = 0;
@@ -503,7 +538,11 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
     size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
                   (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
-    const uint8_t* src = (const uint8_t*)pixels + skip;
+    size_t total = skip + (h > 0 ? ((size_t)(h - 1) * rowLen + (size_t)w * bpp) : 0);
+    bool okBase = true;
+    const uint8_t* pixBase = UnpackBase(c, pixels, total, okBase);
+    if (!okBase) { c.errors.Record(0x0501); return; }
+    const uint8_t* src = pixBase + skip;
     if (dstPix->size() < (size_t)t.w * t.h * bpp) dstPix->resize((size_t)t.w * t.h * bpp, 0);
     for (GLsizei r = 0; r < h; ++r) {
         uint8_t* dst = dstPix->data() + ((size_t)(yoff + r) * t.w + (size_t)xoff) * bpp;
@@ -854,7 +893,9 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
     Context& c = Context::Current();
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
-    if (!p) { c.errors.Record(0x0501); return; }
+    // PBO unpack: p là offset khi UNPACK bound (offset 0 hợp lệ).
+    bool hasUnpack = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/) != 0;
+    if (!p && !hasUnpack) { c.errors.Record(0x0501); return; }
     if ((w >= 256 || h >= 256)) {
         static int nBigDSA = 0;
         if (++nBigDSA <= 8) {
@@ -881,7 +922,11 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
     if (tx.pixels.size() < (size_t)tx.w * tx.h * bpp) tx.pixels.resize((size_t)tx.w * tx.h * bpp, 0);
     size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
                   (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
-    const uint8_t* src = (const uint8_t*)p + skip;
+    size_t total = skip + (h > 0 ? ((size_t)(h - 1) * rowLen + (size_t)w * bpp) : 0);
+    bool okBase = true;
+    const uint8_t* pixBase = UnpackBase(c, p, total, okBase);
+    if (!okBase) { c.errors.Record(0x0501); return; }
+    const uint8_t* src = pixBase + skip;
     for (GLsizei r = 0; r < h; ++r) {
         uint8_t* dst = tx.pixels.data() + ((size_t)(y + r) * tx.w + (size_t)x) * bpp;
         memcpy(dst, src + r * rowLen, (size_t)w * bpp);
