@@ -134,7 +134,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                 }
             }
             fprintf(stderr,
-                    "[TGLMT] build=b3-gettex2 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
+                    "[TGLMT] build=b4-crash1 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
                     "misc=%llu clears=%llu blits=%llu copyTex=%llu mipBase=%llu "
                     "range=%llu hazard=%llu uboSmall=%llu target=%p %ux%u "
@@ -151,6 +151,21 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.uboSmall,
                     (const void*)tgt.get(), tw, th, vp.x, vp.y, vp.w, vp.h, center[0],
                     center[1], center[2], center[3], (int)ok);
+            // IR batching counters (riêng 1 dòng để dễ grep trên latestlog):
+            // encNew<<draws chứng minh 1 encoder cho N draws; skip/merge >0
+            // chứng minh dirty-check + coalesce có chạy trên máy thật.
+            fprintf(stderr,
+                    "[TGLMT] ir frame=%llu encNew=%llu encReuse=%llu pipeRe=%llu "
+                    "pipeLk=%llu pipeSkip=%llu uniRe=%llu depthRe=%llu stSkip=%llu "
+                    "bufCoal=%llu bufFl=%llu texCoal=%llu texFl=%llu\n",
+                    (unsigned long long)nSwap, (unsigned long long)a.encodersCreated,
+                    (unsigned long long)a.encoderReused, (unsigned long long)a.pipelineReused,
+                    (unsigned long long)a.pipelineLookups,
+                    (unsigned long long)a.pipelineLookupSkipped,
+                    (unsigned long long)a.uniformReused, (unsigned long long)a.depthReused,
+                    (unsigned long long)a.stateSkipped, (unsigned long long)a.bufferCoalesced,
+                    (unsigned long long)a.bufferFlushes, (unsigned long long)a.texCoalesced,
+                    (unsigned long long)a.texFlushes);
             fflush(stderr);
             pAtt = a.drawsAttempted;
             pEnc = a.drawsEncoded;

@@ -335,26 +335,12 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     // 3b. IR staging flush (Deferred Resource Translation):
     // Buffer/texture SubData đã stage (chưa lên GPU) phải flush trước encode,
-    // nếu không GPU stale (đen). Chỉ flush buffer/texture draw này dùng
-    // (không flush mù toàn bộ để giữ lợi ích coalesce).
-    {
-        for (int i = 0; i < 16; ++i)
-            if (v.attribs[i].enabled && v.attribs[i].buffer) c.FlushBufferStaging(v.attribs[i].buffer);
-        if (eboId) c.FlushBufferStaging(eboId);
-        for (auto& kv : c.uniformBindPoints)
-            if (kv.second.buffer) c.FlushBufferStaging(kv.second.buffer);
-        auto flushSampled = [&](const std::vector<std::string>& lst) {
-            for (auto& nm : lst) {
-                auto uit = pr.samplerUnits.find(nm);
-                GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
-                if (unit >= 32) continue;
-                GLuint texId = c.state.BoundTexture(unit);
-                if (texId) c.FlushTextureStaging(texId);
-            }
-        };
-        flushSampled(pr.vsSamplers);
-        flushSampled(pr.fsSamplers);
-    }
+    // nếu không GPU stale (đen/mất hình). Flush ALL (không chỉ buffer/texture
+    // draw này dùng) để bịt lỗ legacy path (program sampler list rỗng) và
+    // vertex-texture ngoài danh sách — chi phí tương đương (pending map thường
+    // chỉ vài entry, merge trong từng buffer/texture vẫn giữ nguyên).
+    c.FlushAllBufferStaging();
+    c.FlushAllTextureStaging();
     // 4. Pipeline: depth khi depthTest bật (+ có depth thật), blend khi BLEND bật
     metal::PipelineOpts opts;
     opts.depth = c.state.IsEnabled(0x0B71) && (c.state.BoundDrawFBO() == 0 ? false : hasDepthTex);
