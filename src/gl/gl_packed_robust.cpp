@@ -73,19 +73,7 @@ void glMultiTexCoordP4ui(GLenum t, GLenum ty, GLuint v) { glMultiTexCoordP1ui(t,
 void glMultiTexCoordP4uiv(GLenum t, GLenum ty, const GLuint* v) { glMultiTexCoordP1ui(t,ty,v?*v:0); }
 
 // --- Robustness Getn* (GL 4.5): bufSize-guarded, delegate về bản không-n ---
-void glGetnTexImage(GLenum t, GLint l, GLenum f, GLenum ty, GLsizei n, void* p) {
-    Context& c = Context::Current();
-    if (n < 0) { c.errors.Record(0x0501); return; }
-    (void)l;
-    // đọc từ texture shadow đầu tiên khớp target (đủ cho single-texture test)
-    for (auto& [id, tx] : c.textures) if (tx.target == t) {
-        size_t k = std::min((size_t)n, tx.pixels.size());
-        if (p && k) memcpy(p, tx.pixels.data(), k);
-        (void)f; (void)ty;
-        return;
-    }
-    if (p && n > 0) memset(p, 0, (size_t)n);
-}
+// glGetnTexImage chuyển sang gl_get_extra.cpp (dùng chung GetTexSubImpl tươi GPU).
 void glGetnCompressedTexImage(GLenum t, GLint l, GLsizei n, void* p) { (void)t;(void)l; if(p&&n>0) memset(p,0,(size_t)n); }
 void glGetnUniformfv(GLuint p, GLint l, GLsizei n, GLfloat* v) {
     Context& c = Context::Current();

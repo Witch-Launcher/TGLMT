@@ -129,7 +129,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                 }
             }
             fprintf(stderr,
-                    "[TGLMT] build=b3-ubofix2 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
+                    "[TGLMT] build=b3-gettex1 frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
                     "misc=%llu clears=%llu blits=%llu copyTex=%llu mipBase=%llu "
                     "range=%llu hazard=%llu uboSmall=%llu target=%p %ux%u "

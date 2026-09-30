@@ -598,6 +598,14 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 gpu = txp->gpu.get();
                 hazardCheck(texId);
             } else if (tit != c.textures.end()) {
+                static int nDenyV = 0;
+                if (++nDenyV <= 8) {
+                    fprintf(stderr,
+                            "[TGLMT] sampdenyV#%d prog@%u vs=%s unit=%u tex#%u tgt=0x%x gpu=%d\n",
+                            nDenyV, prog, name.c_str(), unit, texId,
+                            tit->second.target, (int)(tit->second.gpu != nullptr));
+                    fflush(stderr);
+                }
                 c.LogDebug(0, 0, 0, 0,
                            "AppleDrawGL: VS sampler " + name + " thieu/khop, fallback den");
             }
@@ -631,9 +639,51 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 txp = &tit->second;
                 gpu = txp->gpu.get();
                 hazardCheck(texId);
+                // Soi texture GUI (widgets 256x256 / header 256x128): log 1 lần
+                // mỗi texture để thấy min/mag + pixel GPU thật (nút chỉ còn chữ
+                // = sample trong suốt → discard).
+                if (txp->w == 256 && (txp->h == 256 || txp->h == 128)) {
+                    static std::set<GLuint> loggedGui;
+                    if (loggedGui.size() < 12 && loggedGui.insert(texId).second) {
+                        uint32_t mf = 0x2601, gf = 0x2601;
+                        auto gp = [&](GLenum kk, uint32_t d) {
+                            auto f2 = txp->params.find(kk);
+                            return f2 == txp->params.end() ? d : (uint32_t)f2->second;
+                        };
+                        mf = gp(0x2801, mf); gf = gp(0x2800, gf);
+                        char b[192];
+                        snprintf(b, sizeof(b),
+                                 "[TGLMT] guitex prog@%u samp=%s unit=%u tex#%u %ux%u "
+                                 "min=0x%x mag=0x%x ifmt=0x%x",
+                                 prog, name.c_str(), unit, texId, txp->w, txp->h, mf, gf,
+                                 txp->internalFormat);
+                        fprintf(stderr, "%s\n", b);
+                        fflush(stderr);
+                    }
+                }
             } else if (tit != c.textures.end()) {
+                // kindOk từ chối hoặc thiếu GPU: sample đen → quad trong suốt →
+                // discard (nghi phạm nút mất nền). Log stderr để thấy trên máy.
+                static int nDeny = 0;
+                if (++nDeny <= 16) {
+                    fprintf(stderr,
+                            "[TGLMT] sampdeny#%d prog@%u fs=%s unit=%u tex#%u %ux%u "
+                            "tgt=0x%x gpu=%d\n",
+                            nDeny, prog, name.c_str(), unit, texId, tit->second.w,
+                            tit->second.h, tit->second.target,
+                            (int)(tit->second.gpu != nullptr));
+                    fflush(stderr);
+                }
                 c.LogDebug(0, 0, 0, 0,
                            "AppleDrawGL: FS sampler " + name + " thieu/khop, fallback den");
+            } else {
+                // texId 0/unknown: sampler không bind gì (GL incomplete = đen).
+                static int nMiss = 0;
+                if (++nMiss <= 16) {
+                    fprintf(stderr, "[TGLMT] sampmiss#%d prog@%u fs=%s unit=%u tex#%u\n",
+                            nMiss, prog, name.c_str(), unit, texId);
+                    fflush(stderr);
+                }
             }
         }
         std::shared_ptr<metal::ISamplerState> ss;

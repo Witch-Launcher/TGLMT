@@ -1,32 +1,145 @@
 // gl_get_extra.cpp — Getters đọc object/shadow: texture, sampler, FBO/RBO, VAO, sync, program-resource.
-// Tất cả đọc CPU shadow (Metal không cho query GPU) — đúng mapping "Shadow state trên CPU".
+// Texture pixels: làm TƯƠI từ GPU trước khi trả (draws đi GPU-only, shadow cũ
+// toàn 0 → screenshot đen; vanilla crash 1282 ở copyTextureToBuffer cũng xuất
+// phát từ đường này). Hỗ trợ PBO (PIXEL_PACK_BUFFER), vùng x/y/w/h, PACK state.
+// KHÔNG flip hàng (giữ đúng thứ tự upload; chỉ glReadPixels flip).
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <vector>
 using namespace tglmt;
 
 namespace tglmt::gl {
 // --- texture getters ---
+// Pitch PACK đúng spec §8.11: ROW_LENGTH (pixel, 0 = width) rồi align.
+static size_t PackRowLen(Context& c, size_t w) {
+    GLint rl = c.state.PixelStore().packRowLength;
+    size_t elems = (rl > 0) ? (size_t)rl : w;
+    GLint al = c.state.PixelStore().packAlignment;
+    size_t align = (al == 1 || al == 2 || al == 4 || al == 8) ? (size_t)al : 4;
+    return ((elems * 4 + align - 1) / align) * align;
+}
+// Đọc vùng (x,y,w,h) level 0 của texture vào *dst (đã trừ PBO), KHÔNG flip.
+// Chỉ RGBA/BGRA + UNSIGNED_BYTE (đường screenshot vanilla); còn lại 0x0502 trung thực.
+static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, GLint y,
+                          GLsizei w, GLsizei h, GLenum format, GLenum type, GLsizei bufSize,
+                          void* pixels) {
+    if (!pixels) { c.errors.Record(0x0501); return; }
+    if (level < 0 || w < 0 || h < 0) { c.errors.Record(0x0501); return; }
+    if (tx.levels > 0 && level >= tx.levels) { c.errors.Record(0x0501); return; }
+    if (level != 0) {
+        // GPU chỉ giữ base level: mip >0 trả 0 (không đoán dữ liệu).
+        size_t need0 = (size_t)(w > 0 ? w : 0) * (size_t)(h > 0 ? h : 0) * 4;
+        if ((size_t)bufSize < need0) { c.errors.Record(0x0502); return; }
+        memset(pixels, 0, need0);
+        return;
+    }
+    if (!((format == 0x1908 || format == 0x80E1) && type == 0x1401)) {
+        c.errors.Record(0x0502); // format/type ngoài RGBA/BGRA+UBYTE (M5b mở rộng)
+        return;
+    }
+    if (x < 0 || y < 0 || (size_t)(x + w) > tx.w || (size_t)(y + h) > tx.h) {
+        c.errors.Record(0x0501); return;
+    }
+    // Làm tươi shadow từ GPU (đúng pixels cho screenshot sau render).
+    // Chỉ khi shadow RGBA8 4B (font R8/RG8 không bao giờ là đích screenshot).
+    if (c.device && !c.device->isNull() && tx.gpu && tx.w && tx.h &&
+        tx.pixels.size() >= (size_t)tx.w * tx.h * 4 &&
+        (tx.internalFormat == 0x8058 || tx.internalFormat == 0x8C43 ||
+         tx.internalFormat == 0)) {
+        c.device->commitAndWait(); // xả draws NoWait (không stale TBDR)
+        auto wrapped = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
+        if (wrapped) {
+            std::vector<uint8_t> full((size_t)tx.w * tx.h * 4, 0);
+            if (wrapped->readback(full.data(), (size_t)tx.w * 4))
+                tx.pixels = std::move(full);
+        }
+    }
+    if (tx.pixels.size() < (size_t)tx.w * tx.h * 4) { c.errors.Record(0x0502); return; }
+    size_t dstRow = PackRowLen(c, (size_t)w);
+    size_t skip = (size_t)c.state.PixelStore().packSkipRows * dstRow +
+                  (size_t)c.state.PixelStore().packSkipPixels * 4;
+    size_t need = skip + (size_t)(h > 0 ? h - 1 : 0) * dstRow + (size_t)w * 4;
+    if ((size_t)bufSize < need) { c.errors.Record(0x0502); return; }
+    // Đích ghi: con trỏ thật, hoặc OFFSET vào PBO khi PIXEL_PACK_BUFFER bound
+    // (screenshot vanilla). Phải phân biệt TRƯỚC khi ghi (ghi nhầm offset như
+    // con trỏ = segfault/ghi bậy địa chỉ thấp).
+    uint8_t* dstBase = nullptr;
+    std::vector<uint8_t>* pboVec = nullptr;
+    size_t pboOff = 0;
+    GLuint packBuf = c.state.BoundBuffer(0x88EB /*PIXEL_PACK_BUFFER*/);
+    if (packBuf) {
+        auto bit = c.buffers.find(packBuf);
+        if (bit == c.buffers.end()) { c.errors.Record(0x0502); return; }
+        pboOff = (size_t)pixels;
+        if (pboOff + need > bit->second.data.size())
+            bit->second.data.resize(pboOff + need, 0);
+        pboVec = &bit->second.data;
+        dstBase = pboVec->data() + pboOff + skip;
+    } else {
+        dstBase = (uint8_t*)pixels + skip;
+    }
+    uint8_t* dst = dstBase;
+    bool bgra = (format == 0x80E1);
+    // KHÔNG flip hàng (khác glReadPixels): GetTexImage trả đúng thứ tự upload
+    // (row 0 trước). Toàn pipeline TGLMT lưu raw nên copy raw là đúng spec.
+    for (GLsizei r = 0; r < h; ++r) {
+        size_t srcRow = (size_t)y + (size_t)r;
+        const uint8_t* s = tx.pixels.data() + (srcRow * tx.w + (size_t)x) * 4;
+        uint8_t* d = dst + (size_t)r * dstRow;
+        if (!bgra) {
+            memcpy(d, s, (size_t)w * 4);
+        } else {
+            for (GLsizei i = 0; i < w; ++i) {
+                d[i * 4] = s[i * 4 + 2]; d[i * 4 + 1] = s[i * 4 + 1];
+                d[i * 4 + 2] = s[i * 4]; d[i * 4 + 3] = s[i * 4 + 3];
+            }
+        }
+    }
+    // PBO: đồng bộ GPU buffer để Map/GetBufferSubData sau thấy dữ liệu mới.
+    if (pboVec) {
+        auto bit = c.buffers.find(packBuf);
+        if (bit != c.buffers.end() && bit->second.gpu && !bit->second.data.empty()) {
+            size_t n = bit->second.data.size();
+            auto nb = c.device->newBufferWithBytes(bit->second.data.data(), n,
+                                                   metal::StorageMode::Shared);
+            if (nb) bit->second.gpu = nb;
+        }
+    }
+}
 void glGetTexImage(GLenum t, GLint l, GLenum f, GLenum ty, void* p) {
-    (void)l; (void)f; (void)ty;
     Context& c = Context::Current();
     GLuint id = c.state.BoundTexture(c.state.ActiveTexture());
     auto it = c.textures.find(id);
     if (it == c.textures.end() || it->second.target != t) { c.errors.Record(0x0502); return; }
-    if (p && !it->second.pixels.empty())
-        memcpy(p, it->second.pixels.data(), it->second.pixels.size());
+    auto& tx = it->second;
+    GLsizei n = (GLsizei)(tx.w * tx.h * 4);
+    GetTexSubImpl(c, tx, l, 0, 0, (GLsizei)tx.w, (GLsizei)tx.h, f, ty, n, p);
 }
 void glGetTextureImage(GLuint t, GLint l, GLenum f, GLenum ty, GLsizei n, void* p) {
-    (void)l; (void)f; (void)ty;
     Context& c = Context::Current();
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
-    size_t k = std::min((size_t)n, it->second.pixels.size());
-    if (p && k) memcpy(p, it->second.pixels.data(), k);
+    auto& tx = it->second;
+    GetTexSubImpl(c, tx, l, 0, 0, (GLsizei)tx.w, (GLsizei)tx.h, f, ty, n, p);
 }
 void glGetTextureSubImage(GLuint t, GLint l, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLenum f, GLenum ty, GLsizei n, void* p) {
-    (void)l;(void)x;(void)y;(void)z;(void)w;(void)h;(void)d;(void)f;(void)ty;
-    glGetTextureImage(t, 0, 0x1908, 0x1401, n, p);
+    (void)z; (void)d; // 2D: bỏ qua slice
+    Context& c = Context::Current();
+    auto it = c.textures.find(t);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    GetTexSubImpl(c, it->second, l, x, y, w, h, f, ty, n, p);
+}
+void glGetnTexImage(GLenum t, GLint l, GLenum f, GLenum ty, GLsizei n, void* p) {
+    Context& c = Context::Current();
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    GLuint id = c.state.BoundTexture(c.state.ActiveTexture());
+    auto it = c.textures.find(id);
+    if (it == c.textures.end() || it->second.target != t) { c.errors.Record(0x0502); return; }
+    auto& tx = it->second;
+    GetTexSubImpl(c, tx, l, 0, 0, (GLsizei)tx.w, (GLsizei)tx.h, f, ty, n, p);
 }
 void glGetCompressedTexImage(GLenum t, GLint l, void* p) { (void)t;(void)l;(void)p; }
 void glGetCompressedTextureImage(GLuint t, GLint l, GLsizei n, void* p) { (void)t;(void)l; if(p&&n>0) memset(p,0,(size_t)n); }
