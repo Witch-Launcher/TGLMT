@@ -2,6 +2,7 @@
 #include <cstdio>
 #if defined(__APPLE__)
 #include <execinfo.h>
+#include <dlfcn.h>
 #endif
 namespace tglmt {
 void ErrorTracker::Record(GLenum err) {
@@ -9,25 +10,30 @@ void ErrorTracker::Record(GLenum err) {
     {
         // Bẫy lỗi GL oan trên máy (vanilla quy lỗi pending cho call gần nhất,
         // vd copyTextureToBuffer crash 1282 trong khi call đó vô tội):
-        // log 30 lỗi đầu KÈM caller (backtrace, symbol export của dylib).
+        // log 10 lỗi đầu KÈM TÊN HÀM gl gọi (dladdr qua dynamic symbol table —
+        // dylib strip nhưng symbol export gl* vẫn còn, backtrace_symbols thì câm).
         static int nErr = 0;
-        if (++nErr <= 30) {
+        if (++nErr <= 10) {
 #if defined(__APPLE__)
-            if (nErr <= 3) {
-                // 3 lỗi đầu kèm caller để phân biệt nguồn (probe boot vs sau).
-                void* bt[7];
-                int nb = backtrace(bt, 7);
-                char** sym = backtrace_symbols(bt, nb);
-                fprintf(stderr, "[TGLMT] glerr#%d code=0x%x at %s\n", nErr, err,
-                        (sym && nb > 3) ? sym[3] : "?");
-                // (không free(sym): 3 lần duy nhất, giữ đơn giản)
-            } else {
-                fprintf(stderr, "[TGLMT] glerr#%d code=0x%x\n", nErr, err);
+            void* bt[14];
+            int nb = backtrace(bt, 14);
+            // Bỏ 2 frame đầu (Record + hàm gl gọi trực tiếp sẽ hiện tên ở [1..]).
+            // In tên symbol cho từng frame để thấy gl... nào ghi lỗi.
+            char line[768];
+            int w = snprintf(line, sizeof(line), "[TGLMT] glerr#%d code=0x%x", nErr, err);
+            for (int i = 1; i < nb && w < (int)sizeof(line) - 40; ++i) {
+                Dl_info info;
+                if (dladdr(bt[i], &info) && info.dli_sname) {
+                    w += snprintf(line + w, sizeof(line) - w, " <- %s", info.dli_sname);
+                    if (i >= 4) break; // 4 frames gần nhất là đủ (gl* + caller GL)
+                }
             }
+            fprintf(stderr, "%s\n", line);
+            fflush(stderr);
 #else
             fprintf(stderr, "[TGLMT] glerr#%d code=0x%x\n", nErr, err);
-#endif
             fflush(stderr);
+#endif
         }
     }
     std::lock_guard<std::mutex> l(mu_);

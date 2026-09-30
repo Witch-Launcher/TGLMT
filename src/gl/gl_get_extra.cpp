@@ -45,20 +45,25 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
     bool packed8 = (type == 0x1401 || type == 0x8368);
     bool packedRev = (type == 0x8367);
     if (!((format == 0x1908 || format == 0x80E1) && (packed8 || packedRev))) {
-        // Chẩn đoán crash copyTobuffer trên máy: ghi rõ format/type/size thay vì câm.
-        char b[160];
-        snprintf(b, sizeof(b),
-                 "GetTexSub: UNSUPPORTED fmt=0x%x type=0x%x tex=%ux%u lv=%d (screenshot?)",
-                 format, type, tx.w, tx.h, level);
-        c.LogDebug(0, 0, 0, 0, b);
+        // Chẩn đoán crash copyTobuffer trên máy: stderr (LogDebug câm vì MC không
+        // đăng ký debug callback). Throttle 8 lần.
+        static int nUnsup = 0;
+        if (++nUnsup <= 8) {
+            fprintf(stderr,
+                    "[TGLMT] GetTexSub UNSUPPORTED fmt=0x%x type=0x%x tex=%ux%u lv=%d\n",
+                    format, type, tx.w, tx.h, level);
+            fflush(stderr);
+        }
         c.errors.Record(0x0502); // type/format ngoài subset (M5b mở rộng)
         return;
     }
     if (x < 0 || y < 0 || (size_t)(x + w) > tx.w || (size_t)(y + h) > tx.h) {
-        char b[160];
-        snprintf(b, sizeof(b), "GetTexSub: OOB x=%d y=%d w=%d h=%d tex=%ux%u",
-                 x, y, w, h, tx.w, tx.h);
-        c.LogDebug(0, 0, 0, 0, b);
+        static int nOob = 0;
+        if (++nOob <= 8) {
+            fprintf(stderr, "[TGLMT] GetTexSub OOB x=%d y=%d w=%d h=%d tex=%ux%u\n",
+                    x, y, w, h, tx.w, tx.h);
+            fflush(stderr);
+        }
         c.errors.Record(0x0501); return;
     }
     // Làm tươi shadow từ GPU (đúng pixels cho screenshot sau render).
@@ -79,10 +84,12 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
         }
     }
     if (tx.pixels.size() < (size_t)tx.w * tx.h * 4) {
-        char b[160];
-        snprintf(b, sizeof(b), "GetTexSub: SHORT shadow %zu < %ux%u*4",
-                 tx.pixels.size(), tx.w, tx.h);
-        c.LogDebug(0, 0, 0, 0, b);
+        static int nShort = 0;
+        if (++nShort <= 8) {
+            fprintf(stderr, "[TGLMT] GetTexSub SHORT shadow %zu < %ux%u*4\n",
+                    tx.pixels.size(), tx.w, tx.h);
+            fflush(stderr);
+        }
         c.errors.Record(0x0502); return;
     }
     size_t dstRow = PackRowLen(c, (size_t)w);
@@ -90,11 +97,13 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
                   (size_t)c.state.PixelStore().packSkipPixels * 4;
     size_t need = skip + (size_t)(h > 0 ? h - 1 : 0) * dstRow + (size_t)w * 4;
     if ((size_t)bufSize < need) {
-        char b[192];
-        snprintf(b, sizeof(b),
-                 "GetTexSub: SMALLBUF buf=%d need=%zu (w=%d h=%d row=%zu tex=%ux%u)",
-                 bufSize, need, w, h, dstRow, tx.w, tx.h);
-        c.LogDebug(0, 0, 0, 0, b);
+        static int nSmall = 0;
+        if (++nSmall <= 8) {
+            fprintf(stderr,
+                    "[TGLMT] GetTexSub SMALLBUF buf=%d need=%zu (w=%d h=%d row=%zu tex=%ux%u)\n",
+                    bufSize, need, w, h, dstRow, tx.w, tx.h);
+            fflush(stderr);
+        }
         c.errors.Record(0x0502); return;
     }
     // Đích ghi: con trỏ thật, hoặc OFFSET vào PBO khi PIXEL_PACK_BUFFER bound

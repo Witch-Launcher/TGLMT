@@ -856,8 +856,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 gpu = txp->gpu.get();
                 hazardCheck(texId);
                 // Soi texture GUI (widgets 256x256 / header 256x128): log 1 lần
-                // mỗi texture để thấy min/mag + pixel GPU thật (nút chỉ còn chữ
-                // = sample trong suốt → discard).
+                // mỗi texture để thấy min/mag + pixel GPU thật + state raster
+                // (nút chỉ còn chữ = sample trong suốt → discard; cần biết
+                // texture rỗng hay state blend/depth/cull/scissor sai).
                 if (txp->w == 256 && (txp->h == 256 || txp->h == 128)) {
                     static std::set<GLuint> loggedGui;
                     if (loggedGui.size() < 12 && loggedGui.insert(texId).second) {
@@ -875,12 +876,44 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                                      txp->pixels[3]);
                             px0 = pb;
                         }
-                        char b[224];
+                        // Pixel GPU thật (upload-only texture như widgets: readback
+                        // chính xác; render-target texture có thể stale vì encoder
+                        // chưa commit — ghi chú để khỏi đọc sai).
+                        std::string gpx = "nogpu";
+                        if (txp->gpu && txp->w <= 512 && txp->h <= 512) {
+                            auto wt = c.device->wrapAsTarget(txp->gpu.get(), nullptr);
+                            if (wt) {
+                                std::vector<uint8_t> tb(4, 0);
+                                // đọc 1 texel góc bằng readback hàng đầu
+                                std::vector<uint8_t> row((size_t)txp->w * 4, 0);
+                                // (readback full nhỏ gọn hơn: 256x256=256KB, 12 lần max)
+                                std::vector<uint8_t> full((size_t)txp->w * txp->h * 4, 0);
+                                if (wt->readback(full.data(), (size_t)txp->w * 4)) {
+                                    char gb[32];
+                                    snprintf(gb, sizeof(gb), "gpu%02X%02X%02X%02X",
+                                             full[0], full[1], full[2], full[3]);
+                                    gpx = gb;
+                                } else {
+                                    gpx = "rbFail";
+                                }
+                            }
+                        }
+                        auto sc = c.state.GetScissor();
+                        ViewportState vpg = c.state.GetViewport(0);
+                        const BlendState& bb = c.state.Blend()[0];
+                        char b[512];
                         snprintf(b, sizeof(b),
                                  "[TGLMT] guitex prog@%u samp=%s unit=%u tex#%u %ux%u "
-                                 "min=0x%x mag=0x%x ifmt=0x%x px0=%s",
+                                 "min=0x%x mag=0x%x ifmt=0x%x lv=%u px0=%s+%s "
+                                 "blend=%d(%x->%x) depth=%d cull=%d scis=%d[%d,%d,%d,%d] "
+                                 "vp=%.0f,%.0f,%.0f,%.0f",
                                  prog, name.c_str(), unit, texId, txp->w, txp->h, mf, gf,
-                                 txp->internalFormat, px0.c_str());
+                                 txp->internalFormat, txp->levels, px0.c_str(), gpx.c_str(),
+                                 (int)c.state.IsEnabled(0x0BE2), bb.srcRGB, bb.dstRGB,
+                                 (int)c.state.IsEnabled(0x0B71),
+                                 (int)c.state.IsEnabled(0x0B44),
+                                 (int)c.state.IsEnabled(0x0C11), sc.x, sc.y, sc.w, sc.h,
+                                 vpg.x, vpg.y, vpg.w, vpg.h);
                         fprintf(stderr, "%s\n", b);
                         fflush(stderr);
                     }
