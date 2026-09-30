@@ -90,6 +90,12 @@ struct SamplerObject {
     std::unordered_map<GLenum, GLint> iparams;
     std::unordered_map<GLenum, GLfloat> fparams;
 };
+// Kết quả probe PROXY texture (spec §8.1: query WIDTH/HEIGHT phải trả lời,
+// quá giới hạn → 0, KHÔNG lỗi). Game probe max size lúc boot.
+struct ProxyTex {
+    GLsizei w = 0, h = 0;
+    GLenum ifmt = 0;
+};
 
 struct ShaderObject {
     GLuint id = 0;
@@ -210,6 +216,7 @@ public:
     // A11: upload shadow + bind Metal buffer(17+k) mỗi draw (xem AppleDrawGL).
     std::unordered_map<GLuint, BufferRange> uniformBindPoints;
     std::unordered_map<GLuint, BufferRange> storageBindPoints;
+    std::map<GLenum, ProxyTex> proxyTex; // target PROXY → spec probe gần nhất
 
     // clear color/depth/stencil shadow (glClearColor/... + glClear)
     float clearColor[4] = {0, 0, 0, 0};

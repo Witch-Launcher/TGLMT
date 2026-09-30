@@ -22,7 +22,8 @@ static size_t PackRowLen(Context& c, size_t w) {
     return ((elems * 4 + align - 1) / align) * align;
 }
 // Đọc vùng (x,y,w,h) level 0 của texture vào *dst (đã trừ PBO), KHÔNG flip.
-// Chỉ RGBA/BGRA + UNSIGNED_BYTE (đường screenshot vanilla); còn lại 0x0502 trung thực.
+// Hỗ trợ RGBA/BGRA × {UNSIGNED_BYTE, UNSIGNED_INT_8_8_8_8,
+// UNSIGNED_INT_8_8_8_8_REV} (screenshot vanilla dùng packed); còn lại 0x0502.
 static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, GLint y,
                           GLsizei w, GLsizei h, GLenum format, GLenum type, GLsizei bufSize,
                           void* pixels) {
@@ -36,8 +37,11 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
         memset(pixels, 0, need0);
         return;
     }
-    if (!((format == 0x1908 || format == 0x80E1) && type == 0x1401)) {
-        c.errors.Record(0x0502); // format/type ngoài RGBA/BGRA+UBYTE (M5b mở rộng)
+    // type: 0x1401 UBYTE, 0x8368 8_8_8_8, 0x8367 8_8_8_8_REV (cùng order RGBA).
+    bool packed8 = (type == 0x1401 || type == 0x8368);
+    bool packedRev = (type == 0x8367);
+    if (!((format == 0x1908 || format == 0x80E1) && (packed8 || packedRev))) {
+        c.errors.Record(0x0502); // type/format ngoài subset (M5b mở rộng)
         return;
     }
     if (x < 0 || y < 0 || (size_t)(x + w) > tx.w || (size_t)(y + h) > tx.h) {
@@ -82,6 +86,9 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
         dstBase = (uint8_t*)pixels + skip;
     }
     uint8_t* dst = dstBase;
+    // Thứ tự byte ra theo (format, type) — GL Table 8.8:
+    // RGBA+UBYTE/8888: [R,G,B,A]; RGBA+REV: [A,B,G,R];
+    // BGRA+UBYTE/8888: [B,G,R,A]; BGRA+REV: [A,R,G,B].
     bool bgra = (format == 0x80E1);
     // KHÔNG flip hàng (khác glReadPixels): GetTexImage trả đúng thứ tự upload
     // (row 0 trước). Toàn pipeline TGLMT lưu raw nên copy raw là đúng spec.
@@ -89,12 +96,22 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
         size_t srcRow = (size_t)y + (size_t)r;
         const uint8_t* s = tx.pixels.data() + (srcRow * tx.w + (size_t)x) * 4;
         uint8_t* d = dst + (size_t)r * dstRow;
-        if (!bgra) {
+        if (!bgra && !packedRev) {
             memcpy(d, s, (size_t)w * 4);
         } else {
             for (GLsizei i = 0; i < w; ++i) {
-                d[i * 4] = s[i * 4 + 2]; d[i * 4 + 1] = s[i * 4 + 1];
-                d[i * 4 + 2] = s[i * 4]; d[i * 4 + 3] = s[i * 4 + 3];
+                uint8_t r0 = s[i * 4], g0 = s[i * 4 + 1], b0 = s[i * 4 + 2],
+                        a0 = s[i * 4 + 3];
+                if (!bgra && packedRev) { // RGBA+REV: [A,B,G,R]
+                    d[i * 4] = a0; d[i * 4 + 1] = b0;
+                    d[i * 4 + 2] = g0; d[i * 4 + 3] = r0;
+                } else if (bgra && !packedRev) { // BGRA: [B,G,R,A]
+                    d[i * 4] = b0; d[i * 4 + 1] = g0;
+                    d[i * 4 + 2] = r0; d[i * 4 + 3] = a0;
+                } else { // BGRA+REV: [A,R,G,B]
+                    d[i * 4] = a0; d[i * 4 + 1] = r0;
+                    d[i * 4 + 2] = g0; d[i * 4 + 3] = b0;
+                }
             }
         }
     }
@@ -170,6 +187,19 @@ void glGetTextureParameterIuiv(GLuint t, GLenum p, GLuint* v) { GLint x=0; glGet
 void glGetTexLevelParameteriv(GLenum t, GLint l, GLenum p, GLint* v) {
     (void)l;
     Context& c = Context::Current();
+    // PROXY target: trả spec probe (không lỗi) — game dò max texture lúc boot.
+    switch (t) {
+        case 0x8063: case 0x8064: case 0x8070: case 0x8071: case 0x8513: case 0x8C19: {
+            auto f = c.proxyTex.find(t);
+            if (p == 0x1000) *v = (f == c.proxyTex.end()) ? 0 : (GLint)f->second.w;
+            else if (p == 0x1001) *v = (f == c.proxyTex.end()) ? 0 : (GLint)f->second.h;
+            else if (p == 0x1003)
+                *v = (f == c.proxyTex.end()) ? 0 : (GLint)f->second.ifmt;
+            else *v = 0;
+            return;
+        }
+        default: break;
+    }
     GLuint id = c.state.BoundTexture(c.state.ActiveTexture());
     auto it = c.textures.find(id);
     if (it == c.textures.end() || it->second.target != t) { c.errors.Record(0x0502); *v = 0; return; }

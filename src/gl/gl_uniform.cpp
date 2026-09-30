@@ -72,7 +72,7 @@ void glUniformBlockBinding(GLuint p, GLuint b, GLuint bi) {
         // Chẩn đoán misbound UBO trên máy (blur Globals đọc nhầm buffer):
         // log chương trình nào bind block nào vào point nào (40 dòng đầu).
         static int nBind = 0;
-        if (++nBind <= 40) {
+        if (++nBind <= 120) {
             std::string nm = "?";
             auto it0 = c.programs.find(p);
             if (it0 != c.programs.end())

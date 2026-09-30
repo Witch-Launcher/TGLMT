@@ -117,6 +117,29 @@ int main() {
     glBindBuffer(0x88EB, 0);
     if (gFails) return 1;
 
+    // 3. Packed types (screenshot vanilla có thể xin REV): RGBA+REV ra
+    // [A,B,G,R] = (255,0,0,255) từ pixel đỏ; BGRA+UBYTE ra [B,G,R,A].
+    // Type lạ phải báo INVALID_OPERATION chứ không crash.
+    std::vector<unsigned char> rev(64 * 64 * 4, 0);
+    glGetTextureSubImage(fboTex, 0, 0, 0, 0, 64, 64, 1, 0x1908, 0x8367,
+                         (GLsizei)rev.size(), rev.data());
+    Check(glGetError() == 0, "rev getSubImage gl error");
+    printf("[gettex-rev] px0=(%u,%u,%u,%u)\n", rev[0], rev[1], rev[2], rev[3]);
+    Check(rev[0] == 255 && rev[1] == 0 && rev[2] == 0 && rev[3] == 255,
+          "RGBA+REV order [A,B,G,R]");
+    std::vector<unsigned char> bgra(64 * 64 * 4, 0);
+    glGetTextureSubImage(fboTex, 0, 0, 0, 0, 64, 64, 1, 0x80E1, 0x1401,
+                         (GLsizei)bgra.size(), bgra.data());
+    Check(glGetError() == 0, "bgra getSubImage gl error");
+    printf("[gettex-bgra] px0=(%u,%u,%u,%u)\n", bgra[0], bgra[1], bgra[2], bgra[3]);
+    Check(bgra[0] == 0 && bgra[1] == 0 && bgra[2] == 255 && bgra[3] == 255,
+          "BGRA order [B,G,R,A]");
+    unsigned char one = 0;
+    glGetTextureSubImage(fboTex, 0, 0, 0, 0, 1, 1, 1, 0x1907 /*RGB*/,
+                         0x1406 /*FLOAT*/, 4, &one);
+    Check(glGetError() == 0x0502, "unsupported type errors honestly");
+    if (gFails) return 1;
+
     printf("test_mc_gettex_apple PASS (fresh GetTextureSubImage + PBO)\n");
     return 0;
 }

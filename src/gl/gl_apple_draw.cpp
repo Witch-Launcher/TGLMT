@@ -13,6 +13,7 @@
 #include <cstring>
 #include <map>
 #include <set>
+#include <tuple>
 #include <vector>
 
 namespace tglmt {
@@ -651,12 +652,20 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                             return f2 == txp->params.end() ? d : (uint32_t)f2->second;
                         };
                         mf = gp(0x2801, mf); gf = gp(0x2800, gf);
-                        char b[192];
+                        std::string px0 = "none";
+                        if (!txp->pixels.empty() && txp->pixels.size() >= 4) {
+                            char pb[32];
+                            snprintf(pb, sizeof(pb), "sh%02X%02X%02X%02X",
+                                     txp->pixels[0], txp->pixels[1], txp->pixels[2],
+                                     txp->pixels[3]);
+                            px0 = pb;
+                        }
+                        char b[224];
                         snprintf(b, sizeof(b),
                                  "[TGLMT] guitex prog@%u samp=%s unit=%u tex#%u %ux%u "
-                                 "min=0x%x mag=0x%x ifmt=0x%x",
+                                 "min=0x%x mag=0x%x ifmt=0x%x px0=%s",
                                  prog, name.c_str(), unit, texId, txp->w, txp->h, mf, gf,
-                                 txp->internalFormat);
+                                 txp->internalFormat, px0.c_str());
                         fprintf(stderr, "%s\n", b);
                         fflush(stderr);
                     }
@@ -822,13 +831,14 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     c.appleStats.drawsEncoded++;
     c.appleStats.progEncoded[prog]++;
-    // Chẩn đoán đen màn hình: dump TOÀN BỘ draw-state lần đầu mỗi (program,VAO)
-    // (thừa còn hơn thiếu): attribute + byte đỉnh đầu trên GPU, UBO, texture,
-    // blend/cull/depth/scissor. Cap 96 combo (menu + world-creation cần nhiều
-    // hơn 48 cũ; mỗi combo log 1 lần nên không phình).
+    // Chẩn đoán đen màn hình: dump TOÀN BỘ draw-state lần đầu mỗi
+    // (program,VAO,texture0) — texture0 vì cùng prog/vao nhưng texture khác
+    // nhau (logo vs widgets) là 2 case khác nhau (nút mất nền mà dump trùng
+    // logo thì mù). Cap 96 combo, mỗi combo 1 lần nên không phình.
     {
-        static std::set<std::pair<GLuint, GLuint>> loggedDraws;
-        auto key = std::make_pair(prog, vao);
+        static std::set<std::tuple<GLuint, GLuint, GLuint>> loggedDraws;
+        GLuint tex0 = c.state.BoundTexture(0);
+        auto key = std::make_tuple(prog, vao, tex0);
         if (loggedDraws.size() < 96 && !loggedDraws.count(key)) {
             loggedDraws.insert(key);
             auto hex = [](const uint8_t* d, size_t n) {

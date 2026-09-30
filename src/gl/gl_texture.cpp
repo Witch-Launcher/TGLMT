@@ -184,10 +184,18 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     Context& c = Context::Current();
     if (w < 0 || h < 0) { c.errors.Record(0x0501); return; }
     // Proxy texture (GlDevice probe max size): không đổi state, không lỗi
-    // (đúng spec §8 — probe rồi fallback 8192 khi quá lớn).
+    // (đúng spec §8 — probe rồi fallback 8192 khi quá lớn). Lưu spec để query
+    // GetTexLevelParameteriv trả lời (quá 8192 → 0), tránh lỗi oan tồn lỗi
+    // pending mà vanilla quy cho call sau (crash copyTobuffer 1282).
     switch (target) {
-        case 0x8063: case 0x8064: case 0x8070: case 0x8071: case 0x8513: case 0x8C19:
+        case 0x8063: case 0x8064: case 0x8070: case 0x8071: case 0x8513: case 0x8C19: {
+            ProxyTex px;
+            if (w > 0 && h > 0 && w <= 8192 && h <= 8192) {
+                px.w = w; px.h = h; px.ifmt = (GLenum)internalformat;
+            }
+            c.proxyTex[target] = px;
             return;
+        }
         default: break;
     }
     TextureObject* tp = BoundTex(c, target);

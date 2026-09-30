@@ -58,7 +58,7 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
         c.uniformBindPoints[index] = BufferRange{buffer, 0, 0};
         // Chẩn đoán misbound UBO: point nào trỏ buffer/size nào (40 dòng đầu).
         static int nUB = 0;
-        if (++nUB <= 40 && buffer) {
+        if (++nUB <= 120 && buffer) {
             auto it = c.buffers.find(buffer);
             size_t sz = (it == c.buffers.end()) ? 0 : it->second.data.size();
             fprintf(stderr, "[TGLMT] ubobind#%d point %u -> buf %u (%zuB)\n",
@@ -76,6 +76,12 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr o, G
     if (o < 0 || s < 0) { c.errors.Record(0x0501); return; }
     if (target == 0x8A11) {
         c.uniformBindPoints[index] = BufferRange{buffer, o, s};
+        static int nUBR = 0;
+        if (++nUBR <= 120 && buffer) {
+            fprintf(stderr, "[TGLMT] uborange#%d point %u -> buf %u off=%ld size=%ld\n",
+                    nUBR, index, buffer, (long)o, (long)s);
+            fflush(stderr);
+        }
     } else if (target == 0x90D2) {
         c.storageBindPoints[index] = BufferRange{buffer, o, s};
     }
