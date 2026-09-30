@@ -344,8 +344,25 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         opts.blend0.srcAlpha = b.srcAlpha; opts.blend0.dstAlpha = b.dstAlpha;
         opts.blend0.rgbOp = b.rgbEq; opts.blend0.alphaOp = b.alphaEq;
     }
+    // IR: identity của render pass đang muốn (để quyết định reuse encoder).
+    // Default FB: colorTex=0; FBO: colorTex id thật. hasDepth phân biệt pass có depth.
+    GLuint curDrawFBO = c.state.BoundDrawFBO();
+    GLuint curColorTex = drawColorTexId; // 0 cho default
+    // Thử reuse pipeline đã có khi cùng prog+target format (tránh rebuild key string
+    // + mutex mỗi draw). So sánh nativeHandle sau khi lookup; lookup vẫn gọi vì
+    // bridge đã cache (rẻ hơn compile). Bước tiếp theo (M5c) sẽ cache key ở Context
+    // để bỏ cả lookup khi inputs giống hệt.
+    // NOTE: target cho pipeline key phải là target sẽ dùng (pendingTarget khi reuse,
+    // target mới khi tạo mới). Khi reuse, pendingTarget và target mới cùng format/size
+    // (đã kiểm tra FBO id + hasDepth), nên dùng format của pendingTarget cũng đúng.
+    metal::PixelFormat pipeFmt = target->pixelFormat();
+    if (c.pendingEncoder && c.pendingTarget && !c.applePendingClear &&
+        c.pendingDrawFBO == curDrawFBO && c.pendingColorTex == curColorTex &&
+        c.pendingHasDepth == opts.depth) {
+        pipeFmt = c.pendingTarget->pixelFormat();
+    }
     auto pipe = c.device->makeCustomPipeline(pr.appleVS.get(), "TGLMT_vs", pr.appleFS.get(),
-                                             "TGLMT_fs", target->pixelFormat(),
+                                             "TGLMT_fs", pipeFmt,
                                              cas.empty() ? nullptr : cas.data(), (uint32_t)cas.size(),
                                              cas.empty() ? 0 : cas[0].stride, &opts);
     if (!pipe) {
@@ -353,24 +370,68 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         c.LogDebug(0, 0, 0, 0, "AppleDrawGL: pipeline nil (format attrib chưa hỗ trợ?)");
         return false;
     }
-    // 5. Encoder: clear theo mask 1 lần sau glClear, sau đó LOAD giữ kết quả.
+    // 5. Encoder IR (deferred materialization): 1 encoder cho N draw liên tiếp.
+    // Trước đây: mỗi draw = 1 commandBuffer + 1 renderPass + commit (1 GL → 3 Metal).
+    // Giờ: cùng target + cùng hasDepth + không có pendingClear → tái dùng encoder,
+    // chỉ setPipeline khi nativeHandle đổi, chỉ set* khi dirty.
     std::shared_ptr<metal::IRenderEncoder> enc;
+    bool isNewEncoder = false;
     {
-        metal::LoadOp cl = metal::LoadOp::Load, dl = metal::LoadOp::Load;
-        if (c.applePendingClear) {
-            if (c.appleClearMask & 0x00004000u) cl = metal::LoadOp::Clear; // COLOR_BUFFER_BIT
-            if (c.appleClearMask & 0x00000100u) dl = metal::LoadOp::Clear; // DEPTH_BUFFER_BIT
-            c.applePendingClear = false;
-            c.appleClearMask = 0;
+        bool canReuse = c.pendingEncoder && c.pendingTarget && !c.applePendingClear &&
+                        c.pendingDrawFBO == curDrawFBO && c.pendingColorTex == curColorTex &&
+                        c.pendingHasDepth == opts.depth;
+        if (canReuse) {
+            enc = c.pendingEncoder;
+            target = c.pendingTarget; // dùng target đang mở (tránh wrap mới mỗi draw)
+            c.appleStats.encoderReused++;
+        } else {
+            if (c.pendingEncoder) c.FlushPendingEncoder();
+            metal::LoadOp cl = metal::LoadOp::Load, dl = metal::LoadOp::Load;
+            if (c.applePendingClear) {
+                if (c.appleClearMask & 0x00004000u) cl = metal::LoadOp::Clear; // COLOR_BUFFER_BIT
+                if (c.appleClearMask & 0x00000100u) dl = metal::LoadOp::Clear; // DEPTH_BUFFER_BIT
+                c.applePendingClear = false;
+                c.appleClearMask = 0;
+            }
+            enc = c.device->makeRenderEncoderActions(
+                target.get(), pipe.get(),
+                metal::ClearColor{(double)c.clearColor[0], (double)c.clearColor[1],
+                                 (double)c.clearColor[2], (double)c.clearColor[3]},
+                c.clearDepth, cl, dl);
+            if (!enc) { c.appleStats.miscFail++; return false; }
+            c.pendingEncoder = enc;
+            c.pendingTarget = target;
+            c.pendingPipeline = pipe;
+            c.pendingHasDepth = opts.depth;
+            c.pendingDrawFBO = curDrawFBO;
+            c.pendingColorTex = curColorTex;
+            // Encoder mới đã có pipeline (bridge set ở creation) + chưa có state nào:
+            // đánh dấu mọi shadow là invalid để lần set đầu luôn encode.
+            c.pendingViewportValid = false;
+            c.pendingCullValid = false;
+            c.pendingBlendValid = false;
+            c.pendingDepthValid = false;
+            c.pendingDepthState.reset();
+            c.pendingFillValid = false;
+            c.pendingScissorValid = false;
+            c.appleStats.encodersCreated++;
+            isNewEncoder = true;
         }
-        enc = c.device->makeRenderEncoderActions(
-            target.get(), pipe.get(),
-            metal::ClearColor{(double)c.clearColor[0], (double)c.clearColor[1],
-                             (double)c.clearColor[2], (double)c.clearColor[3]},
-            c.clearDepth, cl, dl);
+        // Reused encoder nhưng pipeline khác → đổi pipeline giữa pass (Metal cho phép
+        // khi hasDepth giống nhau, đã gate ở canReuse).
+        if (!isNewEncoder) {
+            uint64_t wantH = pipe->nativeHandle();
+            uint64_t haveH = c.pendingPipeline ? c.pendingPipeline->nativeHandle() : 0;
+            if (haveH && wantH == haveH) {
+                c.appleStats.pipelineReused++; // 0 Metal cho pipeline
+            } else {
+                enc->setPipeline(pipe.get());
+                c.pendingPipeline = pipe;
+            }
+        }
     }
     if (!enc) { c.appleStats.miscFail++; return false; }
-    // Viewport/scissor (GL→Metal convert)
+    // Viewport/scissor (GL→Metal convert) — IR dirty-check: chỉ encode khi đổi.
     {
         ViewportState vp0 = c.state.GetViewport(0);
         float th = (float)target->height();
@@ -382,8 +443,19 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (vp0.w <= 0 || vp0.h <= 0) {
             mvp = metal::Viewport{0, 0, (double)target->width(), (double)target->height(), 0, 1};
         }
-        enc->setViewport(mvp);
-        if (c.state.IsEnabled(0x0C11)) { // SCISSOR_TEST
+        bool vpSame = c.pendingViewportValid &&
+                      c.pendingViewport.x==mvp.x && c.pendingViewport.y==mvp.y &&
+                      c.pendingViewport.w==mvp.w && c.pendingViewport.h==mvp.h &&
+                      c.pendingViewport.n==mvp.n && c.pendingViewport.f==mvp.f;
+        if (!vpSame) {
+            enc->setViewport(mvp);
+            c.pendingViewport = mvp;
+            c.pendingViewportValid = true;
+        } else {
+            c.appleStats.stateSkipped++;
+        }
+        bool scissorOn = c.state.IsEnabled(0x0C11);
+        if (scissorOn) { // SCISSOR_TEST
             auto sc = c.state.GetScissor();
             metal::ScissorRect mr = GLScissorToMetal(sc.x, sc.y, sc.w, sc.h, (int)target->height(),
                                                    upper);
@@ -391,30 +463,101 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             if (mr.x < target->width() && mr.y < target->height()) {
                 if (mr.x + mr.w > target->width()) mr.w = target->width() - mr.x;
                 if (mr.y + mr.h > target->height()) mr.h = target->height() - mr.y;
-                enc->setScissorRect(mr);
+                bool scSame = c.pendingScissorValid && c.pendingScissorEnabled &&
+                              c.pendingScissor.x==mr.x && c.pendingScissor.y==mr.y &&
+                              c.pendingScissor.w==mr.w && c.pendingScissor.h==mr.h;
+                if (!scSame) {
+                    enc->setScissorRect(mr);
+                    c.pendingScissor = mr;
+                    c.pendingScissorEnabled = true;
+                    c.pendingScissorValid = true;
+                } else {
+                    c.appleStats.stateSkipped++;
+                }
             }
+        } else if (c.pendingScissorValid && c.pendingScissorEnabled) {
+            // Tắt scissor sau khi đã bật: Metal không có disable trực tiếp trong pass
+            // này (scissor luôn áp khi set). Ghi nhận để pass sau không mang state cũ:
+            // flush shadow (encoder hiện tại đã qua draw không scissor nên đúng).
+            c.pendingScissorEnabled = false;
+            c.pendingScissorValid = false;
         }
     }
-    // Cull / fillMode / blendColor / depthState
-    enc->setCullMode(c.state.IsEnabled(0x0B44), c.state.CullMode(), c.state.FrontFace());
-    if (c.state.PolygonMode() == 0x1B01) enc->setTriangleFillModeLines(true); // LINE
+    // Cull / fillMode / blendColor / depthState — dirty-check từng món.
+    {
+        bool cullOn = c.state.IsEnabled(0x0B44);
+        uint32_t cullM = c.state.CullMode(), frontF = c.state.FrontFace();
+        bool cullSame = c.pendingCullValid && c.pendingCullEnabled==cullOn &&
+                        c.pendingCullMode==cullM && c.pendingFrontFace==frontF;
+        if (!cullSame) {
+            enc->setCullMode(cullOn, cullM, frontF);
+            c.pendingCullEnabled = cullOn;
+            c.pendingCullMode = cullM;
+            c.pendingFrontFace = frontF;
+            c.pendingCullValid = true;
+        } else {
+            c.appleStats.stateSkipped++;
+        }
+    }
+    {
+        bool wantLines = (c.state.PolygonMode() == 0x1B01);
+        bool fillSame = c.pendingFillValid && c.pendingFillLines == wantLines;
+        // Metal default là FILL: chỉ encode khi muốn LINES (tránh 1 Metal call mỗi draw
+        // cho case FILL phổ biến). Khi từ LINES về FILL trong cùng encoder, phải
+        // encode lại FILL (không thì kẹt LINES).
+        if (!fillSame) {
+            enc->setTriangleFillModeLines(wantLines);
+            c.pendingFillLines = wantLines;
+            c.pendingFillValid = true;
+        } else {
+            c.appleStats.stateSkipped++;
+        }
+    }
     {
         float bc[4];
         c.state.GetBlendColor(bc);
-        enc->setBlendColor(bc[0], bc[1], bc[2], bc[3]);
+        bool bSame = c.pendingBlendValid &&
+                     c.pendingBlend[0]==bc[0] && c.pendingBlend[1]==bc[1] &&
+                     c.pendingBlend[2]==bc[2] && c.pendingBlend[3]==bc[3];
+        // Blend color chỉ ảnh hưởng khi blend bật CONSTANT_*: vẫn encode 1 lần đầu
+        // (pending invalid), sau đó skip khi trùng — đúng "0 Metal khi không đổi".
+        if (!bSame) {
+            enc->setBlendColor(bc[0], bc[1], bc[2], bc[3]);
+            c.pendingBlend[0]=bc[0]; c.pendingBlend[1]=bc[1];
+            c.pendingBlend[2]=bc[2]; c.pendingBlend[3]=bc[3];
+            c.pendingBlendValid = true;
+        } else {
+            c.appleStats.stateSkipped++;
+        }
     }
     std::shared_ptr<metal::IDepthStencilState> dss;
     if (opts.depth) {
-        dss = c.device->makeDepthStencilState(c.state.Depth().func,
-                                              c.state.Depth().writeMask);
-        if (!dss) { c.appleStats.miscFail++; return false; }
-        enc->setDepthStencilState(dss.get());
+        uint32_t df = c.state.Depth().func;
+        bool dw = c.state.Depth().writeMask;
+        bool dSame = c.pendingDepthValid && c.pendingDepthFunc==df &&
+                     c.pendingDepthMask==dw && c.pendingDepthState;
+        if (dSame) {
+            c.appleStats.depthReused++;
+        } else {
+            dss = c.device->makeDepthStencilState(df, dw); // đã cache 16 states ở bridge
+            if (!dss) { c.appleStats.miscFail++; return false; }
+            enc->setDepthStencilState(dss.get());
+            c.pendingDepthFunc = df;
+            c.pendingDepthMask = dw;
+            c.pendingDepthState = dss;
+            c.pendingDepthValid = true;
+        }
+    } else if (c.pendingDepthValid) {
+        // Từ depth → không depth trong cùng pass: pipeline đã đổi sang non-depth
+        // (hasDepth gate flush), depth attachment không còn ý nghĩa → xóa shadow.
+        c.pendingDepthValid = false;
+        c.pendingDepthState.reset();
     }
     // Vertex buffers theo binding
     for (auto& kv : bindMap) enc->setVertexBuffer(kv.second.first.get(), kv.second.second, kv.first);
-    // Uniforms tách VS/FS (fix bug gộp sai offset FS):
-    // Mỗi stage có TGLMTUniforms riêng từ offset 0 (đúng MSL đã sinh).
-    // VS uniforms → vertex buffer(16), FS uniforms → fragment buffer(16).
+    // Uniforms tách VS/FS — IR staging cache: nếu bytes giống lần trước cùng program
+    // thì tái dùng buffer cũ (0 Metal alloc), tránh newBufferWithBytes mỗi draw.
+    // Trước đây: mỗi draw = 2× newBufferWithBytes (vs+fs) dù uniforms không đổi.
     std::shared_ptr<metal::IBuffer> vsUbuf, fsUbuf;
     {
         size_t vsSize = pr.vsUBSize ? pr.vsUBSize : 16;
@@ -432,8 +575,39 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             size_t n = std::min(e.size, uit->second.size());
             if (local + n <= dst->size()) memcpy(dst->data() + local, uit->second.data(), n);
         }
-        vsUbuf = TempUpload(c, vsb.data(), vsb.size());
-        fsUbuf = TempUpload(c, fsb.data(), fsb.size());
+        auto& uc = c.uniformCache;
+        bool sameProg = uc.valid && uc.prog == prog;
+        bool sameVS = sameProg && uc.vsBytes.size()==vsb.size() &&
+                      memcmp(uc.vsBytes.data(), vsb.data(), vsb.size())==0 && uc.vsBuf;
+        bool sameFS = sameProg && uc.fsBytes.size()==fsb.size() &&
+                      memcmp(uc.fsBytes.data(), fsb.data(), fsb.size())==0 && uc.fsBuf;
+        if (sameVS && sameFS) {
+            vsUbuf = uc.vsBuf;
+            fsUbuf = uc.fsBuf;
+            c.appleStats.uniformReused++;
+        } else {
+            // Chỉ upload stage đã đổi (stage còn lại tái dùng nếu giống).
+            if (sameVS) {
+                vsUbuf = uc.vsBuf;
+                c.appleStats.uniformReused++;
+            } else {
+                vsUbuf = TempUpload(c, vsb.data(), vsb.size());
+                if (vsUbuf) { uc.vsBytes = vsb; uc.vsBuf = vsUbuf; }
+            }
+            if (sameFS) {
+                fsUbuf = uc.fsBuf;
+                c.appleStats.uniformReused++;
+            } else {
+                fsUbuf = TempUpload(c, fsb.data(), fsb.size());
+                if (fsUbuf) { uc.fsBytes = fsb; uc.fsBuf = fsUbuf; }
+            }
+            uc.prog = prog;
+            uc.valid = (vsUbuf && fsUbuf);
+            // Giữ buffers sống đến flush (encoder deferred).
+            if (vsUbuf) c.pendingKeep.push_back(vsUbuf);
+            if (fsUbuf && fsUbuf != vsUbuf) c.pendingKeep.push_back(fsUbuf);
+        }
+        if (!vsUbuf || !fsUbuf) { c.appleStats.miscFail++; return false; }
         enc->setVertexBuffer(vsUbuf.get(), 0, 16);
         enc->setFragmentBuffer(fsUbuf.get(), 0, 16);
     }
@@ -503,7 +677,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             std::vector<uint8_t> ubPad(padded, 0);
             memcpy(ubPad.data(), t->second.data.data() + off, len);
             auto ub = TempUpload(c, ubPad.data(), padded);
-            if (ub) uboKeep.push_back(ub);
+            if (ub) {
+                uboKeep.push_back(ub);
+                // IR deferred: encoder chưa commit → giữ buffer đến flush.
+                c.pendingKeep.push_back(ub);
+            }
             return ub;
         };
         // Tương thích ngược: program link trước khi có vsBlocks/fsBlocks
@@ -813,21 +991,19 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
         }
     }
+    // IR deferred: giữ index temp sống đến flush (encoder chưa commit).
+    if (indexed && ib) c.pendingKeep.push_back(ib);
     if (indexed) enc->drawIndexed(prim, (uint32_t)count, ity, ib.get(), ioff, (uint32_t)inst);
     else enc->drawPrimitives(prim, (uint32_t)first, (uint32_t)count, (uint32_t)inst);
-    // Commit không đợi từng draw (throughput benchmark); thứ tự đảm bảo bởi cùng
-    // queue; readback/present cuối frame đồng bộ đúng (commitAndWait/present).
+    // IR: KHÔNG commit mỗi draw. Encoder giữ mở để batch N draw → 1 commit ở flush
+    // (ReadPixels/Blit/present/EndFrame/target đổi/glClear). Trước đây mỗi draw =
+    // 1 commandBuffer + commit (1 GL → 3 Metal). Giờ N draw cùng pass = 1 encoder.
     // Ngữ cảnh cho FIRST-fault handler bất đồng bộ (A11 ban sau fault hàng loạt).
     {
         char b[160];
         snprintf(b, sizeof(b), "prog@%u vao@%u mode=0x%x count=%d idx=%d fbo=%u",
                  prog, vao, mode, count, (int)indexed, c.state.BoundDrawFBO());
         c.device->noteDrawContext(b);
-    }
-    if (!enc->endAndCommitNoWait()) {
-        c.appleStats.miscFail++;
-        c.LogDebug(0, 0, 0, 0, "AppleDrawGL: commit fail");
-        return false;
     }
     c.appleStats.drawsEncoded++;
     c.appleStats.progEncoded[prog]++;

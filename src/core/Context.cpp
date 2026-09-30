@@ -31,4 +31,49 @@ void Context::MakeCurrent(Context* ctx) { tCurrent_ = ctx; }
 void Context::LogDebug(GLenum src, GLenum type, GLuint id, GLenum sev, const std::string& msg) {
     if (debugCb) debugCb(src, type, id, sev, (GLsizei)msg.size(), msg.c_str(), debugUser);
 }
+// IR lowering: flush encoder đang mở (nếu có). Commit KHÔNG đợi để giữ throughput;
+// thứ tự đảm bảo bởi cùng queue. Xóa shadow Metal (viewport/cull/...) nhưng GIỮ
+// pipeline cache của device và uniform cache (vẫn đúng sau flush).
+void Context::FlushPendingEncoder() {
+    if (!pendingEncoder) {
+        pendingTarget.reset();
+        pendingPipeline.reset();
+        pendingHasDepth = false;
+        pendingDrawFBO = 0xFFFFFFFFu;
+        pendingColorTex = 0xFFFFFFFFu;
+        pendingViewportValid = false;
+        pendingCullValid = false;
+        pendingBlendValid = false;
+        pendingDepthValid = false;
+        pendingDepthState.reset();
+        pendingFillValid = false;
+        pendingScissorValid = false;
+        pendingKeep.clear();
+        return;
+    }
+    // endAndCommitNoWait trả false khi encoder đã fail — vẫn phải xóa để draw sau
+    // tạo encoder mới (không kẹt pending hỏng).
+    (void)pendingEncoder->endAndCommitNoWait();
+    pendingEncoder.reset();
+    pendingTarget.reset();
+    pendingPipeline.reset();
+    pendingHasDepth = false;
+    pendingDrawFBO = 0xFFFFFFFFu;
+    pendingColorTex = 0xFFFFFFFFu;
+    pendingViewportValid = false;
+    pendingCullValid = false;
+    pendingBlendValid = false;
+    pendingDepthValid = false;
+    pendingDepthState.reset();
+    pendingFillValid = false;
+    pendingScissorValid = false;
+    pendingKeep.clear();
+    // uniformCache giữ (bytes so sánh vẫn đúng sau flush).
+}
+void Context::InvalidatePendingOnTargetChange() {
+    // Gọi khi FBO bind đổi: nếu target GPU khác target đang encode → flush.
+    // So sánh ở AppleDrawGL bằng con trỏ target thật (chính xác hơn id GL).
+    // Ở đây chỉ là hook dự phòng (flush mù) cho các đường đổi FBO chưa soi target.
+    (void)0;
+}
 } // namespace tglmt

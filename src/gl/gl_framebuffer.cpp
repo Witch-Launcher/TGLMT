@@ -200,6 +200,7 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         // của default target để blitToTarget chấp nhận) rồi GPU copy vào màn hình.
         // Shadow có thể cũ (draws đi GPU-only) → làm tươi từ GPU trước.
         auto& tx = tit->second;
+        c.FlushPendingEncoder(); // IR: commit batch trước khi readback shadow
         c.device->commitAndWait();
         RefreshShadowFromGPU(c, tx);
         if (tx.pixels.empty() || !tx.w || !tx.h) {
@@ -278,6 +279,7 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
 }
 void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d1, GLint d2, GLint d3, GLbitfield m, GLenum f) {
     Context& c = Context::Current();
+    c.FlushPendingEncoder(); // IR: blit đọc texture GPU → phải commit batch trước
     GLuint readFbo = c.state.BoundReadFBO();
     GLuint drawFbo = c.state.BoundDrawFBO();
     // Chẩn đoán đen màn hình: composite cuối menu có thể qua đây (FBO→0).

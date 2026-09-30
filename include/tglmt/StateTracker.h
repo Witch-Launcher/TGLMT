@@ -89,19 +89,34 @@ public:
     GLenum CullMode() const { return cullMode_; }
     GLenum FrontFace() const { return frontFace_; }
     void SetPolygonOffset(float factor, float units, float clamp);
-    void SetLineWidth(float w);
-    void SetViewport(int idx, float x, float y, float w, float h);
+    void SetLineWidth(float w) { if (lineWidth_==w) return; lineWidth_=w; ++stateSeq_; }
+    void SetViewport(int idx, float x, float y, float w, float h) {
+        if (idx>=0&&idx<kMaxViewports) {
+            auto& v = viewports_[idx];
+            if (v.x==x&&v.y==y&&v.w==w&&v.h==h) return;
+            v.x=x; v.y=y; v.w=w; v.h=h; ++stateSeq_;
+        }
+    }
     ViewportState GetViewport(int idx) const {
         return (idx >= 0 && idx < kMaxViewports) ? viewports_[idx] : ViewportState{};
     }
-    void SetDepthRangef(float n, float f, int idx);
+    void SetDepthRangef(float n, float f, int idx) {
+        if (idx>=0&&idx<kMaxViewports) {
+            auto& v = viewports_[idx];
+            if (v.n==n&&v.f==f) return;
+            v.n=n; v.f=f; ++stateSeq_;
+        }
+    }
     void SetClipControl(GLenum origin, GLenum depth);
     GLenum ClipOrigin() const { return clipOrigin_; }
     GLenum ClipDepth() const { return clipDepth_; }
     void SetPolygonMode(GLenum face, GLenum mode);
     GLenum PolygonMode() const { return polyMode_; } // FRONT_AND_BACK dùng chung (M5b)
     // Scissor (glScissor*): Metal setScissorRect — trước đây no-op, giờ lưu thật.
-    void SetScissor(int x, int y, int w, int h) { scissor_ = {x, y, w, h}; }
+    void SetScissor(int x, int y, int w, int h) {
+        if (scissor_.x==x&&scissor_.y==y&&scissor_.w==w&&scissor_.h==h) return;
+        scissor_ = {x, y, w, h}; ++stateSeq_;
+    }
     struct ScissorBox { int x = 0, y = 0, w = 0, h = 0; };
     ScissorBox GetScissor() const { return scissor_; }
 
@@ -129,14 +144,18 @@ public:
     void BindProgram(GLuint p);
     GLuint BoundProgram() const { return boundProgram_; }
     // XFB bind hiện tại (glBindTransformFeedback) — thay vì đoán object đầu tiên
-    void BindXFB(GLuint id) { boundXFB_ = id; }
+    void BindXFB(GLuint id) { if (boundXFB_==id) return; boundXFB_ = id; ++stateSeq_; }
     GLuint BoundXFB() const { return boundXFB_; }
     // Số control point / patch (glPatchParameteri GL_PATCH_VERTICES, mặc định 3)
-    void SetPatchVertices(GLint n) { patchVertices_ = n; }
+    void SetPatchVertices(GLint n) { if (patchVertices_==n) return; patchVertices_ = n; ++stateSeq_; }
     GLint PatchVertices() const { return patchVertices_; }
 
     PixelStoreState& PixelStore() { return pixel_; }
     const PixelStoreState& PixelStore() const { return pixel_; }
+
+    // IR sequence: tăng MỖI lần logical GL state thực sự đổi (shadowing đã lọc trùng).
+    // Dùng để chứng minh "N OpenGL calls trùng → 0 Metal calls".
+    uint64_t StateSeq() const { return stateSeq_; }
 
     bool DirtyPipeline() const { return dirtyPipeline_; }
     bool DirtyDepth() const { return dirtyDepth_; }
@@ -172,6 +191,7 @@ private:
     GLuint boundReadFBO_ = 0, boundDrawFBO_ = 0;
     PixelStoreState pixel_;
     bool dirtyPipeline_ = true, dirtyDepth_ = true;
+    uint64_t stateSeq_ = 0; // IR logical-state version (chỉ tăng khi đổi thật)
     struct Key { GLenum p; GLuint i; bool operator==(const Key& o) const { return p==o.p&&i==o.i; } };
     struct KeyH { size_t operator()(const Key& k) const { return (size_t)k.p*1315423911u + k.i; } };
     std::unordered_map<Key, std::vector<uint8_t>, KeyH> shadow_;

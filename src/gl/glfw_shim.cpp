@@ -81,8 +81,11 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
     if (!w || !st.renderer || st.win.get() != w) return false;
     Context::MakeCurrent(&st.renderer->context());
     // Xả draws NoWait trước present (đúng, không stale trên TBDR A11).
-    if (st.renderer->hasRealGPU())
+    // IR: flush batch encoder mở trước (nếu không present thiếu hình).
+    if (st.renderer->hasRealGPU()) {
+        st.renderer->context().FlushPendingEncoder();
         st.renderer->context().device->commitAndWait();
+    }
     bool ok = st.renderer->EndFrame(metalLayer);
     // Chẩn đoán đen màn hình trên máy thật: log counters throttled.
     // drawsEnc < drawsAtt nhiều => pipeline/target rớt ở AppleDrawGL;

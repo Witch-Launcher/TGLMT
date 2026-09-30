@@ -517,6 +517,7 @@ static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
         return;
     }
     if (!dst.gpu) { c.errors.Record(0x0502); return; }
+    c.FlushPendingEncoder(); // IR: commit batch trước khi copy (không stale TBDR)
     c.device->commitAndWait(); // xả draws NoWait trước khi copy (không stale TBDR)
     bool gpuOk = false;
     if (readFbo == 0) {
@@ -658,6 +659,7 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
         return;
     }
     if (!src.gpu || !dst.gpu) { c.errors.Record(0x0502); return; }
+    c.FlushPendingEncoder(); // IR: commit batch trước khi blit copy
     c.device->commitAndWait();
     if (src.gpu->pixelFormat() == dst.gpu->pixelFormat() &&
         c.device->blitCopy(src.gpu.get(), dst.gpu.get(),

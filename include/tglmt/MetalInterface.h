@@ -132,6 +132,9 @@ public:
 class IRenderPipeline {
 public:
     virtual ~IRenderPipeline() = default;
+    // IR lowering: handle native (id<MTLRenderPipelineState> *) để so sánh pipeline
+    // giống nhau mà không cần rebuild key. Apple trả (uint64_t)pso, Null trả 0.
+    virtual uint64_t nativeHandle() const { return 0; }
 };
 
 class IRenderTarget {
@@ -150,6 +153,10 @@ public:
     virtual ~IRenderEncoder() = default;
     virtual void setViewport(const Viewport& vp) = 0;
     virtual void setVertexBuffer(IBuffer* b, size_t off, uint32_t idx) = 0;
+    // IR lowering: đổi pipeline GIỮA các draw trong cùng encoder (batching).
+    // Encoder mới đã có pipeline từ makeRenderEncoder*; hàm này chỉ dùng khi
+    // reuse encoder và pipeline thực sự đổi (dirty). Null backend: no-op.
+    virtual void setPipeline(IRenderPipeline* p) { (void)p; }
     virtual void drawPrimitives(PrimitiveType t, uint32_t start, uint32_t count, uint32_t instances = 1) = 0;
     virtual void drawIndexed(PrimitiveType t, uint32_t count, IndexType it, IBuffer* ib, size_t off, uint32_t instances = 1) = 0;
     // Kết thúc encode + commit + chờ GPU xong (kèm blit-synchronize để readback an toàn).

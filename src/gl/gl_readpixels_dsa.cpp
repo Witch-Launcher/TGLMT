@@ -35,6 +35,7 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
     }
     // GPU path: bọc rồi readback toàn target (x/y/w/h đầy đủ ở M5b)
     if (c.device && !c.device->isNull()) {
+        c.FlushPendingEncoder(); // IR: commit batch encoder mở trước khi đọc
         c.device->commitAndWait(); // xả draws NoWait trước khi đọc (đúng, không stale)
         std::shared_ptr<metal::IRenderTarget> tgt;
         if (tex) {

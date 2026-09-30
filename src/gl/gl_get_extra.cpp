@@ -53,6 +53,7 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
         tx.pixels.size() >= (size_t)tx.w * tx.h * 4 &&
         (tx.internalFormat == 0x8058 || tx.internalFormat == 0x8C43 ||
          tx.internalFormat == 0)) {
+        c.FlushPendingEncoder(); // IR: commit batch trước khi readback
         c.device->commitAndWait(); // xả draws NoWait (không stale TBDR)
         auto wrapped = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
         if (wrapped) {

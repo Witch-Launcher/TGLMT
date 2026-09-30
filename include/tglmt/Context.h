@@ -240,9 +240,60 @@ public:
         uint64_t hazardWarn = 0;     // draw vừa render vừa sample cùng texture
         uint64_t mipBase = 0;        // sampler 1-level + minfilter mipmap → base (fix A11)
         uint64_t uboSmall = 0;       // UBO buffer thiếu so với struct → zero fallback (chống fault)
+        // IR lowering stats (chứng minh 1 GL → 0 Metal khi không đổi):
+        uint64_t encodersCreated = 0; // số MTLRenderCommandEncoder đã tạo (muốn << draws)
+        uint64_t encoderReused = 0;   // số draw tái dùng encoder đang mở (batching)
+        uint64_t pipelineReused = 0;  // số draw giữ nguyên pipeline (skip setPipeline)
+        uint64_t stateSkipped = 0;    // số set* đã bỏ qua nhờ dirty-check (viewport/cull/...)
+        uint64_t uniformReused = 0;   // số draw tái dùng uniform buffer (uniforms không đổi)
+        uint64_t depthReused = 0;     // số draw tái dùng depth state (skip makeDepthStencil)
         std::map<GLuint, uint64_t> progEncoded; // program id -> số draw đã encode
     };
     AppleStats appleStats;
+
+    // IR lowering — deferred materialization (1 OpenGL → 0 Metal nếu chưa cần):
+    // pendingEncoder giữ MTLRenderCommandEncoder mở xuyên suốt các draw liên tiếp
+    // cùng target; chỉ flush (endEncoding+commitNoWait) khi target đổi / readback /
+    // blit / present / frame kết thúc. pending* là shadow của Metal state đã encode,
+    // dùng để dirty-check: chỉ encode thứ thực sự đổi.
+    std::shared_ptr<metal::IRenderEncoder> pendingEncoder;
+    std::shared_ptr<metal::IRenderTarget> pendingTarget;
+    std::shared_ptr<metal::IRenderPipeline> pendingPipeline;
+    bool pendingHasDepth = false;
+    GLuint pendingDrawFBO = 0xFFFFFFFFu; // FBO id của pass đang mở (0=default)
+    GLuint pendingColorTex = 0xFFFFFFFFu; // color texture id khi FBO!=0
+    bool pendingViewportValid = false;
+    metal::Viewport pendingViewport{0,0,0,0,0,1};
+    bool pendingCullValid = false;
+    bool pendingCullEnabled = false;
+    uint32_t pendingCullMode = 0, pendingFrontFace = 0;
+    bool pendingBlendValid = false;
+    float pendingBlend[4] = {0,0,0,0};
+    bool pendingDepthValid = false;
+    uint32_t pendingDepthFunc = 0;
+    bool pendingDepthMask = true;
+    std::shared_ptr<metal::IDepthStencilState> pendingDepthState;
+    bool pendingFillValid = false;
+    bool pendingFillLines = false;
+    bool pendingScissorValid = false;
+    bool pendingScissorEnabled = false;
+    metal::ScissorRect pendingScissor{0,0,0,0};
+    // Uniform staging cache: program → bytes lần cuối đã upload (tránh newBuffer mỗi draw
+    // khi uniforms không đổi). Chỉ dùng cho vs/fsUB 16-slot; UBO per-draw vẫn upload
+    // vì buffer source có thể đổi qua glBufferSubData.
+    struct UniformCache {
+        std::vector<uint8_t> vsBytes, fsBytes;
+        std::shared_ptr<metal::IBuffer> vsBuf, fsBuf;
+        GLuint prog = 0;
+        bool valid = false;
+    };
+    UniformCache uniformCache;
+    // IR: giữ temp buffers (uniform/UBO/index rewrite) sống đến flush.
+    // Encoder Metal giữ con trỏ MTLBuffer; nếu shared_ptr chết trước commit,
+    // ARC release có thể thu hồi trước khi GPU chạy → phải giữ ở đây.
+    std::vector<std::shared_ptr<metal::IBuffer>> pendingKeep;
+    void FlushPendingEncoder(); // end+commitNoWait, xóa shadow (giữ pipeline cache)
+    void InvalidatePendingOnTargetChange(); // helper khi FBO đổi (flush nếu target khác)
 
     // debug callback (glDebugMessageCallback)
     TGLMTDebugProc debugCb = nullptr;

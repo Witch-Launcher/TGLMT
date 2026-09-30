@@ -40,6 +40,7 @@ void Renderer::Resize(uint32_t w, uint32_t h) {
     impl_->h = h;
     impl_->target.reset(); // dựng lại ở BeginFrame kế tiếp
     if (impl_->ctx) {
+        impl_->ctx->FlushPendingEncoder(); // IR: target cũ hết hiệu lực
         impl_->ctx->applePendingClear = true; // target mới phải clear lại
         impl_->ctx->appleClearMask = 0xFFFFFFFFu;
     }
@@ -66,6 +67,10 @@ bool Renderer::BeginFrame() {
 
 bool Renderer::EndFrame(void* metalLayer) {
     if (!impl_->initialized || !impl_->ctx) return false;
+    // IR: flush batch encoder trước khi present (nếu không, draws còn nằm trong
+    // encoder mở chưa commit → present thiếu hình).
+    Context::MakeCurrent(impl_->ctx.get());
+    impl_->ctx->FlushPendingEncoder();
     if (!metalLayer) return true; // headless: không present vẫn coi như xong
     if (!impl_->target) return false;
     return impl_->ctx->device->presentTarget(impl_->target.get(), metalLayer);

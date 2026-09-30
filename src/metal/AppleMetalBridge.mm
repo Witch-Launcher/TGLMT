@@ -165,6 +165,7 @@ public:
     id<MTLRenderPipelineState> get() const { return pso_; }
     // Pipeline có depthAttachmentPixelFormat không? Pass phải khớp (TBDR strict).
     bool hasDepth() const { return hasDepth_; }
+    uint64_t nativeHandle() const override { return (uint64_t)(__bridge void*)pso_; }
 private:
     id<MTLRenderPipelineState> pso_;
     bool hasDepth_;
@@ -311,6 +312,12 @@ public:
         AppleBuffer* ab = dynamic_cast<AppleBuffer*>(b);
         if (!ab) return;
         [enc_ setVertexBuffer:ab->get() offset:off atIndex:idx];
+    }
+    void setPipeline(IRenderPipeline* p) override {
+        if (!ok_ || !p) return;
+        ApplePipeline* ap = dynamic_cast<ApplePipeline*>(p);
+        if (!ap || !ap->get()) return;
+        [enc_ setRenderPipelineState:ap->get()];
     }
     void drawPrimitives(PrimitiveType t, uint32_t start, uint32_t count, uint32_t inst) override {
         if (!ok_) { ok_ = false; return; }
@@ -1137,11 +1144,21 @@ public:
         return std::make_shared<AppleComputeEncoder>(cb);
     }
     std::shared_ptr<IDepthStencilState> makeDepthStencilState(uint32_t func, bool write) override {
+        // IR cache: chỉ 8 compare func × 2 writeMask = 16 trạng thái. Trước đây mỗi draw
+        // tạo mới 1 MTLDepthStencilState (1 GL → 1 Metal alloc). Giờ cache vĩnh viễn.
+        uint64_t key = ((uint64_t)func << 1) | (write ? 1u : 0u);
+        {
+            std::lock_guard<std::mutex> l(dmu_);
+            auto it = dcache_.find(key);
+            if (it != dcache_.end()) return std::make_shared<AppleDepthStencil>(it->second);
+        }
         MTLDepthStencilDescriptor* d = [[MTLDepthStencilDescriptor alloc] init];
         d.depthCompareFunction = ToMTLCompare(func);
         d.depthWriteEnabled = write ? YES : NO;
         id<MTLDepthStencilState> s = [dev_ newDepthStencilStateWithDescriptor:d];
-        return s ? std::make_shared<AppleDepthStencil>(s) : nullptr;
+        if (!s) return nullptr;
+        { std::lock_guard<std::mutex> l(dmu_); dcache_[key] = s; }
+        return std::make_shared<AppleDepthStencil>(s);
     }
     std::shared_ptr<ISamplerState> makeSampler(const SamplerDesc& sd) override {
         MTLSamplerDescriptor* d = [[MTLSamplerDescriptor alloc] init];
@@ -1304,6 +1321,8 @@ private:
     LogFn log_;
     std::vector<DrawTrace> trace_;
     std::map<std::string, id<MTLRenderPipelineState>> pcache_;
+    std::map<uint64_t, id<MTLDepthStencilState>> dcache_; // IR: 16 depth states cache
+    std::mutex dmu_;
     std::shared_ptr<IRenderTarget> defaultTarget_;
     std::shared_ptr<AppleRenderEncoder::SharedDiag> diag_;
     std::mutex pmu_;
