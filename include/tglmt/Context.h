@@ -247,6 +247,12 @@ public:
         uint64_t stateSkipped = 0;    // số set* đã bỏ qua nhờ dirty-check (viewport/cull/...)
         uint64_t uniformReused = 0;   // số draw tái dùng uniform buffer (uniforms không đổi)
         uint64_t depthReused = 0;     // số draw tái dùng depth state (skip makeDepthStencil)
+        uint64_t pipelineLookups = 0; // số lần gọi bridge makeCustomPipeline (muốn giảm)
+        uint64_t pipelineLookupSkipped = 0; // số draw bỏ cả bridge lookup nhờ IR key cache
+        uint64_t bufferCoalesced = 0; // số glBufferSubData gộp (defer, chưa tính flush)
+        uint64_t bufferFlushes = 0;   // số lần flush buffer staging lên GPU
+        uint64_t texCoalesced = 0;    // số glTexSubImage gộp vào staging
+        uint64_t texFlushes = 0;      // số lần flush texture staging (replaceRegion)
         std::map<GLuint, uint64_t> progEncoded; // program id -> số draw đã encode
     };
     AppleStats appleStats;
@@ -288,6 +294,63 @@ public:
         bool valid = false;
     };
     UniformCache uniformCache;
+    // IR pipeline-key cache (Deferred State Translation đầy đủ):
+    // key = mọi input bridge dùng để build PSO (libs+fmt+attribs+stride+depth+blend).
+    // Nếu key giống pending → tái dùng pendingPipeline, BỎ CẢ bridge lookup
+    // (trước đây mỗi draw vẫn build string + mutex dù đã cache PSO).
+    struct PipelineKey {
+        const void* vsLib = nullptr;
+        const void* fsLib = nullptr;
+        metal::PixelFormat fmt = metal::PixelFormat::Invalid;
+        uint32_t stride = 0;
+        bool depth = false;
+        bool blend = false;
+        metal::AttachmentBlend blend0;
+        std::vector<metal::CustomAttrib> attribs;
+        bool operator==(const PipelineKey& o) const {
+            if (vsLib != o.vsLib || fsLib != o.fsLib || fmt != o.fmt ||
+                stride != o.stride || depth != o.depth || blend != o.blend)
+                return false;
+            if (blend) {
+                if (blend0.enabled != o.blend0.enabled || blend0.srcRGB != o.blend0.srcRGB ||
+                    blend0.dstRGB != o.blend0.dstRGB || blend0.srcAlpha != o.blend0.srcAlpha ||
+                    blend0.dstAlpha != o.blend0.dstAlpha || blend0.rgbOp != o.blend0.rgbOp ||
+                    blend0.alphaOp != o.blend0.alphaOp)
+                    return false;
+            }
+            if (attribs.size() != o.attribs.size()) return false;
+            for (size_t i = 0; i < attribs.size(); ++i) {
+                const auto& a = attribs[i];
+                const auto& b = o.attribs[i];
+                if (a.loc != b.loc || a.size != b.size || a.type != b.type ||
+                    a.normalized != b.normalized || a.offset != b.offset ||
+                    a.bufferIndex != b.bufferIndex || a.stride != b.stride ||
+                    a.divisor != b.divisor)
+                    return false;
+            }
+            return true;
+        }
+    };
+    PipelineKey pendingPipeKey;
+    bool pendingPipeValid = false;
+    // PSO đã resolve từ key (sống qua flush encoder — PSO tái dùng cho pass sau).
+    // Khác pendingPipeline (state đã bind trong encoder đang mở, reset khi flush).
+    std::shared_ptr<metal::IRenderPipeline> cachedPipe;
+    // ---- Resource staging (upload coalescing): buffer + texture updates defer ----
+    // Buffer: glBufferSubData* chỉ memcpy vào shadow + ghi range vào staging;
+    // GPU copy + didModifyRange dồn đến FlushBufferStaging() (trước draw dùng buffer,
+    // ReadPixels/Blit/finish). Các range kề/chồng được merge → 1 memcpy+didModify.
+    struct BufRange { size_t off = 0, len = 0; };
+    std::unordered_map<GLuint, std::vector<BufRange>> pendingBufRanges;
+    void FlushBufferStaging(GLuint buf); // flush 1 buffer (merge ranges)
+    void FlushAllBufferStaging();        // flush tất cả (finish/readback)
+    // Texture: glTexSubImage* chỉ update shadow + ghi region vào staging;
+    // replaceRegion dồn đến FlushTextureStaging() (trước draw sampling texture đó,
+    // blit/readback). Merge khi cùng texture và regions kề nhau cùng row pitch.
+    struct TexRegion { uint32_t x = 0, y = 0, w = 0, h = 0; GLenum format = 0; GLenum type = 0; };
+    std::unordered_map<GLuint, std::vector<TexRegion>> pendingTexRegions;
+    void FlushTextureStaging(GLuint tex); // flush 1 texture (gộp regions thành bbox)
+    void FlushAllTextureStaging();
     // IR: giữ temp buffers (uniform/UBO/index rewrite) sống đến flush.
     // Encoder Metal giữ con trỏ MTLBuffer; nếu shared_ptr chết trước commit,
     // ARC release có thể thu hồi trước khi GPU chạy → phải giữ ở đây.

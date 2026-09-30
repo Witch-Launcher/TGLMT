@@ -84,6 +84,8 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
     // IR: flush batch encoder mở trước (nếu không present thiếu hình).
     if (st.renderer->hasRealGPU()) {
         st.renderer->context().FlushPendingEncoder();
+        st.renderer->context().FlushAllBufferStaging();
+        st.renderer->context().FlushAllTextureStaging();
         st.renderer->context().device->commitAndWait();
     }
     bool ok = st.renderer->EndFrame(metalLayer);

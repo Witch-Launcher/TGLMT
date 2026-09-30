@@ -333,6 +333,28 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         target = c.device->wrapAsTarget(tit->second.gpu.get(), dep);
         if (!target) { c.appleStats.noTarget++; return false; }
     }
+    // 3b. IR staging flush (Deferred Resource Translation):
+    // Buffer/texture SubData đã stage (chưa lên GPU) phải flush trước encode,
+    // nếu không GPU stale (đen). Chỉ flush buffer/texture draw này dùng
+    // (không flush mù toàn bộ để giữ lợi ích coalesce).
+    {
+        for (int i = 0; i < 16; ++i)
+            if (v.attribs[i].enabled && v.attribs[i].buffer) c.FlushBufferStaging(v.attribs[i].buffer);
+        if (eboId) c.FlushBufferStaging(eboId);
+        for (auto& kv : c.uniformBindPoints)
+            if (kv.second.buffer) c.FlushBufferStaging(kv.second.buffer);
+        auto flushSampled = [&](const std::vector<std::string>& lst) {
+            for (auto& nm : lst) {
+                auto uit = pr.samplerUnits.find(nm);
+                GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+                if (unit >= 32) continue;
+                GLuint texId = c.state.BoundTexture(unit);
+                if (texId) c.FlushTextureStaging(texId);
+            }
+        };
+        flushSampled(pr.vsSamplers);
+        flushSampled(pr.fsSamplers);
+    }
     // 4. Pipeline: depth khi depthTest bật (+ có depth thật), blend khi BLEND bật
     metal::PipelineOpts opts;
     opts.depth = c.state.IsEnabled(0x0B71) && (c.state.BoundDrawFBO() == 0 ? false : hasDepthTex);
@@ -361,10 +383,39 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         c.pendingHasDepth == opts.depth) {
         pipeFmt = c.pendingTarget->pixelFormat();
     }
-    auto pipe = c.device->makeCustomPipeline(pr.appleVS.get(), "TGLMT_vs", pr.appleFS.get(),
-                                             "TGLMT_fs", pipeFmt,
-                                             cas.empty() ? nullptr : cas.data(), (uint32_t)cas.size(),
-                                             cas.empty() ? 0 : cas[0].stride, &opts);
+    // IR pipeline-key cache: nếu mọi input giống pending → tái dùng pipeline,
+    // BỎ CẢ bridge lookup (build string + mutex). Trước đây mỗi draw vẫn lookup.
+    std::shared_ptr<metal::IRenderPipeline> pipe;
+    {
+        Context::PipelineKey want;
+        want.vsLib = pr.appleVS.get();
+        want.fsLib = pr.appleFS.get();
+        want.fmt = pipeFmt;
+        want.stride = cas.empty() ? 0 : cas[0].stride;
+        want.depth = opts.depth;
+        want.blend = opts.blend;
+        if (opts.blend) want.blend0 = opts.blend0;
+        want.attribs.assign(cas.begin(), cas.end());
+        if (c.pendingPipeValid && c.cachedPipe && want == c.pendingPipeKey) {
+            pipe = c.cachedPipe;
+            c.appleStats.pipelineLookupSkipped++;
+        } else {
+            c.appleStats.pipelineLookups++;
+            pipe = c.device->makeCustomPipeline(pr.appleVS.get(), "TGLMT_vs", pr.appleFS.get(),
+                                                "TGLMT_fs", pipeFmt,
+                                                cas.empty() ? nullptr : cas.data(),
+                                                (uint32_t)cas.size(),
+                                                cas.empty() ? 0 : cas[0].stride, &opts);
+            if (pipe) {
+                c.pendingPipeKey = std::move(want);
+                c.pendingPipeValid = true;
+                c.cachedPipe = pipe;
+            } else {
+                c.pendingPipeValid = false;
+                c.cachedPipe.reset();
+            }
+        }
+    }
     if (!pipe) {
         c.appleStats.noPipeline++;
         c.LogDebug(0, 0, 0, 0, "AppleDrawGL: pipeline nil (format attrib chưa hỗ trợ?)");

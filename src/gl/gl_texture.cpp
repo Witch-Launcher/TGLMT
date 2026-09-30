@@ -8,6 +8,128 @@
 #include <vector>
 using namespace tglmt;
 
+// IR staging cho texture uploads (upload coalescing):
+// glTexSubImage* chỉ update shadow + stage region; replaceRegion dồn đến flush
+// (trước draw sampling texture / blit / readback). Nhiều sub-uploads kề nhau
+// trong 1 frame (font atlas streaming) gộp thành 1 bbox → 1 replaceRegion.
+static void StageTexRegion(Context& c, GLuint texId, uint32_t x, uint32_t y, uint32_t w,
+                           uint32_t h, GLenum format, GLenum type) {
+    if (!w || !h) return;
+    // Thứ tự GL như buffer: upload sau draws không được đổi draws trước →
+    // commit encoder đang mở trước khi stage.
+    if (c.pendingEncoder) c.FlushPendingEncoder();
+    c.pendingTexRegions[texId].push_back(Context::TexRegion{x, y, w, h, format, type});
+    ++c.appleStats.texCoalesced;
+}
+
+namespace tglmt {
+// Flush 1 texture: gộp regions cùng format thành bbox duy nhất rồi SyncRegionToGPU
+// từ shadow (tight). Khác format → flush từng region riêng (không gộp sai conversion).
+void Context::FlushTextureStaging(GLuint texId) {
+    auto pit = pendingTexRegions.find(texId);
+    if (pit == pendingTexRegions.end() || pit->second.empty()) return;
+    auto tit = textures.find(texId);
+    if (tit == textures.end() || !tit->second.gpu) {
+        pendingTexRegions.erase(pit);
+        return;
+    }
+    TextureObject& tx = tit->second;
+    // Nhóm theo (format,type): vanilla dùng 1 format nên thường chỉ 1 nhóm → 1 bbox.
+    // Sắp xếp để nhóm cùng format kề nhau.
+    auto& regs = pit->second;
+    std::sort(regs.begin(), regs.end(), [](const TexRegion& a, const TexRegion& b) {
+        if (a.format != b.format) return a.format < b.format;
+        return a.type < b.type;
+    });
+    size_t i = 0;
+    // Bpp/format helpers cục bộ (tránh phụ thuộc hàm static dưới).
+    auto bppOf = [](GLenum f, GLenum t) -> size_t {
+        (void)t;
+        switch (f) {
+            case 0x1907: return 3;
+            case 0x1908: return 4;
+            case 0x80E1: return 4;
+            case 0x1903: case 0x1906: case 0x1904: case 0x1905: case 0x1902:
+            case 0x1901: case 0x1909: return 1;
+            case 0x8227: return 2;
+            default: return 4;
+        }
+    };
+    while (i < regs.size()) {
+        size_t j = i;
+        GLenum fmt = regs[i].format, typ = regs[i].type;
+        uint32_t x0 = regs[i].x, y0 = regs[i].y;
+        uint32_t x1 = regs[i].x + regs[i].w, y1 = regs[i].y + regs[i].h;
+        while (j + 1 < regs.size() && regs[j + 1].format == fmt && regs[j + 1].type == typ) {
+            ++j;
+            x0 = std::min(x0, regs[j].x);
+            y0 = std::min(y0, regs[j].y);
+            x1 = std::max(x1, regs[j].x + regs[j].w);
+            y1 = std::max(y1, regs[j].y + regs[j].h);
+        }
+        // Kẹp bbox vào texture thật (an toàn khi regions cũ từ trước resize).
+        if (x0 < tx.w && y0 < tx.h) {
+            uint32_t bw = std::min(x1 - x0, tx.w - x0);
+            uint32_t bh = std::min(y1 - y0, tx.h - y0);
+            if (bw && bh) {
+                size_t bpp = bppOf(fmt, typ);
+                size_t texRow = (size_t)tx.w * bpp;
+                // Shadow có thể ngắn (R8/RG8 font): chỉ sync khi đủ chỗ.
+                if (tx.pixels.size() >= (size_t)tx.h * texRow) {
+                    const uint8_t* srcRows = tx.pixels.data() + (size_t)y0 * texRow + (size_t)x0 * bpp;
+                    // SyncRegionToGPU khai báo ở dưới trong file — forward qua lambda?
+                    // Gọi trực tiếp device->updateTexture cho path raw tight;
+                    // các path conversion (BGRA/RGB) xử lý gọn tại đây.
+                    bool synced = false;
+                    if (typ == 0x1401 && (fmt == 0x1908 || fmt == 0x1903 || fmt == 0x8227 || fmt == 0x1906)) {
+                        std::vector<uint8_t> tight((size_t)bw * bh * bpp);
+                        for (uint32_t r = 0; r < bh; ++r)
+                            memcpy(tight.data() + (size_t)r * bw * bpp,
+                                   srcRows + (size_t)r * texRow, (size_t)bw * bpp);
+                        synced = device->updateTexture(tx.gpu.get(), x0, y0, bw, bh,
+                                                       tight.data(), (size_t)bw * bpp);
+                    } else if (typ == 0x1401 && fmt == 0x80E1) {
+                        std::vector<uint8_t> rgba((size_t)bw * bh * 4);
+                        for (uint32_t r = 0; r < bh; ++r)
+                            for (uint32_t x = 0; x < bw; ++x) {
+                                const uint8_t* s = srcRows + (size_t)r * texRow + (size_t)x * 4;
+                                uint8_t* d = rgba.data() + ((size_t)r * bw + x) * 4;
+                                d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+                            }
+                        synced = device->updateTexture(tx.gpu.get(), x0, y0, bw, bh,
+                                                       rgba.data(), (size_t)bw * 4);
+                    } else if (fmt == 0x1907 && typ == 0x1401) {
+                        std::vector<uint8_t> rgba((size_t)bw * bh * 4);
+                        for (uint32_t r = 0; r < bh; ++r)
+                            for (uint32_t x = 0; x < bw; ++x) {
+                                const uint8_t* s = srcRows + (size_t)r * texRow + (size_t)x * 3;
+                                uint8_t* d = rgba.data() + ((size_t)r * bw + x) * 4;
+                                d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+                            }
+                        synced = device->updateTexture(tx.gpu.get(), x0, y0, bw, bh,
+                                                       rgba.data(), (size_t)bw * 4);
+                    } else {
+                        LogDebug(0, 0, 0, 0,
+                                 "FlushTextureStaging: format/type chưa upload GPU (giữ shadow)");
+                    }
+                    (void)synced;
+                    ++appleStats.texFlushes;
+                }
+            }
+        }
+        i = j + 1;
+    }
+    pendingTexRegions.erase(pit);
+}
+void Context::FlushAllTextureStaging() {
+    if (pendingTexRegions.empty()) return;
+    std::vector<GLuint> ids;
+    ids.reserve(pendingTexRegions.size());
+    for (auto& kv : pendingTexRegions) ids.push_back(kv.first);
+    for (GLuint id : ids) FlushTextureStaging(id);
+}
+} // namespace tglmt
+
 // internalFormat GL (giá trị đã đối chiếu gl46_types.h) → PixelFormat Metal.
 // Không đoán: chỉ map các format core chắc chắn; còn lại RGBA8Unorm + debug log.
 static metal::PixelFormat ToMetalFormat(GLenum internalFormat) {
@@ -139,7 +261,10 @@ void glCreateTextures(GLenum target, GLsizei n, GLuint* t) {
 void glDeleteTextures(GLsizei n, const GLuint* t) {
     Context& c = Context::Current();
     c.registry.Delete(ObjectKind::Texture, n, t);
-    for (GLsizei i = 0; i < n; ++i) c.textures.erase(t[i]);
+    for (GLsizei i = 0; i < n; ++i) {
+        c.textures.erase(t[i]);
+        c.pendingTexRegions.erase(t[i]);
+    }
 }
 GLboolean glIsTexture(GLuint t) {
     return Context::Current().registry.Is(ObjectKind::Texture, t) ? 1 : 0;
@@ -275,6 +400,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
         for (GLsizei r = 0; r < h; ++r) memcpy(tx.pixels.data() + r * w * bpp, src + r * rowLen, (size_t)w * bpp);
     }
     tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
+    c.pendingTexRegions.erase(tp->id); // realloc GPU mới đã có full data → staging cũ vô nghĩa
     // Upload base level lên GPU (bug cũ: tạo texture rỗng → sampling đen).
     // Vanilla atlas RGBA/UBYTE tight; JPG panorama là RGB/UBYTE → expand alpha 255.
     // Font RED8 (LUMINANCE) → R8 raw. BGRA/UBYTE (widgets/gui) → swizzle R<->B.
@@ -384,7 +510,9 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
         memcpy(dst, src + r * rowLen, (size_t)w * bpp);
     }
     if (dstPix != &t.pixels && !t.faces[0].empty()) t.pixels = t.faces[0]; // mirror face 0
-    // Sync GPU vùng đã đổi (chunk atlas streaming mỗi frame) — A11 Shared coherent
+    // IR deferred: cubemap face giữ sync ngay (hiếm, panorama init, không phải hot path).
+    // 2D thường: stage region, GPU replaceRegion dồn đến flush trước draw sampling.
+    // Trước đây: mỗi SubImage = 1 replaceRegion ngay (N uploads → N Metal calls).
     if (cubeFace >= 0) {
         if (t.gpu && (format == 0x1908 || format == 0x1903) && type == 0x1401) {
             size_t bpr = (size_t)t.w * bpp;
@@ -396,7 +524,8 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
                 c.LogDebug(0, 0, 0, 0, "glTexSubImage2D: cube face GPU sync fail");
         }
     } else {
-        SyncRegionToGPU(c, t, xoff, yoff, w, h, src, rowLen, format, type);
+        StageTexRegion(c, tp->id, (uint32_t)xoff, (uint32_t)yoff, (uint32_t)w, (uint32_t)h,
+                       format, type);
     }
 }
 void glTexSubImage1D(GLenum t, GLint l, GLint x, GLsizei w, GLenum f, GLenum ty, const void* p) {
@@ -518,6 +647,8 @@ static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
     }
     if (!dst.gpu) { c.errors.Record(0x0502); return; }
     c.FlushPendingEncoder(); // IR: commit batch trước khi copy (không stale TBDR)
+    c.FlushAllBufferStaging();
+    c.FlushAllTextureStaging();
     c.device->commitAndWait(); // xả draws NoWait trước khi copy (không stale TBDR)
     bool gpuOk = false;
     if (readFbo == 0) {
@@ -660,6 +791,8 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
     }
     if (!src.gpu || !dst.gpu) { c.errors.Record(0x0502); return; }
     c.FlushPendingEncoder(); // IR: commit batch trước khi blit copy
+    c.FlushAllBufferStaging();
+    c.FlushAllTextureStaging();
     c.device->commitAndWait();
     if (src.gpu->pixelFormat() == dst.gpu->pixelFormat() &&
         c.device->blitCopy(src.gpu.get(), dst.gpu.get(),
@@ -753,7 +886,9 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
         uint8_t* dst = tx.pixels.data() + ((size_t)(y + r) * tx.w + (size_t)x) * bpp;
         memcpy(dst, src + r * rowLen, (size_t)w * bpp);
     }
-    SyncRegionToGPU(c, tx, x, y, w, h, src, rowLen, f, ty);
+    // IR deferred: stage thay vì sync GPU ngay (DSA path của game 26.x).
+    (void)src; (void)rowLen;
+    StageTexRegion(c, t, (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h, f, ty);
 }
 void glTextureSubImage3D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLenum j, const void* k) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; }
 } // namespace tglmt::gl

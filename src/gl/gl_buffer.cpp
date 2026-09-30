@@ -18,6 +18,81 @@ static BufferObject* BoundBuf(GLenum target, bool create = false) {
     return &it->second;
 }
 
+// IR staging: ghi nhận range bẩn, merge với range cuối nếu kề/chồng lấn.
+// GPU copy dồn đến FlushBufferStaging (trước draw dùng buffer / readback / finish).
+// Mỗi SubData deferred đều đếm bufferCoalesced (bằng chứng 10 updates → staging).
+// Thứ tự GL: SubData sau draws phải KHÔNG ảnh hưởng draws trước → flush encoder
+// đang mở trước khi stage (draws cũ commit với dữ liệu cũ, đúng semantics).
+static void StageBufRange(Context& c, GLuint bufId, size_t off, size_t len) {
+    if (!len) return;
+    if (c.pendingEncoder) c.FlushPendingEncoder();
+    auto& vec = c.pendingBufRanges[bufId];
+    if (!vec.empty()) {
+        auto& last = vec.back();
+        size_t lastEnd = last.off + last.len;
+        size_t wantEnd = off + len;
+        // Merge khi chồng lấn hoặc kề nhau (gap <= 64B thì lấp luôn cho đỡ fragment).
+        if (off <= lastEnd + 64) {
+            size_t newEnd = std::max(lastEnd, wantEnd);
+            size_t newOff = std::min(last.off, off);
+            last.off = newOff;
+            last.len = newEnd - newOff;
+            ++c.appleStats.bufferCoalesced;
+            return;
+        }
+    }
+    vec.push_back(Context::BufRange{off, len});
+    ++c.appleStats.bufferCoalesced;
+}
+
+namespace tglmt {
+// Flush 1 buffer: merge toàn bộ ranges (sort + gộp), 1 memcpy+didModify mỗi đoạn.
+void Context::FlushBufferStaging(GLuint buf) {
+    auto it = pendingBufRanges.find(buf);
+    if (it == pendingBufRanges.end() || it->second.empty()) return;
+    auto bit = buffers.find(buf);
+    if (bit == buffers.end()) { pendingBufRanges.erase(it); return; }
+    BufferObject& bo = bit->second;
+    auto& vec = it->second;
+    std::sort(vec.begin(), vec.end(),
+              [](const BufRange& a, const BufRange& b) { return a.off < b.off; });
+    // Gộp chồng lấn/kề (gap <= 256B: copy thêm vài trăm byte rẻ hơn 1 didModify).
+    std::vector<BufRange> merged;
+    for (auto& r : vec) {
+        if (!merged.empty()) {
+            auto& m = merged.back();
+            size_t mEnd = m.off + m.len;
+            if (r.off <= mEnd + 256) {
+                size_t e = std::max(mEnd, r.off + r.len);
+                m.len = e - m.off;
+                continue;
+            }
+        }
+        merged.push_back(r);
+    }
+    if (bo.gpu) {
+        size_t gpuLen = bo.gpu->length();
+        for (auto& m : merged) {
+            if (m.off >= bo.data.size() || m.off >= gpuLen) continue;
+            size_t n = std::min({m.len, bo.data.size() - m.off, gpuLen - m.off});
+            if (!n) continue;
+            memcpy((uint8_t*)bo.gpu->contents() + m.off, bo.data.data() + m.off, n);
+            bo.gpu->didModifyRange(m.off, n);
+        }
+    }
+    ++appleStats.bufferFlushes;
+    pendingBufRanges.erase(it);
+}
+void Context::FlushAllBufferStaging() {
+    if (pendingBufRanges.empty()) return;
+    // Copy keys trước vì FlushBufferStaging xóa entry trong map.
+    std::vector<GLuint> ids;
+    ids.reserve(pendingBufRanges.size());
+    for (auto& kv : pendingBufRanges) ids.push_back(kv.first);
+    for (GLuint id : ids) FlushBufferStaging(id);
+}
+} // namespace tglmt
+
 namespace tglmt::gl {
 void glGenBuffers(GLsizei n, GLuint* buffers) {
     Context& c = Context::Current();
@@ -34,7 +109,10 @@ void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     Context& c = Context::Current();
     if (n < 0) { c.errors.Record(0x0501); return; }
     c.registry.Delete(ObjectKind::Buffer, n, buffers);
-    for (GLsizei i = 0; i < n; ++i) c.buffers.erase(buffers[i]);
+    for (GLsizei i = 0; i < n; ++i) {
+        c.buffers.erase(buffers[i]);
+        c.pendingBufRanges.erase(buffers[i]);
+    }
 }
 GLboolean glIsBuffer(GLuint b) {
     return Context::Current().registry.Is(ObjectKind::Buffer, b) ? 1 : 0;
@@ -96,6 +174,7 @@ void glBindBuffersRange(GLenum t, GLuint f, GLsizei n, const GLuint* b, const GL
 void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
     Context& c = Context::Current();
     if (size < 0) { c.errors.Record(0x0501); return; }
+    GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return;
     bo->data.assign((const uint8_t*)(data ? data : nullptr), (const uint8_t*)(data ? data : nullptr) + (data ? size : 0));
@@ -103,6 +182,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     bo->usage = usage;
     bo->gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                    : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
+    c.pendingBufRanges.erase(bid); // realloc → staging cũ vô nghĩa
 }
 void glNamedBufferData(GLuint b, GLsizeiptr size, const void* data, GLenum usage) {
     Context& c = Context::Current();
@@ -116,10 +196,12 @@ void glNamedBufferData(GLuint b, GLsizeiptr size, const void* data, GLenum usage
     it->second.usage = usage;
     it->second.gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                           : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
+    c.pendingBufRanges.erase(b);
     c.state.BindBuffer(0x8892, saved);
 }
 void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags) {
     Context& c = Context::Current();
+    GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return;
     bo->data.assign((size_t)size, 0);
@@ -127,6 +209,7 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     bo->storageFlags = flags;
     bo->gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                    : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
+    c.pendingBufRanges.erase(bid);
 }
 void glNamedBufferStorage(GLuint b, GLsizeiptr size, const void* data, GLbitfield flags) {
     Context& c = Context::Current();
@@ -137,17 +220,18 @@ void glNamedBufferStorage(GLuint b, GLsizeiptr size, const void* data, GLbitfiel
     it->second.storageFlags = flags;
     it->second.gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                           : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
+    c.pendingBufRanges.erase(b);
 }
 void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
     Context& c = Context::Current();
+    GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo || !data) { if(!data) c.errors.Record(0x0501); return; }
     if (offset < 0 || size < 0 || (size_t)(offset + size) > bo->data.size()) { c.errors.Record(0x0501); return; }
     memcpy(bo->data.data() + offset, data, (size_t)size);
-    if (bo->gpu && bo->gpu->length() >= (size_t)(offset + size)) {
-        memcpy((uint8_t*)bo->gpu->contents() + offset, data, (size_t)size);
-        bo->gpu->didModifyRange((size_t)offset, (size_t)size);
-    }
+    // IR deferred: chỉ stage range, GPU copy dồn đến flush (trước draw/readback).
+    // Trước đây: memcpy GPU + didModify ngay mỗi call (10 calls → 10 Metal ops).
+    StageBufRange(c, bid, (size_t)offset, (size_t)size);
 }
 void glNamedBufferSubData(GLuint b, GLintptr off, GLsizeiptr size, const void* data) {
     Context& c = Context::Current();
@@ -155,13 +239,9 @@ void glNamedBufferSubData(GLuint b, GLintptr off, GLsizeiptr size, const void* d
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     if (off < 0 || size < 0 || (size_t)(off + size) > it->second.data.size()) { c.errors.Record(0x0501); return; }
     memcpy(it->second.data.data() + off, data, (size_t)size);
-    // Game 26.x update buffer per-frame qua writeToBuffer → glNamedBufferSubData
-    // (javap GlCommandEncoder/DirectStateAccess). Thiếu sync GPU dưới đây từng
-    // làm GPU stale (0) → đỉnh rác/clip toàn bộ → đen màn hình mà không error nào.
-    if (it->second.gpu && (size_t)(off + size) <= it->second.gpu->length()) {
-        memcpy((uint8_t*)it->second.gpu->contents() + off, data, (size_t)size);
-        it->second.gpu->didModifyRange((size_t)off, (size_t)size);
-    }
+    // Game 26.x update buffer per-frame qua writeToBuffer → glNamedBufferSubData.
+    // IR: stage thay vì sync GPU ngay (tránh stale đã fix trước đây bằng flush đúng chỗ).
+    StageBufRange(c, b, (size_t)off, (size_t)size);
 }
 void glGetBufferSubData(GLenum target, GLintptr off, GLsizeiptr size, void* data) {
     Context& c = Context::Current();
@@ -185,39 +265,39 @@ void glCopyBufferSubData(GLenum rt, GLenum wt, GLintptr ro, GLintptr wo, GLsizei
     if (ro < 0 || wo < 0 || size < 0) { c.errors.Record(0x0501); return; }
     // Metal: blit copyFromBuffer — ở Null backend copy CPU
     if ((size_t)(ro + size) > itR->second.data.size() || (size_t)(wo + size) > itW->second.data.size()) { c.errors.Record(0x0501); return; }
+    // Đọc nguồn phải flush staging nguồn trước (shadow nguồn mới nhất sau flush).
+    c.FlushBufferStaging(r);
     memmove(itW->second.data.data() + wo, itR->second.data.data() + ro, (size_t)size);
-    if (itW->second.gpu && (size_t)(wo + size) <= itW->second.gpu->length()) {
-        memmove((uint8_t*)itW->second.gpu->contents() + wo, itR->second.data.data() + ro,
-                (size_t)size);
-        itW->second.gpu->didModifyRange((size_t)wo, (size_t)size);
-    }
+    StageBufRange(c, w, (size_t)wo, (size_t)size);
 }
 void glCopyNamedBufferSubData(GLuint r, GLuint w, GLintptr ro, GLintptr wo, GLsizeiptr size) {
     Context& c = Context::Current();
     auto itR = c.buffers.find(r), itW = c.buffers.find(w);
     if (itR == c.buffers.end() || itW == c.buffers.end()) { c.errors.Record(0x0502); return; }
     if ((size_t)(ro + size) > itR->second.data.size() || (size_t)(wo + size) > itW->second.data.size()) { c.errors.Record(0x0501); return; }
+    c.FlushBufferStaging(r);
     memmove(itW->second.data.data() + wo, itR->second.data.data() + ro, (size_t)size);
-    if (itW->second.gpu && (size_t)(wo + size) <= itW->second.gpu->length()) {
-        memmove((uint8_t*)itW->second.gpu->contents() + wo, itR->second.data.data() + ro,
-                (size_t)size);
-        itW->second.gpu->didModifyRange((size_t)wo, (size_t)size);
-    }
+    StageBufRange(c, w, (size_t)wo, (size_t)size);
 }
 void* glMapBuffer(GLenum target, GLenum access) {
     Context& c = Context::Current();
+    GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return nullptr;
     (void)access;
+    // IR: flush staging trước để GPU có dữ liệu mới nhất trước khi app ghi trực tiếp.
+    c.FlushBufferStaging(bid);
     bo->mapped = true; bo->mapOffset = 0; bo->mapLength = bo->data.size();
     if (bo->gpu) return bo->gpu->contents();
     return bo->data.data();
 }
 void* glMapBufferRange(GLenum target, GLintptr off, GLsizeiptr len, GLbitfield access) {
     Context& c = Context::Current();
+    GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return nullptr;
     if (off < 0 || len < 0 || (size_t)(off + len) > bo->data.size()) { c.errors.Record(0x0501); return nullptr; }
+    c.FlushBufferStaging(bid);
     bo->mapped = true; bo->mapOffset = (size_t)off; bo->mapLength = (size_t)len; bo->mapAccess = access;
     if (bo->gpu) return (uint8_t*)bo->gpu->contents() + off;
     return bo->data.data() + off;
@@ -227,6 +307,7 @@ void* glMapNamedBuffer(GLuint b, GLenum access) {
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return nullptr; }
     (void)access;
+    c.FlushBufferStaging(b);
     it->second.mapped = true;
     it->second.mapOffset = 0;
     it->second.mapLength = it->second.data.size();
@@ -241,6 +322,7 @@ void* glMapNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len, GLbitfield a
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return nullptr; }
     (void)access;
     if (off < 0 || len < 0 || (size_t)(off + len) > it->second.data.size()) { c.errors.Record(0x0501); return nullptr; }
+    c.FlushBufferStaging(b);
     it->second.mapped = true;
     it->second.mapOffset = (size_t)off;
     it->second.mapLength = (size_t)len;
@@ -250,9 +332,16 @@ void* glMapNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len, GLbitfield a
 }
 GLboolean glUnmapBuffer(GLenum target) {
     Context& c = Context::Current();
+    GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return 0;
     bo->mapped = false;
+    // Map đã flush staging trước đó; Unmap ghi trực tiếp GPU nên staging còn lại
+    // (nếu có SubData xen giữa Map/Unmap) phải xóa để tránh ghi đè dữ liệu map.
+    // An toàn nhất: flush staging còn lại TRƯỚC khi chép map về? Map range đã
+    // didModify riêng; staged ranges ngoài map range vẫn cần. Giữ đơn giản đúng:
+    // flush staging trước, rồi mới xử lý map (map dữ liệu mới nhất thắng).
+    c.FlushBufferStaging(bid);
     if (bo->gpu) {
         bo->gpu->didModifyRange(bo->mapOffset, bo->mapLength);
         // StorageModeShared: CPU và GPU chung bộ nhớ nhưng shadow vector của TGLMT
@@ -270,6 +359,7 @@ GLboolean glUnmapNamedBuffer(GLuint b) {
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return 0; }
     it->second.mapped = false;
+    c.FlushBufferStaging(b);
     // Mirror bản bound: didModify + chép ngược shadow (map trả con trỏ GPU).
     if (it->second.gpu) {
         it->second.gpu->didModifyRange(it->second.mapOffset, it->second.mapLength);
@@ -310,15 +400,13 @@ void glClearBufferData(GLenum t, GLenum inf, GLenum f, GLenum ty, const void* d)
 void glClearBufferSubData(GLenum t, GLenum inf, GLintptr off, GLsizeiptr size, GLenum f, GLenum ty, const void* d) {
     (void)inf; (void)f; (void)ty;
     Context& c = Context::Current();
+    GLuint bid = c.state.BoundBuffer(t);
     BufferObject* bo = BoundBuf(t);
     if (!bo) return;
     uint8_t fill = d ? *(const uint8_t*)d : 0;
     if (off < 0 || size < 0 || (size_t)(off + size) > bo->data.size()) { c.errors.Record(0x0501); return; }
     std::fill(bo->data.begin() + off, bo->data.begin() + off + size, fill);
-    if (bo->gpu && (size_t)(off + size) <= bo->gpu->length()) {
-        memset((uint8_t*)bo->gpu->contents() + off, fill, (size_t)size);
-        bo->gpu->didModifyRange((size_t)off, (size_t)size);
-    }
+    StageBufRange(c, bid, (size_t)off, (size_t)size);
 }
 void glClearNamedBufferData(GLuint b, GLenum inf, GLenum f, GLenum ty, const void* d) {
     (void)inf; (void)f; (void)ty;
@@ -340,10 +428,7 @@ void glClearNamedBufferSubData(GLuint b, GLenum inf, GLintptr off, GLsizeiptr si
     uint8_t fill = d ? *(const uint8_t*)d : 0;
     if (off < 0 || size < 0 || (size_t)(off + size) > it->second.data.size()) { c.errors.Record(0x0501); return; }
     std::fill(it->second.data.begin() + off, it->second.data.begin() + off + size, fill);
-    if (it->second.gpu && (size_t)(off + size) <= it->second.gpu->length()) {
-        memset((uint8_t*)it->second.gpu->contents() + off, fill, (size_t)size);
-        it->second.gpu->didModifyRange((size_t)off, (size_t)size);
-    }
+    StageBufRange(c, b, (size_t)off, (size_t)size);
 }
 void glInvalidateBufferData(GLuint b) {
     Context& c = Context::Current();

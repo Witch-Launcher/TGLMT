@@ -103,6 +103,6 @@ void glGetQueryiv(GLenum t, GLenum p, GLint* v) { (void)t;(void)p; *v = 0; }
 void glGetQueryIndexediv(GLenum t, GLuint i, GLenum p, GLint* v) { (void)t;(void)i;(void)p; *v = 0; }
 void glBeginConditionalRender(GLuint id, GLenum m) { (void)id;(void)m; }
 void glEndConditionalRender() {}
-void glFinish() { Context::Current().FlushPendingEncoder(); Context::Current().device->commitAndWait(); }
-void glFlush() { Context::Current().FlushPendingEncoder(); }
+void glFinish() { auto& c = Context::Current(); c.FlushPendingEncoder(); c.FlushAllBufferStaging(); c.FlushAllTextureStaging(); c.device->commitAndWait(); }
+void glFlush() { auto& c = Context::Current(); c.FlushPendingEncoder(); c.FlushAllBufferStaging(); c.FlushAllTextureStaging(); }
 } // namespace tglmt::gl

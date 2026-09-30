@@ -71,6 +71,8 @@ bool Renderer::EndFrame(void* metalLayer) {
     // encoder mở chưa commit → present thiếu hình).
     Context::MakeCurrent(impl_->ctx.get());
     impl_->ctx->FlushPendingEncoder();
+    impl_->ctx->FlushAllBufferStaging();
+    impl_->ctx->FlushAllTextureStaging();
     if (!metalLayer) return true; // headless: không present vẫn coi như xong
     if (!impl_->target) return false;
     return impl_->ctx->device->presentTarget(impl_->target.get(), metalLayer);
