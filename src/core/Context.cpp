@@ -1,5 +1,9 @@
 #include "tglmt/Context.h"
 #include <cstdio>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <cstring>
+#endif
 namespace tglmt {
 thread_local Context* Context::tCurrent_ = nullptr;
 Context* Context::sFallback_ = nullptr;
@@ -9,7 +13,31 @@ std::mutex Context::sMu_;
 // tạo-device không bao giờ câm, kể cả khi app chưa gắn debug callback.
 static void CtxLog(const std::string& m) { fprintf(stderr, "[TGLMT] %s\n", m.c_str()); }
 
+// Symbolication vòng sau: raw PC trong glerr# lines cần slide để trừ ra
+// file-offset rồi tra nm trên dylib unstripped (giữ ở build-ios-pkg).
+// Log 1 lần khi tạo Context đầu tiên.
+static void LogSelfSlide() {
+#if defined(__APPLE__)
+    static bool done = false;
+    if (done) return;
+    done = true;
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; ++i) {
+        const char* nm = _dyld_get_image_name(i);
+        if (nm && strstr(nm, "libtglmt") != nullptr) {
+            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            fprintf(stderr, "[TGLMT] symslide lib=%s slide=0x%lx\n", nm, (long)slide);
+            fflush(stderr);
+            return;
+        }
+    }
+    fprintf(stderr, "[TGLMT] symslide libtglmt NOT FOUND in %u images\n", n);
+    fflush(stderr);
+#endif
+}
+
 Context::Context(const std::string& backend) : backendName(backend) {
+    LogSelfSlide();
     device = metal::CreateDevice(backend, CtxLog);
     if (!device) { // vd apple backend nhưng máy không có MTLDevice → fallback Null, ghi rõ
         backendName = backend + "(fallback:null,no-MTL-device)";

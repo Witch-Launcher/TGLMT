@@ -817,9 +817,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 static int nDenyV = 0;
                 if (++nDenyV <= 8) {
                     fprintf(stderr,
-                            "[TGLMT] sampdenyV#%d prog@%u vs=%s unit=%u tex#%u tgt=0x%x gpu=%d\n",
+                            "[TGLMT] sampdenyV#%d prog@%u vs=%s unit=%u tex#%u tgt=0x%x ifmt=0x%x gpu=%d\n",
                             nDenyV, prog, name.c_str(), unit, texId,
-                            tit->second.target, (int)(tit->second.gpu != nullptr));
+                            tit->second.target, tit->second.internalFormat,
+                            (int)(tit->second.gpu != nullptr));
                     fflush(stderr);
                 }
                 c.LogDebug(0, 0, 0, 0,
