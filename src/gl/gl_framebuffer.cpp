@@ -47,12 +47,31 @@ void glNamedRenderbufferStorage(GLuint r, GLenum inf, GLsizei w, GLsizei h) { (v
 void glNamedRenderbufferStorageMultisample(GLuint r, GLsizei s, GLenum inf, GLsizei w, GLsizei h) { (void)r;(void)s;(void)inf;(void)w;(void)h; }
 void glFramebufferRenderbuffer(GLenum t, GLenum a, GLenum rt, GLuint r) { (void)t;(void)a;(void)rt;(void)r; }
 void glNamedFramebufferRenderbuffer(GLuint f, GLenum a, GLenum rt, GLuint r) { (void)f;(void)a;(void)rt;(void)r; }
-void glFramebufferTexture(GLenum t, GLenum a, GLuint x, GLint l) { (void)t;(void)a;(void)x;(void)l; }
-void glFramebufferTexture1D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l) { (void)t;(void)a;(void)tx;(void)x;(void)l; }
+void glFramebufferTexture(GLenum t, GLenum a, GLuint x, GLint l) {
+    // DSA-core không dùng, nhưng Emulated detach/attach qua 2D; để trung thực
+    // (không nuốt lệnh) xử lý như 2D TEXTURE_2D.
+    glFramebufferTexture2D(t, a, 0x0DE1 /*TEXTURE_2D*/, x, l);
+}
+void glFramebufferTexture1D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l) {
+    // TGLMT FBO model không phân biệt dimension: attach như 2D.
+    glFramebufferTexture2D(t, a, tx, x, l);
+}
+static GLuint ResolveFBOForTarget(Context& c, GLenum t) {
+    // Spec §9.2 (đối chiếu client.jar 26.1.2 DirectStateAccess$Emulated):
+    // Emulated.bindFrameBufferTextures(fbo, color, depth, level, target) gọi
+    // _glBindFramebuffer(target,fbo) + _glFramebufferTexture2D(target,...).
+    // copyTextureToBuffer truyền target=READ (36008); detach cũng READ.
+    // Bug cũ: luôn dùng BoundDrawFBO → READ rỗng → glReadPixels 0x0502 (1282)
+    // + detach READ nhầm sang DRAW (mất nút/blur sau screenshot).
+    if (t == 0x8CA8 /*GL_READ_FRAMEBUFFER*/) return c.state.BoundReadFBO();
+    // DRAW (0x8CA9) và FRAMEBUFFER (0x8D40) → DRAW (khi bind qua FRAMEBUFFER
+    // thì READ==DRAW nên tương đương; khi READ!=DRAW thì FRAMEBUFFER theo spec
+    // tác động DRAW).
+    return c.state.BoundDrawFBO();
+}
 void glFramebufferTexture2D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l) {
     Context& c = Context::Current();
-    // Spec §9.2: attach vào DRAW framebuffer hiện bind; FBO 0 (default) không attach được.
-    GLuint fbo = c.state.BoundDrawFBO();
+    GLuint fbo = ResolveFBOForTarget(c, t);
     if (fbo == 0) { c.errors.Record(0x0502); return; } // INVALID_OPERATION trên default FB
     auto it = c.fbos.find(fbo);
     if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
@@ -67,8 +86,14 @@ void glFramebufferTexture2D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l) {
     if (txt != c.textures.end()) { f.w = txt->second.w; f.h = txt->second.h; }
     (void)t; (void)tx; (void)l;
 }
-void glFramebufferTexture3D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l, GLint z) { (void)t;(void)a;(void)tx;(void)x;(void)l;(void)z; }
-void glFramebufferTextureLayer(GLenum t, GLenum a, GLuint x, GLint l, GLint layer) { (void)t;(void)a;(void)x;(void)l;(void)layer; }
+void glFramebufferTexture3D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l, GLint z) {
+    (void)z; // TGLMT FBO model 2D: layer/z không phân biệt, attach như 2D.
+    glFramebufferTexture2D(t, a, tx, x, l);
+}
+void glFramebufferTextureLayer(GLenum t, GLenum a, GLuint x, GLint l, GLint layer) {
+    (void)layer; // như trên.
+    glFramebufferTexture2D(t, a, 0x0DE1 /*TEXTURE_2D*/, x, l);
+}
 // Helper attach tôn trọng fbo chỉ định (fix bug bỏ qua `f` ở Named variants).
 static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex) {
     if (fbo == 0) { c.errors.Record(0x0502); return false; } // default FB không attach
@@ -284,10 +309,11 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
     c.FlushAllTextureStaging();
     GLuint readFbo = c.state.BoundReadFBO();
     GLuint drawFbo = c.state.BoundDrawFBO();
-    // Chẩn đoán đen màn hình: composite cuối menu có thể qua đây (FBO→0).
+    // Chẩn đoán đen màn hình: chỉ khi TGLMT_DIAG=1 để giữ throughput.
     {
         static uint64_t n = 0;
-        if (++c.appleStats.blits, ++n <= 5) {
+        ++c.appleStats.blits;
+        if (c.DiagOn() && ++n <= 5) {
             fprintf(stderr,
                     "[TGLMT] blit#%llu read=%u draw=%u src=(%d,%d)-(%d,%d) dst=(%d,%d)-(%d,%d) "
                     "mask=0x%x filter=0x%x\n",
@@ -374,7 +400,17 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
     }
 }
 void glBlitNamedFramebuffer(GLuint r, GLuint d, GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d1, GLint d2, GLint d3, GLbitfield m, GLenum f) {
-    (void)r;(void)d; glBlitFramebuffer(s0,s1,s2,s3,d0,d1,d2,d3,m,f);
+    // Spec §18.3 + client.jar 26.1.2 DirectStateAccess$Core.blitFrameBuffers:
+    // glBlitNamedFramebuffer(readFbo, drawFbo, ...) — bug cũ bỏ qua r/d, dùng
+    // binding hiện tại (sai khi Core path bind khác). Tôn trọng r/d bằng bind tạm.
+    Context& c = Context::Current();
+    GLuint savedR = c.state.BoundReadFBO();
+    GLuint savedD = c.state.BoundDrawFBO();
+    c.state.BindFBO(0x8CA8 /*READ*/, r);
+    c.state.BindFBO(0x8CA9 /*DRAW*/, d);
+    glBlitFramebuffer(s0, s1, s2, s3, d0, d1, d2, d3, m, f);
+    c.state.BindFBO(0x8CA8, savedR);
+    c.state.BindFBO(0x8CA9, savedD);
 }
 void glInvalidateFramebuffer(GLenum t, GLsizei n, const GLenum* a) { (void)t;(void)n;(void)a; }
 void glInvalidateSubFramebuffer(GLenum t, GLsizei n, const GLenum* a, GLint x, GLint y, GLsizei w, GLsizei h) { (void)t;(void)n;(void)a;(void)x;(void)y;(void)w;(void)h; }

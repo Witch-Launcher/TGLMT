@@ -37,8 +37,10 @@ CPU), mipmap generation, `ReadPixels`/`GetTexImage` roundtrip.
   `Depth32Float_Stencil8` automatically.
 - `generateMipmaps` needs a mipmapped texture; single-level textures keep
   the base level (renders, may shimmer).
-- One command buffer per draw: correct, not yet batched. Budget draw calls
-  on A11 accordingly.
+- Deferred command queue is ON: N draws on the same target share 1
+  `MTLRenderCommandEncoder` (see `docs/en/perf.md` + `test_perf_deferred_apple`).
+  Budget still matters on A11 — FBO thrash or feedback loops split passes.
+  Set `TGLMT_DIAG=1` only for debugging (release stays quiet for 60fps).
 
 ## Roadmap pointer
 

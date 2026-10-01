@@ -2,10 +2,24 @@
 build/
 build-*/
 out/*.dylib
-# Minecraft corpus: chi giu sources da trich, khong commit jar tai ve
+# Minecraft (Mojang EULA): KHONG commit client.jar / decompiled / javap / shader trich xuat.
+# Chi giu script tai lai (fetch-corpus.sh). Corpus chay local via .tmp hoac fetch.
 tests/corpus/.*.jar
 tests/corpus/.*.json
 tests/corpus/.extract
+*.jar
+*.class
+javap-*.txt
+*GlCommandEncoder*.txt
+*Screenshot*.txt
+*GameRenderer*.txt
+# Temp work dir tren o D (client.jar 36MB + javap, tranh day o chinh)
+.tmp/
+.tmp/**
+# Crash/log may that (chua thong tin nhay cam, khong commit)
+/crash-*.txt
+/latestlog.txt
+crash-*.txt
 # Xcode / macOS
 .DS_Store
 *.o

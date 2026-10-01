@@ -75,12 +75,25 @@
 | SPIR-V (`glSpecializeShader`, `ARB_gl_spirv`) | Metal chỉ nhận MSL/DXBC | Bắt buộc `spirv-cross`/`spirv-val` ngoài, TGLMT không tự biên dịch SPIR-V |
 | `glLogicOp`, `glPolygonMode(FILL/LINE/POINT)` đầy đủ | Hạn chế | Shadow + bake được phần nào, còn lại báo `UNSUPPORTED` trung thực |
 
-## Luồng lệnh (ví dụ `glDrawElements`)
+## Luồng lệnh (ví dụ `glDrawElements` — deferred full)
 
 ```
 glDrawElements(mode,count,type,indices)
  → validate (ErrorTracker, enum từ gl.xml)
- → StateTracker.bakeDirty() → PipelineCache.getOrCreate(desc)
- → IMetalRenderEncoder::drawIndexedPrimitives(mtlPrim, count, mtlIndexType, buf, offset)
- → Null backend: ghi draw-call vào trace để test so khớp; Apple backend: encode thật
+ → EmitDraw: Apple path BỎ trace-encoder (Null giữ trace cho CI),
+    UBYTE expand CPU, restart-split, Multidraw đếm batched
+ → AppleDrawGL:
+    VAO→descriptor → target resolve → hazard pre-scan (feedback? split pass)
+    → FlushAll staging (memcpy Shared, rẻ) → PipelineKey cache
+      (trùng? reuse cachedPipe, BỎ bridge lookup)
+    → pendingEncoder reuse (cùng target/FBO/depth, không clear)
+      + dirty-check viewport/cull/fill/blend/depth (đổi mới encode)
+    → uniforms/UBO/index qua ring 3×4MB triple-buffer (steady-state 0 alloc)
+    → drawIndexed/drawPrimitives vào encoder MỞ, KHÔNG commit
+ → Flush (commitNoWait, 1 commit cho N draws): target đổi / hazard /
+    stage-used / ReadPixels / Blit / present / EndFrame
 ```
+
+Counters chứng minh ở `Context::AppleStats`: `encodersCreated<<drawsEncoded`,
+`traceSkipped`, `ringAllocs`/`tempAllocs==0`, `flushAvoided`, `hazardSplits`,
+`multidrawBatched`, `diagSkipped`, `psoPrewarmed`. Xem `docs/en/perf.md`.

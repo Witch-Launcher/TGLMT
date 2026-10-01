@@ -16,25 +16,46 @@ Interface IMetal C++ (MetalInterface.h)
 Shadow chứ không query: Metal không cho đọc state GPU về, nên mọi `glGet*`
 đều đọc bản copy CPU mà `glSet*` tương ứng đã ghi.
 
-## Luồng một lệnh draw
+## Luồng một lệnh draw (gom lệnh đầy đủ — 1 GL → 0-1 Metal khi không đổi)
 
 ```
 glDrawElements(mode, count, type, offset)
- -> EmitDraw: resolve EBO (state VAO), bung UBYTE->U16, tách runs
-    primitive restart, đọc DRAW_INDIRECT_BUFFER khi bound
- -> trace encoder (luôn ghi, giữ test Null xanh)
+ -> EmitDraw: resolve EBO (state VAO), bung UBYTE->U16 trên CPU, tách runs
+    primitive restart, đọc DRAW_INDIRECT_BUFFER khi bound.
+    Backend Apple: BỎ trace encoder thừa (Null giữ trace cho test CI).
  -> AppleDrawGL (chỉ backend Apple):
       program đã link? -> VAO thành MTLVertexDescriptor (có divisor)
-      -> FBO 0 hoặc wrap texture -> pipeline từ cache
-      -> convert viewport/scissor -> depth/blend/cull/fill
-      -> vertex buffer + uniform VS buf(16) + uniform FS buf(16)
-      -> UBO buf(17+k) + texture theo sampler unit
-      -> viết lại index cho baseVertex -> encode -> commit (không đợi)
+      -> FBO 0 hoặc wrap texture -> quét hazard trước (sample đúng texture
+         đang vẽ? flush pass cũ, tách pass mới cho đúng TBDR)
+      -> cache pipeline-key ở Context (trùng? tái dùng, BỎ lookup bridge)
+      -> tái dùng pendingEncoder (cùng target/FBO/depth, không clear),
+         chỉ setPipeline khi nativeHandle đổi, chỉ set* khi dirty
+      -> vertex buffer + uniform qua ring (trùng bytes? tái dùng, 0 alloc)
+      -> UBO qua ring + texture (fallback đen khi incomplete)
+      -> index: EBO-GPU fast-path hoặc ring (baseVertex viết lại trong ring)
+      -> draw vào encoder ĐANG MỞ, KHÔNG commit mỗi draw
+Flush (commitNoWait, 1 commit cho N draws): đổi target / hazard /
+  stage buffer/texture đang dùng / ReadPixels / Blit / present / EndFrame
 ```
 
 `FAN` thành triangles indexed `(0,i,i+1)`, `LINE_LOOP` thêm index đầu vào
 cuối. Dạng non-indexed được chuyển sang indexed với index sinh thêm nên
 `first` (vertexStart) được giữ nguyên.
+
+## Hàng đợi gom lệnh (trì hoãn)
+
+1. **Shadow state**: `glBind*/glEnable/glUniform*` trùng bị lọc (StateSeq chỉ
+   tăng khi đổi thật — N calls trùng → 0 Metal).
+2. **Staging tài nguyên**: `SubData/TexSubImage` chỉ memcpy shadow + gộp range,
+   GPU copy dồn đến flush. Stage buffer/texture KHÔNG dùng trong pass đang mở
+   thì KHÔNG tách batching (`flushAvoided`).
+3. **Batch draw**: N draws cùng target chung 1 encoder; pipeline/uniform/state
+   tái dùng; temp uploads từ ring triple-buffer 3×4MB (ổn định 0 alloc/draw).
+
+Chẩn đoán (`fprintf`, readback GPU trong draw, dump draw-state) chỉ chạy khi
+`TGLMT_DIAG=1`. Release/Minecraft tắt để giữ 60fps. Validator chống fault A11
+(range/hazard) luôn bật nhưng bỏ qua sau lần warn đầu mỗi program. Xem
+`docs/en/perf.md` (bản tiếng Anh, có số đo + cách chạy lại).
 
 ## Ánh xạ tọa độ
 

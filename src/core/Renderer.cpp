@@ -49,6 +49,7 @@ void Renderer::Resize(uint32_t w, uint32_t h) {
 bool Renderer::BeginFrame() {
     if (!impl_->initialized || !impl_->ctx) return false;
     Context::MakeCurrent(impl_->ctx.get());
+    impl_->ctx->NextFrame(); // triple-buffer ring rotation (deferred full)
     if (!impl_->target) {
         if (impl_->depth)
             impl_->target = impl_->ctx->device->makeRenderTargetWithDepth(impl_->w, impl_->h,

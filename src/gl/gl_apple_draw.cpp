@@ -18,7 +18,33 @@
 
 namespace tglmt {
 
+// Deferred full ring upload: lấy (buf,off) từ Context ring, memcpy + didModify.
+// 0 MTLBuffer alloc trong frame. Fallback newBuffer khi ring đầy/Null + đếm tempAllocs.
+static size_t RingUpload(Context& c, const void* data, size_t n,
+                         metal::IBuffer*& bufOut,
+                         std::shared_ptr<metal::IBuffer>& keepOut) {
+    bufOut = nullptr;
+    if (!data) { data = ""; }
+    if (!n) n = 1;
+    auto [rb, off] = c.RingAlloc(n, 256);
+    if (rb) {
+        memcpy((uint8_t*)rb->contents() + off, data, n);
+        rb->didModifyRange(off, n);
+        bufOut = rb;
+        keepOut.reset(); // ring sống theo Context (3 frames), không cần pendingKeep
+        return off;
+    }
+    ++c.appleStats.tempAllocs;
+    keepOut = c.device->newBufferWithBytes(data, n, metal::StorageMode::Shared);
+    if (!keepOut) return 0;
+    c.pendingKeep.push_back(keepOut);
+    bufOut = keepOut.get();
+    return 0;
+}
+
 static std::shared_ptr<metal::IBuffer> TempUpload(Context& c, const void* data, size_t n) {
+    // Legacy path (chỉ còn cho fallback ngoài draw-hot): vẫn newBuffer + đếm.
+    ++c.appleStats.tempAllocs;
     return c.device->newBufferWithBytes(data, n ? n : 1, metal::StorageMode::Shared);
 }
 
@@ -283,8 +309,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         // cộng offset (bug cũ cộng relative vào stride làm đỉnh thưa sai).
         if (ca.stride == 0) ca.stride = ca.size * GLTypeSize(ca.type);
     }
-    // Validator đọc vượt buffer (TBDR A11 fault → SubmissionsIgnored + đứng
-    // hình, trong khi desktop chỉ ra rác): chỉ LOG + đếm, không chặn draw.
+    // Validator đọc vượt buffer: rẻ (O(attribs) phép tính, không scan vertices).
+    // Giữ luôn-on để test_mc_validate + chẩn đoán A11 fault, không gate DIAG.
     if (!indexed) {
         static std::set<std::pair<GLuint, int>> warnedRange;
         for (auto& ca : cas) {
@@ -335,12 +361,35 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     // 3b. IR staging flush (Deferred Resource Translation):
     // Buffer/texture SubData đã stage (chưa lên GPU) phải flush trước encode,
-    // nếu không GPU stale (đen/mất hình). Flush ALL (không chỉ buffer/texture
-    // draw này dùng) để bịt lỗ legacy path (program sampler list rỗng) và
-    // vertex-texture ngoài danh sách — chi phí tương đương (pending map thường
-    // chỉ vài entry, merge trong từng buffer/texture vẫn giữ nguyên).
+    // nếu không GPU stale (đen/mất hình). Flush selective khi có thể, ALL khi
+    // legacy path (sampler list rỗng) để bịt lỗ vertex-texture ngoài danh sách.
+    // Pending maps thường chỉ vài entry, memcpy Shared rẻ (không phải GPU stall).
     c.FlushAllBufferStaging();
     c.FlushAllTextureStaging();
+    // 3c. Feedback hazard pre-scan (TBDR đúng): nếu draw này sample đúng texture
+    // đang render (drawColorTexId), split pass trước khi reuse encoder.
+    // Apple Best Practices: sampling-dependency giữa 2 encoders cùng target thì
+    // KHÔNG merge được. Flush ở đây để draws trước commit với Store, draw này
+    // mở pass mới với Load (thấy dữ liệu cũ, không fault).
+    if (drawColorTexId != 0 && c.pendingEncoder) {
+        bool hz = false;
+        for (auto& sn : pr.vsSamplers) {
+            auto uit = pr.samplerUnits.find(sn);
+            GLuint u = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+            if (u < 32 && c.state.BoundTexture(u) == drawColorTexId) { hz = true; break; }
+        }
+        if (!hz) {
+            for (auto& sn : pr.fsSamplers) {
+                auto uit = pr.samplerUnits.find(sn);
+                GLuint u = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+                if (u < 32 && c.state.BoundTexture(u) == drawColorTexId) { hz = true; break; }
+            }
+        }
+        if (hz) {
+            c.FlushPendingEncoder();
+            ++c.appleStats.hazardSplits;
+        }
+    }
     // 4. Pipeline: depth khi depthTest bật (+ có depth thật), blend khi BLEND bật
     metal::PipelineOpts opts;
     opts.depth = c.state.IsEnabled(0x0B71) && (c.state.BoundDrawFBO() == 0 ? false : hasDepthTex);
@@ -590,12 +639,28 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         c.pendingDepthValid = false;
         c.pendingDepthState.reset();
     }
-    // Vertex buffers theo binding
-    for (auto& kv : bindMap) enc->setVertexBuffer(kv.second.first.get(), kv.second.second, kv.first);
-    // Uniforms tách VS/FS — IR staging cache: nếu bytes giống lần trước cùng program
-    // thì tái dùng buffer cũ (0 Metal alloc), tránh newBufferWithBytes mỗi draw.
-    // Trước đây: mỗi draw = 2× newBufferWithBytes (vs+fs) dù uniforms không đổi.
+    // Vertex buffers theo binding + ghi nhận cho conditional-flush
+    for (auto& kv : bindMap) {
+        enc->setVertexBuffer(kv.second.first.get(), kv.second.second, kv.first);
+    }
+    // Ghi nhận buffers đã dùng trong pass (để StageBufferRange quyết định flush).
+    // VAO bindings + EBO (nếu indexed, ghi ở cuối hàm sau khi biết eboId thật).
+    {
+        for (auto& kv : bindMap) {
+            // bindMap key là binding index, value là (gpu buf, base offset).
+            // Tra ngược GL buf id từ VAO attribs để NoteBufferUsed chính xác.
+            for (int ai = 0; ai < 16; ++ai) {
+                const VertexAttrib& a = v.attribs[ai];
+                if (!a.enabled || a.binding != kv.first) continue;
+                c.NoteBufferUsed(a.buffer);
+                break;
+            }
+        }
+    }
+    // Uniforms tách VS/FS — IR staging cache + ring upload (0 alloc khi đổi):
+    // nếu bytes giống lần trước cùng program thì tái dùng buffer+offset cũ.
     std::shared_ptr<metal::IBuffer> vsUbuf, fsUbuf;
+    size_t vsUoff = 0, fsUoff = 0;
     {
         size_t vsSize = pr.vsUBSize ? pr.vsUBSize : 16;
         size_t fsSize = pr.fsUBSize ? pr.fsUBSize : 16;
@@ -619,34 +684,52 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         bool sameFS = sameProg && uc.fsBytes.size()==fsb.size() &&
                       memcmp(uc.fsBytes.data(), fsb.data(), fsb.size())==0 && uc.fsBuf;
         if (sameVS && sameFS) {
-            vsUbuf = uc.vsBuf;
-            fsUbuf = uc.fsBuf;
+            vsUbuf = uc.vsBuf; vsUoff = uc.vsOff;
+            fsUbuf = uc.fsBuf; fsUoff = uc.fsOff;
             c.appleStats.uniformReused++;
         } else {
             // Chỉ upload stage đã đổi (stage còn lại tái dùng nếu giống).
             if (sameVS) {
-                vsUbuf = uc.vsBuf;
+                vsUbuf = uc.vsBuf; vsUoff = uc.vsOff;
                 c.appleStats.uniformReused++;
             } else {
-                vsUbuf = TempUpload(c, vsb.data(), vsb.size());
-                if (vsUbuf) { uc.vsBytes = vsb; uc.vsBuf = vsUbuf; }
+                metal::IBuffer* raw = nullptr;
+                std::shared_ptr<metal::IBuffer> keep;
+                size_t off = RingUpload(c, vsb.data(), vsb.size(), raw, keep);
+                if (raw) {
+                    // Ring hit: giữ shared_ptr ring slot để sống qua flush.
+                    if (!keep) {
+                        for (size_t i = 0; i < Context::kRingFrames; ++i)
+                            if (c.ringBuf[i] && c.ringBuf[i].get() == raw) { keep = c.ringBuf[i]; break; }
+                    }
+                    vsUbuf = keep; vsUoff = off;
+                    if (vsUbuf) { uc.vsBytes = vsb; uc.vsBuf = vsUbuf; uc.vsOff = off; }
+                }
             }
             if (sameFS) {
-                fsUbuf = uc.fsBuf;
+                fsUbuf = uc.fsBuf; fsUoff = uc.fsOff;
                 c.appleStats.uniformReused++;
             } else {
-                fsUbuf = TempUpload(c, fsb.data(), fsb.size());
-                if (fsUbuf) { uc.fsBytes = fsb; uc.fsBuf = fsUbuf; }
+                metal::IBuffer* raw = nullptr;
+                std::shared_ptr<metal::IBuffer> keep;
+                size_t off = RingUpload(c, fsb.data(), fsb.size(), raw, keep);
+                if (raw) {
+                    if (!keep) {
+                        for (size_t i = 0; i < Context::kRingFrames; ++i)
+                            if (c.ringBuf[i] && c.ringBuf[i].get() == raw) { keep = c.ringBuf[i]; break; }
+                    }
+                    fsUbuf = keep; fsUoff = off;
+                    if (fsUbuf) { uc.fsBytes = fsb; uc.fsBuf = fsUbuf; uc.fsOff = off; }
+                }
             }
             uc.prog = prog;
             uc.valid = (vsUbuf && fsUbuf);
-            // Giữ buffers sống đến flush (encoder deferred).
-            if (vsUbuf) c.pendingKeep.push_back(vsUbuf);
-            if (fsUbuf && fsUbuf != vsUbuf) c.pendingKeep.push_back(fsUbuf);
+            // Ring buffers sống theo Context; fallback newBuffer giữ qua pendingKeep
+            // (RingUpload đã push pendingKeep cho fallback).
         }
         if (!vsUbuf || !fsUbuf) { c.appleStats.miscFail++; return false; }
-        enc->setVertexBuffer(vsUbuf.get(), 0, 16);
-        enc->setFragmentBuffer(fsUbuf.get(), 0, 16);
+        enc->setVertexBuffer(vsUbuf.get(), vsUoff, 16);
+        enc->setFragmentBuffer(fsUbuf.get(), fsUoff, 16);
     }
     // UBO read-only (vanilla 1.17+/Sodium): bind PER-STAGE theo thứ tự khai báo
     // của stage đó (khớp [[buffer(17+bi)]] trong MSL: bi = index trong stage).
@@ -655,6 +738,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // khi vs/fs khai báo khác nhau (post blur) → đọc nhầm buffer → treo GPU.
     // Block thiếu buffer → bind zero fallback (đúng hơn fault GPU).
     std::vector<std::shared_ptr<metal::IBuffer>> uboKeep;
+    // Giữ ring slots sống qua flush (shared_ptr tới ring buffers đã dùng).
+    std::vector<std::shared_ptr<metal::IBuffer>> uboRingKeep;
     {
         auto bindZeroV = [&](int s) {
             auto z = FallbackZeroBuf(c);
@@ -668,7 +753,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             uboKeep.push_back(z);
             enc->setFragmentBuffer(z.get(), 0, (uint32_t)s);
         };
-        auto uploadBlock = [&](const std::string& nm) -> std::shared_ptr<metal::IBuffer> {
+        struct UboBind { metal::IBuffer* buf = nullptr; size_t off = 0; std::shared_ptr<metal::IBuffer> keep; };
+        auto uploadBlock = [&](const std::string& nm) -> UboBind {
+            UboBind r;
             GLuint point = 0;
             size_t need = 0;
             for (auto& b : pr.uniformBlocks)
@@ -676,22 +763,25 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             auto bit = c.uniformBindPoints.find(point);
             if (bit == c.uniformBindPoints.end() || !bit->second.buffer) {
                 c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " unbound, zero fallback");
-                return nullptr;
+                return r;
             }
             auto t = c.buffers.find(bit->second.buffer);
             if (t == c.buffers.end() || t->second.data.empty()) {
                 c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " nodata, zero fallback");
-                return nullptr;
+                return r;
             }
+            // Ghi nhận UBO source cho conditional-flush (SubData sau draw này mà
+            // đụng buffer này thì phải split, còn không thì giữ batching).
+            c.NoteBufferUsed(bit->second.buffer);
             size_t off = (size_t)bit->second.offset;
             if (off >= t->second.data.size()) {
                 c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " offset vuot, zero fallback");
-                return nullptr;
+                return r;
             }
             size_t len = bit->second.size ? (size_t)bit->second.size
                                           : t->second.data.size() - off;
             len = std::min(len, t->second.data.size() - off);
-            if (!len) return nullptr;
+            if (!len) return r;
             // Buffer thiếu so với struct shader cần (misbound: vd Globals đọc
             // nhầm buffer SamplerInfo 16B trong khi struct 56B) → đọc OOB hoặc
             // rác điều khiển loop (MenuBlurRadius khổng lồ → treo GPU → iOS ban
@@ -700,26 +790,49 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             if (need && len < need) {
                 ++c.appleStats.uboSmall;
                 static std::set<std::string> loggedSmall;
-                if (loggedSmall.size() < 16 && loggedSmall.insert(nm).second) {
+                if (loggedSmall.size() < 32 && loggedSmall.insert(nm).second) {
+                    if (c.DiagOn()) {
+                        fprintf(stderr,
+                                "[TGLMT] uboSmall#%zu %s have=%zu need=%zu point=%u buf=%u\n",
+                                loggedSmall.size(), nm.c_str(), len, need, point,
+                                bit->second.buffer);
+                        fflush(stderr);
+                    }
                     char b[160];
                     snprintf(b, sizeof(b),
                              "AppleDrawGL: UBO %s small %zuB < need %zuB, zero fallback",
                              nm.c_str(), len, need);
                     c.LogDebug(0, 0, 0, 0, b);
                 }
-                return nullptr;
+                return r;
             }
             // Pad 0 lên bội số 16 (std140 pad; A11 TBDR nghiêm OOB).
+            // Ring upload trực tiếp từ shadow; padBuf chỉ alloc khi len lẻ 16.
             size_t padded = (len + 15) & ~((size_t)15);
-            std::vector<uint8_t> ubPad(padded, 0);
-            memcpy(ubPad.data(), t->second.data.data() + off, len);
-            auto ub = TempUpload(c, ubPad.data(), padded);
-            if (ub) {
-                uboKeep.push_back(ub);
-                // IR deferred: encoder chưa commit → giữ buffer đến flush.
-                c.pendingKeep.push_back(ub);
+            const uint8_t* srcPtr = t->second.data.data() + off;
+            const void* upPtr = srcPtr;
+            std::vector<uint8_t> padBuf;
+            size_t upLen = len;
+            if (padded != len) {
+                padBuf.assign(padded, 0);
+                memcpy(padBuf.data(), srcPtr, len);
+                upPtr = padBuf.data();
+                upLen = padded;
             }
-            return ub;
+            metal::IBuffer* raw = nullptr;
+            std::shared_ptr<metal::IBuffer> keep;
+            size_t roff = RingUpload(c, upPtr, upLen, raw, keep);
+            if (!raw) return r;
+            if (!keep) {
+                for (size_t i = 0; i < Context::kRingFrames; ++i)
+                    if (c.ringBuf[i] && c.ringBuf[i].get() == raw) { keep = c.ringBuf[i]; break; }
+            }
+            if (keep) uboRingKeep.push_back(keep);
+            else if (keep) { /*fallback đã push pendingKeep trong RingUpload*/ }
+            // Fallback newBuffer cũng cần giữ: RingUpload đã push pendingKeep.
+            // Ở đây giữ thêm keep để sống qua encode (ring giữ qua uboRingKeep).
+            r.buf = raw; r.off = roff; r.keep = keep;
+            return r;
         };
         // Tương thích ngược: program link trước khi có vsBlocks/fsBlocks
         // (link cũ) → vsBlocks/fsBlocks rỗng → dùng merged order cho cả 2 stage.
@@ -729,7 +842,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             for (auto& b : pr.uniformBlocks) {
                 if (slot > 30) break;
                 auto ub = uploadBlock(b.name);
-                if (!ub) {
+                if (!ub.buf) {
                     auto z = FallbackZeroBuf(c);
                     if (z) {
                         uboKeep.push_back(z);
@@ -737,8 +850,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                         enc->setFragmentBuffer(z.get(), 0, (uint32_t)slot);
                     }
                 } else {
-                    enc->setVertexBuffer(ub.get(), 0, (uint32_t)slot);
-                    enc->setFragmentBuffer(ub.get(), 0, (uint32_t)slot);
+                    enc->setVertexBuffer(ub.buf, ub.off, (uint32_t)slot);
+                    enc->setFragmentBuffer(ub.buf, ub.off, (uint32_t)slot);
                 }
                 ++slot;
             }
@@ -747,7 +860,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             for (auto& nm : pr.vsBlocks) {
                 if (slot > 30) break;
                 auto ub = uploadBlock(nm);
-                if (ub) enc->setVertexBuffer(ub.get(), 0, (uint32_t)slot);
+                if (ub.buf) enc->setVertexBuffer(ub.buf, ub.off, (uint32_t)slot);
                 else bindZeroV(slot);
                 ++slot;
             }
@@ -755,7 +868,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             for (auto& nm : pr.fsBlocks) {
                 if (slot > 30) break;
                 auto ub = uploadBlock(nm);
-                if (ub) enc->setFragmentBuffer(ub.get(), 0, (uint32_t)slot);
+                if (ub.buf) enc->setFragmentBuffer(ub.buf, ub.off, (uint32_t)slot);
                 else bindZeroF(slot);
                 ++slot;
             }
@@ -783,9 +896,13 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         }
     };
     // Feedback hazard: render vào texture đồng thời sample nó (TBDR fault).
-    // Chỉ LOG + đếm (không chặn — desktop GL thường "chạy được").
+    // Deferred full: split pass (flush encoder đang mở) thay vì chỉ log.
+    // Apple Best Practices: 2 encoders cùng target có sampling-dependency ở giữa
+    // thì KHÔNG merge được → phải split. Đếm hazardSplits để test chứng minh.
+    bool feedbackHazard = false;
     auto hazardCheck = [&](GLuint texId) {
         if (drawColorTexId && texId == drawColorTexId) {
+            feedbackHazard = true;
             static std::set<GLuint> warnedHz;
             if (warnedHz.size() < 16 && warnedHz.insert(prog).second) {
                 ++c.appleStats.hazardWarn;
@@ -813,15 +930,20 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 txp = &tit->second;
                 gpu = txp->gpu.get();
                 hazardCheck(texId);
+                c.NoteTextureUsed(texId);
             } else if (tit != c.textures.end()) {
-                static int nDenyV = 0;
-                if (++nDenyV <= 8) {
-                    fprintf(stderr,
-                            "[TGLMT] sampdenyV#%d prog@%u vs=%s unit=%u tex#%u tgt=0x%x ifmt=0x%x gpu=%d\n",
-                            nDenyV, prog, name.c_str(), unit, texId,
-                            tit->second.target, tit->second.internalFormat,
-                            (int)(tit->second.gpu != nullptr));
-                    fflush(stderr);
+                if (c.DiagOn()) {
+                    static int nDenyV = 0;
+                    if (++nDenyV <= 8) {
+                        fprintf(stderr,
+                                "[TGLMT] sampdenyV#%d prog@%u vs=%s unit=%u tex#%u tgt=0x%x ifmt=0x%x gpu=%d\n",
+                                nDenyV, prog, name.c_str(), unit, texId,
+                                tit->second.target, tit->second.internalFormat,
+                                (int)(tit->second.gpu != nullptr));
+                        fflush(stderr);
+                    }
+                } else {
+                    ++c.appleStats.diagSkipped;
                 }
                 c.LogDebug(0, 0, 0, 0,
                            "AppleDrawGL: VS sampler " + name + " thieu/khop, fallback den");
@@ -856,11 +978,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 txp = &tit->second;
                 gpu = txp->gpu.get();
                 hazardCheck(texId);
-                // Soi texture GUI (widgets 256x256 / header 256x128): log 1 lần
-                // mỗi texture để thấy min/mag + pixel GPU thật + state raster
-                // (nút chỉ còn chữ = sample trong suốt → discard; cần biết
-                // texture rỗng hay state blend/depth/cull/scissor sai).
-                if (txp->w == 256 && (txp->h == 256 || txp->h == 128)) {
+                c.NoteTextureUsed(texId);
+                // Soi texture GUI: chỉ khi TGLMT_DIAG=1, và KHÔNG readback GPU
+                // trong frame nóng (readback = sync stall ms). Dùng shadow pixels.
+                if (c.DiagOn() && txp->w == 256 && (txp->h == 256 || txp->h == 128)) {
                     static std::set<GLuint> loggedGui;
                     if (loggedGui.size() < 12 && loggedGui.insert(texId).second) {
                         uint32_t mf = 0x2601, gf = 0x2601;
@@ -877,28 +998,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                                      txp->pixels[3]);
                             px0 = pb;
                         }
-                        // Pixel GPU thật (upload-only texture như widgets: readback
-                        // chính xác; render-target texture có thể stale vì encoder
-                        // chưa commit — ghi chú để khỏi đọc sai).
-                        std::string gpx = "nogpu";
-                        if (txp->gpu && txp->w <= 512 && txp->h <= 512) {
-                            auto wt = c.device->wrapAsTarget(txp->gpu.get(), nullptr);
-                            if (wt) {
-                                std::vector<uint8_t> tb(4, 0);
-                                // đọc 1 texel góc bằng readback hàng đầu
-                                std::vector<uint8_t> row((size_t)txp->w * 4, 0);
-                                // (readback full nhỏ gọn hơn: 256x256=256KB, 12 lần max)
-                                std::vector<uint8_t> full((size_t)txp->w * txp->h * 4, 0);
-                                if (wt->readback(full.data(), (size_t)txp->w * 4)) {
-                                    char gb[32];
-                                    snprintf(gb, sizeof(gb), "gpu%02X%02X%02X%02X",
-                                             full[0], full[1], full[2], full[3]);
-                                    gpx = gb;
-                                } else {
-                                    gpx = "rbFail";
-                                }
-                            }
-                        }
+                        // Deferred full: bỏ GPU readback trong draw (stall).
+                        // Shadow là đủ cho chẩn đoán format/filter/state.
+                        std::string gpx = "skip-rb";
                         auto sc = c.state.GetScissor();
                         ViewportState vpg = c.state.GetViewport(0);
                         const BlendState& bb = c.state.Blend()[0];
@@ -918,29 +1020,39 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                         fprintf(stderr, "%s\n", b);
                         fflush(stderr);
                     }
+                } else if (!c.DiagOn() && txp->w == 256) {
+                    ++c.appleStats.diagSkipped;
                 }
             } else if (tit != c.textures.end()) {
                 // kindOk từ chối hoặc thiếu GPU: sample đen → quad trong suốt →
-                // discard (nghi phạm nút mất nền). Log stderr để thấy trên máy.
-                static int nDeny = 0;
-                if (++nDeny <= 16) {
-                    fprintf(stderr,
-                            "[TGLMT] sampdeny#%d prog@%u fs=%s unit=%u tex#%u %ux%u "
-                            "tgt=0x%x gpu=%d\n",
-                            nDeny, prog, name.c_str(), unit, texId, tit->second.w,
-                            tit->second.h, tit->second.target,
-                            (int)(tit->second.gpu != nullptr));
-                    fflush(stderr);
+                // discard. Chỉ log khi DIAG để giữ throughput.
+                if (c.DiagOn()) {
+                    static int nDeny = 0;
+                    if (++nDeny <= 16) {
+                        fprintf(stderr,
+                                "[TGLMT] sampdeny#%d prog@%u fs=%s unit=%u tex#%u %ux%u "
+                                "tgt=0x%x gpu=%d\n",
+                                nDeny, prog, name.c_str(), unit, texId, tit->second.w,
+                                tit->second.h, tit->second.target,
+                                (int)(tit->second.gpu != nullptr));
+                        fflush(stderr);
+                    }
+                } else {
+                    ++c.appleStats.diagSkipped;
                 }
                 c.LogDebug(0, 0, 0, 0,
                            "AppleDrawGL: FS sampler " + name + " thieu/khop, fallback den");
             } else {
                 // texId 0/unknown: sampler không bind gì (GL incomplete = đen).
-                static int nMiss = 0;
-                if (++nMiss <= 16) {
-                    fprintf(stderr, "[TGLMT] sampmiss#%d prog@%u fs=%s unit=%u tex#%u\n",
-                            nMiss, prog, name.c_str(), unit, texId);
-                    fflush(stderr);
+                if (c.DiagOn()) {
+                    static int nMiss = 0;
+                    if (++nMiss <= 16) {
+                        fprintf(stderr, "[TGLMT] sampmiss#%d prog@%u fs=%s unit=%u tex#%u\n",
+                                nMiss, prog, name.c_str(), unit, texId);
+                        fflush(stderr);
+                    }
+                } else {
+                    ++c.appleStats.diagSkipped;
                 }
             }
         }
@@ -963,6 +1075,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             if (!texId) continue;
             auto tit = c.textures.find(texId);
             if (tit == c.textures.end() || !tit->second.gpu) continue;
+            c.NoteTextureUsed(texId);
             enc->setFragmentTexture(tit->second.gpu.get(), unit);
             auto ss = SamplerForUnit(c, unit, tit->second);
             if (ss) enc->setFragmentSamplerState(ss.get(), unit);
@@ -970,9 +1083,13 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     // Index buffer. Metal drawIndexed KHÔNG có baseVertex → emulate bằng cách cộng
     // baseVertex vào từng giá trị index (đúng GL). baseVertex âm làm index âm → lỗi.
-    std::shared_ptr<metal::IBuffer> ib;
+    // Deferred full: fast-path EBO GPU giữ nguyên (0 copy); còn lại ring-upload.
+    std::shared_ptr<metal::IBuffer> ibKeep;
+    metal::IBuffer* ibRaw = nullptr;
     size_t ioff = 0;
+    std::shared_ptr<metal::IBuffer> ibOwned; // giữ fallback newBuffer sống đến flush
     metal::IndexType ity = metal::IndexType::UInt32;
+    auto ibGet = [&]() -> metal::IBuffer* { return ibRaw ? ibRaw : ibOwned.get(); };
     if (indexed) {
         if (indexType != 0x1403 && indexType != 0x1405) return false;
         ity = (indexType == 0x1403) ? metal::IndexType::UInt16 : metal::IndexType::UInt32;
@@ -984,20 +1101,30 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         } else if (indexData && eboId == 0) {
             srcBytes = (const uint8_t*)indexData; // client pointer
         }
+        if (eboId) c.NoteBufferUsed(eboId);
         if (baseVertex == 0) {
             if (bit != c.buffers.end() && bit->second.gpu && srcBytes &&
                 indexByteOff + (size_t)count * elem <= bit->second.gpu->length()) {
-                ib = bit->second.gpu; // fast path: dùng thẳng EBO GPU
+                ibOwned = bit->second.gpu; // fast path: dùng thẳng EBO GPU
+                ibRaw = ibOwned.get();
                 ioff = indexByteOff;
             } else if (srcBytes) {
-                ib = TempUpload(c, srcBytes, (size_t)count * elem);
-                ioff = 0;
+                size_t roff = RingUpload(c, srcBytes, (size_t)count * elem, ibRaw, ibKeep);
+                if (ibKeep) { /*fallback đã push pendingKeep*/ }
+                else if (ibRaw) {
+                    for (size_t i = 0; i < Context::kRingFrames; ++i)
+                        if (c.ringBuf[i] && c.ringBuf[i].get() == ibRaw) { ibOwned = c.ringBuf[i]; break; }
+                } else {
+                    ibOwned = ibKeep;
+                }
+                ioff = roff;
+                if (!ibGet()) return false;
             } else {
                 return false;
             }
         } else {
             if (!srcBytes) return false;
-            // Viết lại indices + baseVertex vào buffer tạm
+            // Viết lại indices + baseVertex vào buffer tạm (ring, 0 alloc)
             std::vector<uint8_t> rewritten((size_t)count * elem);
             for (GLsizei k = 0; k < count; ++k) {
                 int64_t v = (elem == 2) ? (int64_t)(srcBytes[2 * k] | (srcBytes[2 * k + 1] << 8))
@@ -1018,16 +1145,28 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     rewritten[4 * k + 3] = (uint8_t)(nv >> 24);
                 }
             }
-            ib = TempUpload(c, rewritten.data(), rewritten.size());
-            ioff = 0;
+            metal::IBuffer* raw = nullptr;
+            size_t roff = RingUpload(c, rewritten.data(), rewritten.size(), raw, ibKeep);
+            if (raw && !ibKeep) {
+                for (size_t i = 0; i < Context::kRingFrames; ++i)
+                    if (c.ringBuf[i] && c.ringBuf[i].get() == raw) { ibOwned = c.ringBuf[i]; break; }
+            } else if (ibKeep) {
+                ibOwned.reset();
+            }
+            ibRaw = raw;
+            ioff = roff;
+            if (!ibGet() && !ibKeep) { c.appleStats.miscFail++; return false; }
         }
-        if (!ib) { c.appleStats.miscFail++; return false; }
-        // Validator index max vs sức chứa đỉnh (TBDR fault khi index trỏ ra
-        // ngoài buffer): quét tối đa 32k index đầu, chỉ LOG + đếm.
+        if (!ibGet() && !ibKeep) { c.appleStats.miscFail++; return false; }
+        // Validator index max: quét tối đa 4k index đầu, chỉ khi prog chưa warn
+        // (sau khi warn thì bỏ qua để giữ throughput — steady-state 0 scan).
+        // Test D (count=3) vẫn warn lần đầu. Release vẫn an toàn vì fault đã
+        // chặn bằng fallback + zero-buf, validator chỉ để chẩn đoán.
         if (srcBytes) {
             static std::set<GLuint> warnedIdx;
+            if (warnedIdx.size() < 16 && warnedIdx.find(prog) == warnedIdx.end()) {
             uint64_t mx = 0;
-            GLsizei scan = count > 32768 ? 32768 : count;
+            GLsizei scan = count > 4096 ? 4096 : count;
             for (GLsizei k = 0; k < scan; ++k)
                 mx = std::max(mx, (elem == 2)
                                         ? (uint64_t)(srcBytes[2 * k] | (srcBytes[2 * k + 1] << 8))
@@ -1060,11 +1199,21 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     }
                 }
             }
+            }
         }
     }
-    // IR deferred: giữ index temp sống đến flush (encoder chưa commit).
-    if (indexed && ib) c.pendingKeep.push_back(ib);
-    if (indexed) enc->drawIndexed(prim, (uint32_t)count, ity, ib.get(), ioff, (uint32_t)inst);
+    // IR deferred: ring buffers sống theo Context (3 frames); fallback newBuffer
+    // giữ qua pendingKeep (RingUpload đã push). Giữ thêm ibOwned ring slot.
+    std::shared_ptr<metal::IBuffer> ibHold = ibOwned ? ibOwned : ibKeep;
+    if (indexed && ibHold) {
+        // Ring slot: giữ shared_ptr để sống qua commit async.
+        // Fallback: đã trong pendingKeep, giữ thêm ở đây cho chắc.
+        bool isRing = false;
+        for (size_t i = 0; i < Context::kRingFrames; ++i)
+            if (c.ringBuf[i] && ibHold == c.ringBuf[i]) { isRing = true; break; }
+        if (!isRing) c.pendingKeep.push_back(ibHold);
+    }
+    if (indexed) enc->drawIndexed(prim, (uint32_t)count, ity, ibGet() ? ibGet() : ibHold.get(), ioff, (uint32_t)inst);
     else enc->drawPrimitives(prim, (uint32_t)first, (uint32_t)count, (uint32_t)inst);
     // IR: KHÔNG commit mỗi draw. Encoder giữ mở để batch N draw → 1 commit ở flush
     // (ReadPixels/Blit/present/EndFrame/target đổi/glClear). Trước đây mỗi draw =
@@ -1078,10 +1227,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     c.appleStats.drawsEncoded++;
     c.appleStats.progEncoded[prog]++;
-    // Chẩn đoán đen màn hình: dump TOÀN BỘ draw-state lần đầu mỗi
-    // (program,VAO,texture0) — texture0 vì cùng prog/vao nhưng texture khác
-    // nhau (logo vs widgets) là 2 case khác nhau (nút mất nền mà dump trùng
-    // logo thì mù). Cap 96 combo, mỗi combo 1 lần nên không phình.
+    // Chẩn đoán đen màn hình: chỉ khi TGLMT_DIAG=1. Release bỏ qua toàn bộ
+    // dump (fprintf + wrapAsTarget readback trong dump = sync stall).
+    if (c.DiagOn())
     {
         static std::set<std::tuple<GLuint, GLuint, GLuint>> loggedDraws;
         GLuint tex0 = c.state.BoundTexture(0);
@@ -1309,6 +1457,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
             fflush(stderr);
         }
+    } else {
+        ++c.appleStats.diagSkipped;
     }
     return true;
 }

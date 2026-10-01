@@ -253,6 +253,16 @@ public:
         uint64_t bufferFlushes = 0;   // số lần flush buffer staging lên GPU
         uint64_t texCoalesced = 0;    // số glTexSubImage gộp vào staging
         uint64_t texFlushes = 0;      // số lần flush texture staging (replaceRegion)
+        // Deferred full (Phase 1-3): bằng chứng gom lệnh giảm Metal calls.
+        uint64_t traceSkipped = 0;    // số draw bỏ trace-encoder thừa (Apple path)
+        uint64_t diagSkipped = 0;     // số diagnostic readback/log đã bỏ (release)
+        uint64_t ringAllocs = 0;      // số temp upload từ ring (0 MTLBuffer alloc)
+        uint64_t ringWraps = 0;       // số lần ring xoay frame (triple-buffer)
+        uint64_t tempAllocs = 0;      // số TempUpload rơi về newBuffer (ring đầy/Null)
+        uint64_t flushAvoided = 0;    // số lần stage KHÔNG flush encoder nhờ conditional-flush
+        uint64_t hazardSplits = 0;    // số lần split pass do feedback hazard (TBDR đúng)
+        uint64_t multidrawBatched = 0;// số sub-draws trong MultiDraw* đã batch
+        uint64_t psoPrewarmed = 0;    // số pipeline đã prewarm trước frame đầu
         std::map<GLuint, uint64_t> progEncoded; // program id -> số draw đã encode
     };
     AppleStats appleStats;
@@ -290,6 +300,7 @@ public:
     struct UniformCache {
         std::vector<uint8_t> vsBytes, fsBytes;
         std::shared_ptr<metal::IBuffer> vsBuf, fsBuf;
+        size_t vsOff = 0, fsOff = 0;
         GLuint prog = 0;
         bool valid = false;
     };
@@ -358,6 +369,34 @@ public:
     std::vector<std::shared_ptr<metal::IBuffer>> pendingKeep;
     void FlushPendingEncoder(); // end+commitNoWait, xóa shadow (giữ pipeline cache)
     void InvalidatePendingOnTargetChange(); // helper khi FBO đổi (flush nếu target khác)
+    // ---- Deferred full (Phase 1-3): diag gate + conditional flush + ring ----
+    // DiagOn: chỉ bật diagnostic nặng (fprintf/readback/scan) khi env TGLMT_DIAG=1.
+    // Release/Minecraft thật: tắt để giữ 60fps, vẫn giữ LogDebug callback.
+    bool DiagOn();
+    // Tài nguyên đã dùng trong pass đang mở (để conditional-flush: stage không
+    // liên quan thì KHÔNG phá batching). Ghi nhận ở AppleDrawGL khi bind.
+    std::unordered_map<GLuint, uint64_t> pendingUsedBuffers;  // buf id -> frameSeq dùng
+    std::unordered_map<GLuint, uint64_t> pendingUsedTextures; // tex id -> frameSeq dùng
+    void NoteBufferUsed(GLuint buf);
+    void NoteTextureUsed(GLuint tex);
+    // True nếu stage buffer/tex này bắt buộc flush encoder đang mở (đã dùng
+    // trong pass). False → chỉ stage, giữ batching (đếm flushAvoided).
+    bool MustFlushForBufferStage(GLuint buf);
+    bool MustFlushForTextureStage(GLuint tex);
+    // Ring allocator (triple-buffer, WWDC19 pattern): 3×4MB Shared buffers,
+    // bump-pointer, xoay theo frame. TempUploads (uniform/UBO/index/fan-expand)
+    // lấy từ đây → 0 MTLBuffer alloc trong frame. Trả (buf, offset); nullptr
+    // khi chưa init/size quá lớn (caller fallback newBuffer + đếm tempAllocs).
+    static constexpr size_t kRingSize = 4 * 1024 * 1024;
+    static constexpr size_t kRingFrames = 3;
+    std::shared_ptr<metal::IBuffer> ringBuf[kRingFrames];
+    size_t ringCursor[kRingFrames] = {0, 0, 0};
+    uint64_t frameSeq = 0; // tăng mỗi EndFrame/NextFrame (triple-buffer rotation)
+    std::pair<metal::IBuffer*, size_t> RingAlloc(size_t n, size_t align = 256);
+    void NextFrame(); // xoay ring + tăng frameSeq (gọi ở BeginFrame/EndFrame)
+    // PSO prewarm (Phase 4): dựng trước pipeline cho program đã link để frame
+    // đầu không hitch giây. Trả true nếu đã đảm bảo pipeline tồn tại.
+    bool PrewarmPipelineForProgram(GLuint prog);
 
     // debug callback (glDebugMessageCallback)
     TGLMTDebugProc debugCb = nullptr;

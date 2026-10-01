@@ -37,8 +37,11 @@ mipmap, roundtrip `ReadPixels`/`GetTexImage`.
   `Depth32Float_Stencil8`.
 - `generateMipmaps` cần texture mipmapped; texture 1 level giữ base level
   (render được, có thể shimmer).
-- Mỗi draw một command buffer: đúng trước, chưa batch. Budget số draw trên
-  A11 cho phù hợp.
+- Hàng đợi gom lệnh đã BẬT: N draws cùng target chung 1 encoder
+  (xem `docs/en/perf.md` + `test_perf_deferred_apple`: 100 draws → 1 encoder,
+  ring 0 alloc ổn định). Trên A11 vẫn phải budget — FBO đảo liên tục hoặc
+  feedback loop sẽ tách pass. Chỉ bật `TGLMT_DIAG=1` khi debug (release tắt
+  để giữ 60fps).
 
 ## Hướng tiếp theo
 

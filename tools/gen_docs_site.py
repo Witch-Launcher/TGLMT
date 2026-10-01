@@ -13,13 +13,14 @@ import re
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs"  # GitHub Pages chi phuc vu /docs -> site nam chung day
 
-ORDER = ["getting-started", "api", "architecture", "launcher", "limits"]
+ORDER = ["getting-started", "api", "architecture", "launcher", "limits", "perf"]
 PAGE_ID = {
     "getting-started": "guide.start",
     "api": "api.ref",
     "architecture": "arch.overview",
     "launcher": "launcher.integration",
     "limits": "limits.ref",
+    "perf": "perf.deferred",
 }
 
 

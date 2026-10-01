@@ -21,10 +21,11 @@ static BufferObject* BoundBuf(GLenum target, bool create = false) {
 namespace tglmt {
 // IR staging public: ghi nhận range bẩn, merge với range cuối nếu kề/chồng lấn.
 // Mỗi SubData deferred đều đếm bufferCoalesced (bằng chứng 10 updates → staging).
-// Thứ tự GL: stage flush encoder đang mở trước (draws cũ commit với dữ liệu cũ).
+// Thứ tự GL: chỉ flush encoder đang mở khi buffer này ĐÃ dùng trong pass
+// (conditional-flush, deferred full). Stage "lạ" giữ nguyên batching.
 void Context::StageBufferRange(GLuint bufId, size_t off, size_t len) {
     if (!len) return;
-    if (pendingEncoder) FlushPendingEncoder();
+    if (pendingEncoder && MustFlushForBufferStage(bufId)) FlushPendingEncoder();
     auto& vec = pendingBufRanges[bufId];
     if (!vec.empty()) {
         auto& last = vec.back();
@@ -139,14 +140,16 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     if (buffer && !c.buffers.count(buffer)) { c.errors.Record(0x0502); return; }
     if (target == 0x8A11 /*UNIFORM_BUFFER*/) {
         c.uniformBindPoints[index] = BufferRange{buffer, 0, 0};
-        // Chẩn đoán misbound UBO: point nào trỏ buffer/size nào (40 dòng đầu).
-        static int nUB = 0;
-        if (++nUB <= 120 && buffer) {
-            auto it = c.buffers.find(buffer);
-            size_t sz = (it == c.buffers.end()) ? 0 : it->second.data.size();
-            fprintf(stderr, "[TGLMT] ubobind#%d point %u -> buf %u (%zuB)\n",
-                    nUB, index, buffer, sz);
-            fflush(stderr);
+        // Chẩn đoán misbound UBO: chỉ khi TGLMT_DIAG=1 (release giữ 60fps).
+        if (c.DiagOn()) {
+            static int nUB = 0;
+            if (++nUB <= 400 && buffer) {
+                auto it = c.buffers.find(buffer);
+                size_t sz = (it == c.buffers.end()) ? 0 : it->second.data.size();
+                fprintf(stderr, "[TGLMT] ubobind#%d point %u -> buf %u (%zuB)\n",
+                        nUB, index, buffer, sz);
+                fflush(stderr);
+            }
         }
     } else if (target == 0x90D2 /*SHADER_STORAGE_BUFFER*/) {
         c.storageBindPoints[index] = BufferRange{buffer, 0, 0};
@@ -159,11 +162,13 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr o, G
     if (o < 0 || s < 0) { c.errors.Record(0x0501); return; }
     if (target == 0x8A11) {
         c.uniformBindPoints[index] = BufferRange{buffer, o, s};
-        static int nUBR = 0;
-        if (++nUBR <= 120 && buffer) {
-            fprintf(stderr, "[TGLMT] uborange#%d point %u -> buf %u off=%ld size=%ld\n",
-                    nUBR, index, buffer, (long)o, (long)s);
-            fflush(stderr);
+        if (c.DiagOn()) {
+            static int nUBR = 0;
+            if (++nUBR <= 400 && buffer) {
+                fprintf(stderr, "[TGLMT] uborange#%d point %u -> buf %u off=%ld size=%ld\n",
+                        nUBR, index, buffer, (long)o, (long)s);
+                fflush(stderr);
+            }
         }
     } else if (target == 0x90D2) {
         c.storageBindPoints[index] = BufferRange{buffer, o, s};

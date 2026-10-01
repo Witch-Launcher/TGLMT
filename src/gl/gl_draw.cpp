@@ -68,14 +68,19 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
     if (count < 0 || inst < 1) { c.errors.Record(0x0501); return; }
     if (count == 0) return; // no-op đúng spec (không encode draw-0)
     auto prim = ToPrim(mode, c);
-    auto enc = c.device->makeEncoder();
+    // Deferred full: Apple path bỏ trace-encoder thừa (1 GL → 1 Metal thay vì 2 encoders).
+    // Null backend giữ trace để unit test so khớp hành vi.
+    bool isApple = c.device && !c.device->isNull();
+    std::shared_ptr<metal::IEncoder> enc;
+    if (!isApple) enc = c.device->makeEncoder();
+    else ++c.appleStats.traceSkipped;
     // type==0: glDrawArrays (non-indexed). type!=0: glDrawElements* (indexed) —
     // KỂ CẢ khi idx==nullptr vì đó là byte-offset 0 vào EBO (spec §10.4)!
     // (Bug cũ: offset 0 bị nhầm thành non-indexed → đọc lố VBO. macOS thoát nhờ
     // zero-padding, iOS đọc trúng rác → neon. Đã đối chiếu spec + ảnh thiết bị.)
     if (type == 0) {
         if (first < 0) { c.errors.Record(0x0501); return; }
-        enc->drawPrimitives(prim, (uint32_t)first, (uint32_t)count, (uint32_t)inst);
+        if (enc) enc->drawPrimitives(prim, (uint32_t)first, (uint32_t)count, (uint32_t)inst);
         // M5b: encode GPU thật song song với trace (thiếu điều kiện → trace-only)
         AppleDrawGL(mode, count, 0, nullptr, false, 0, 0, inst, 0, baseInstance, first);
     } else {
@@ -103,8 +108,38 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
         std::vector<uint8_t> ubExpand; // giữ sống trong suốt EmitDraw
         const void* effCliPtr = nullptr;
         if (type == 0x1401) effType = 0x1403;
-        if (it != c.buffers.end() && it->second.gpu && type != 0x1401) { ib = it->second.gpu; off = (size_t)idx; }
-        else if (ebo && it != c.buffers.end()) {
+        // Deferred full: Apple path không cần ib trace (AppleDrawGL tự suy từ
+        // shadow/GPU + ring). Bỏ hết newBufferWithBytes ở đây → 0 alloc/draw.
+        // Chỉ giữ ubExpand CPU (UBYTE→U16) vì AppleDrawGL cần U16.
+        // Apple path vẫn cần off/cliPtr/effCliPtr/origOff để truyền cho AppleDrawGL.
+        if (isApple) {
+            auto itA = c.buffers.find(ebo);
+            if (itA != c.buffers.end() && itA->second.gpu && type != 0x1401) {
+                off = (size_t)idx;
+            } else if (ebo && itA != c.buffers.end()) {
+                size_t elem = IndexElemSize(type);
+                size_t at = (size_t)idx;
+                if (at + (size_t)count * elem > itA->second.data.size()) { c.errors.Record(0x0501); return; }
+                if (type == 0x1401) {
+                    ubExpand = ExpandUByteIndices(itA->second.data.data() + at, count);
+                    effCliPtr = ubExpand.data();
+                    off = 0; shadowUpload = true; origOff = at;
+                } else {
+                    off = 0; shadowUpload = true; origOff = at;
+                }
+            } else if (ebo == 0 || itA == c.buffers.end()) {
+                // client pointer path (EBO rỗng): AppleDrawGL đọc trực tiếp từ idx
+                if (type == 0x1401) {
+                    ubExpand = ExpandUByteIndices((const uint8_t*)idx, count);
+                    cliPtr = idx; effCliPtr = ubExpand.data();
+                } else {
+                    cliPtr = idx;
+                }
+                off = 0;
+            }
+        } else {
+            if (it != c.buffers.end() && it->second.gpu && type != 0x1401) { ib = it->second.gpu; off = (size_t)idx; }
+            else if (ebo && it != c.buffers.end()) {
             // EBO có shadow nhưng chưa có gpu buffer: upload shadow vùng cần vẽ
             size_t elem = IndexElemSize(type);
             size_t at = (size_t)idx;
@@ -134,6 +169,7 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
                 off = 0;
             }
         }
+        }
         // Primitive restart (spec §10.3.5, Metal không có): tách strip/fan tại
         // restart index thành nhiều draw con — hành vi raster hệt nhau.
         // A11/vanilla: chunk strip ít dùng restart, nhưng MC block outline có thể dùng.
@@ -158,7 +194,7 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
                     const void* runPtr = (type == 0x1401)
                         ? (const void*)((const uint8_t*)effCliPtr + (size_t)s * 2)
                         : (const void*)((const uint8_t*)cliPtr + (size_t)s * IndexElemSize(type));
-                    enc->drawIndexed(prim, (uint32_t)n, ToIndex(effType, c), ib.get(),
+                    if (enc) enc->drawIndexed(prim, (uint32_t)n, ToIndex(effType, c), ib.get(),
                                      (type == 0x1401) ? (size_t)s * 2 : (size_t)s * IndexElemSize(type),
                                      (uint32_t)inst);
                     AppleDrawGL(mode, n, effType, runPtr,
@@ -168,7 +204,7 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
                     size_t runOff;
                     if (type == 0x1401) runOff = (size_t)s * 2; // expanded buffer từ 0
                     else runOff = off + (size_t)s * IndexElemSize(type);
-                    enc->drawIndexed(prim, (uint32_t)n, ToIndex(effType, c), ib.get(),
+                    if (enc) enc->drawIndexed(prim, (uint32_t)n, ToIndex(effType, c), ib.get(),
                                      runOff, (uint32_t)inst);
                     size_t base = (type == 0x1401) ? 0 : (shadowUpload ? origOff : off);
                     size_t gpuOff = (type == 0x1401) ? (size_t)s * 2 : base + (size_t)s * IndexElemSize(type);
@@ -190,13 +226,13 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
             flushRun(runStart, count - runStart);
         } else {
             size_t traceOff = (type == 0x1401) ? 0 : off;
-            enc->drawIndexed(prim, (uint32_t)count, ToIndex(effType, c), ib.get(), traceOff, (uint32_t)inst);
+            if (enc) enc->drawIndexed(prim, (uint32_t)count, ToIndex(effType, c), ib.get(), traceOff, (uint32_t)inst);
             AppleDrawGL(mode, count, effType, (type == 0x1401 && cliPtr) ? effCliPtr : (cliPtr ? idx : nullptr), true,
                         (type == 0x1401) ? 0 : (cliPtr ? 0 : (shadowUpload ? origOff : off)),
                         (type == 0x1401 && cliPtr) ? 0 : (cliPtr ? 0 : ebo), inst, baseVertex, baseInstance, 0);
         }
     }
-    enc->endEncoding();
+    if (enc) enc->endEncoding();
     // XFB capture hook: draw trong phiên active (không pause) cộng số đỉnh đã capture.
     // Metal không có TF native nên đây là emulation bằng đếm — tính varying thật cần M5b.
     GLuint xfb = c.state.BoundXFB();
@@ -274,15 +310,16 @@ void glDrawElementsIndirect(GLenum m, GLenum t, const void* ind) {
 }
 void glMultiDrawArrays(GLenum m, const GLint* f, const GLsizei* c, GLsizei n) {
     if (n < 0) { Context::Current().errors.Record(0x0501); return; }
-    for (GLsizei i = 0; i < n; ++i) EmitDraw(m, c ? c[i] : 0, 0, nullptr, 1, 0, 0, f ? f[i] : 0);
+    // Deferred full: N sub-draws chung 1 pendingEncoder (batching). Đếm để test chứng minh.
+    for (GLsizei i = 0; i < n; ++i) { EmitDraw(m, c ? c[i] : 0, 0, nullptr, 1, 0, 0, f ? f[i] : 0); Context::Current().appleStats.multidrawBatched++; }
 }
 void glMultiDrawElements(GLenum m, const GLsizei* c, GLenum t, const void* const* idx, GLsizei n) {
     if (n < 0) { Context::Current().errors.Record(0x0501); return; }
-    for (GLsizei i = 0; i < n; ++i) EmitDraw(m, c ? c[i] : 0, t, idx ? idx[i] : nullptr);
+    for (GLsizei i = 0; i < n; ++i) { EmitDraw(m, c ? c[i] : 0, t, idx ? idx[i] : nullptr); Context::Current().appleStats.multidrawBatched++; }
 }
 void glMultiDrawElementsBaseVertex(GLenum m, const GLsizei* c, GLenum t, const void* const* idx, GLsizei n, const GLint* b) {
     if (n < 0) { Context::Current().errors.Record(0x0501); return; }
-    for (GLsizei i = 0; i < n; ++i) EmitDraw(m, c ? c[i] : 0, t, idx ? idx[i] : nullptr, 1, b ? b[i] : 0);
+    for (GLsizei i = 0; i < n; ++i) { EmitDraw(m, c ? c[i] : 0, t, idx ? idx[i] : nullptr, 1, b ? b[i] : 0); Context::Current().appleStats.multidrawBatched++; }
 }
 void glMultiDrawArraysIndirect(GLenum m, const void* ind, GLsizei dc, GLsizei s) {
     Context& c = Context::Current();

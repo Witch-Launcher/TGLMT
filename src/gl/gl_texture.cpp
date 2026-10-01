@@ -15,9 +15,9 @@ using namespace tglmt;
 static void StageTexRegion(Context& c, GLuint texId, uint32_t x, uint32_t y, uint32_t w,
                            uint32_t h, GLenum format, GLenum type) {
     if (!w || !h) return;
-    // Thứ tự GL như buffer: upload sau draws không được đổi draws trước →
-    // commit encoder đang mở trước khi stage.
-    if (c.pendingEncoder) c.FlushPendingEncoder();
+    // Deferred full: chỉ flush khi texture này đã dùng trong pass đang mở.
+    // Atlas streaming (font glyphs) stage hàng chục regions/frame mà không phá batching.
+    if (c.pendingEncoder && c.MustFlushForTextureStage(texId)) c.FlushPendingEncoder();
     c.pendingTexRegions[texId].push_back(Context::TexRegion{x, y, w, h, format, type});
     ++c.appleStats.texCoalesced;
 }
@@ -356,9 +356,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
         if (!okBase) { c.errors.Record(0x0501); return; }
     }
     bool hasData = hasUnpack || pixels;
-    // Chẩn đoán texture lớn rỗng (logo 512, widgets 256): log 12 lần upload
-    // đầu ≥256px kèm internalformat/format/type (soi BGRA/UINT).
-    if ((w >= 256 || h >= 256)) {
+    // Chẩn đoán texture lớn rỗng: chỉ khi TGLMT_DIAG=1.
+    if (c.DiagOn() && (w >= 256 || h >= 256)) {
         static int nBig = 0;
         if (++nBig <= 12) {
             char ds[32];
@@ -506,7 +505,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     bool hasUnpack = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/) != 0;
     if (!tp || (!pixels && !hasUnpack)) { if (!pixels) c.errors.Record(0x0501); return; }
     auto& t = *tp;
-    if ((w >= 256 || h >= 256)) {
+    if (c.DiagOn() && (w >= 256 || h >= 256)) {
         static int nBigSub = 0;
         if (++nBigSub <= 8) {
             fprintf(stderr,
@@ -771,7 +770,8 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff,
     Context& c = Context::Current();
     {
         static uint64_t n = 0;
-        if (++c.appleStats.copyTex, ++n <= 5) {
+        ++c.appleStats.copyTex;
+        if (c.DiagOn() && ++n <= 5) {
             fprintf(stderr, "[TGLMT] copyTexSub#%llu tgt=0x%x level=%d off=(%d,%d) src=(%d,%d) size=%dx%d readFbo=%u\n",
                     (unsigned long long)n, target, level, xoff, yoff, x, y, w, h,
                     c.state.BoundReadFBO());
