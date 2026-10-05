@@ -1611,6 +1611,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                         atlasProbed = true;
                         size_t w = tit->second.w, h = tit->second.h;
                         std::vector<uint8_t> fb(w * h * 4, 0);
+                        // Readback KHÔNG flush/commit = thấy dữ liệu cũ → kết luận
+                        // sai ("atlas rỗng" oan). Bắt buộc commit trước khi đọc.
+                        c.FlushPendingEncoder();
+                        c.CommitAndWait();
                         auto wt = c.device->wrapAsTarget(tit->second.gpu.get(), nullptr);
                         if (wt && wt->readback(fb.data(), w * 4)) {
                             size_t stride = std::max<size_t>(1, (w * h) / 8192), nz = 0,

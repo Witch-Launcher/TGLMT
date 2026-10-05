@@ -512,7 +512,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     // Chẩn đoán texture lớn rỗng: chỉ khi TGLMT_DIAG=1.
     if (c.DiagOn() && (w >= 256 || h >= 256)) {
         static int nBig = 0;
-        if (++nBig <= 12) {
+        if (++nBig <= 256) {
             char ds[32];
             if (hasUnpack) snprintf(ds, sizeof(ds), "PBO+%zu", (size_t)pixels);
             else snprintf(ds, sizeof(ds), "%s", pixels ? "data" : "NULL");
@@ -594,6 +594,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     // xóa mip shadows cũ (sai size) + wasRT cũ (FBO bake của đời trước). Giữ
     // lại là smear atlas mới bằng nội dung GPU/shadow cũ → đen sau reload.
     tx.mipData.clear();
+    bool wasRTBefore = tx.wasRT;
     tx.wasRT = false;
     size_t n = (size_t)w * h * Bpp(format, type);
     tx.pixels.assign(n, 0);
@@ -602,9 +603,22 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
         size_t bpp = Bpp(format, type);
         size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
         size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
-                      (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+                      c.state.PixelStore().unpackSkipPixels * bpp;
         const uint8_t* src = pixBase + skip;
         for (GLsizei r = 0; r < h; ++r) memcpy(tx.pixels.data() + r * w * bpp, src + r * rowLen, (size_t)w * bpp);
+    }
+    // Re-specify texture ĐANG LÀ render target của encoder đang mở: encoder cũ
+    // giữ wrapper (AppleTarget) của gpu ĐỜI CŨ → draw kế tiếp trong cùng pass
+    // re-use pendingTarget và ghi vào gpu đã bị thay (app sample gpu MỚI → rỗng:
+    // atlas bake mất, GUI/terrain đen). Flush TRƯỚC khi thay gpu.
+    bool wasCurrentRT = (c.pendingEncoder && c.pendingColorTex == tp->id);
+    if (wasCurrentRT) c.FlushPendingEncoder();
+    if (c.DiagOn() && (wasRTBefore || wasCurrentRT || (w >= 256 && h >= 256))) {
+        static int nSwap = 0;
+        if (++nSwap <= 64)
+            fprintf(stderr, "[TGLMT] gpuswap#%d id=%u %dx%d wasRT=%d curRT=%d data=%d\n",
+                    nSwap, tp->id, w, h, (int)wasRTBefore, (int)wasCurrentRT,
+                    (int)(hasData != 0));
     }
     tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
     c.pendingTexRegions.erase(tp->id); // realloc GPU mới đã có full data → staging cũ vô nghĩa
@@ -661,7 +675,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
         } else {
             // LogDebug lặng (không debugCb trên iOS) → in stderr khi DiagOn.
             static int nUnhImg = 0;
-            if (c.DiagOn() && ++nUnhImg <= 16)
+            if (c.DiagOn() && ++nUnhImg <= 64)
                 fprintf(stderr,
                         "[TGLMT] texnop-img#%d id=%u %dx%d fmt=0x%x ty=0x%x giu-shadow\n",
                         nUnhImg, tp->id, w, h, format, type);
@@ -692,7 +706,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     auto& t = *tp;
     if (c.DiagOn() && (w >= 256 || h >= 256)) {
         static int nBigSub = 0;
-        if (++nBigSub <= 8) {
+        if (++nBigSub <= 256) {
             fprintf(stderr,
                     "[TGLMT] bigTexSub#%d id=%u tgt=0x%x lv=%d off=(%d,%d) %dx%d fmt=0x%x "
                     "ty=0x%x tex=%ux%u\n",
@@ -1091,6 +1105,17 @@ void glTextureStorage2D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h) {
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
     it->second.w = w; it->second.h = h; it->second.internalFormat = inf; it->second.levels = l;
     it->second.pixels.assign((size_t)w * h * 4, 0);
+    bool wasRTD = it->second.wasRT;
+    bool wasCurRTD = (c.pendingEncoder && c.pendingColorTex == t);
+    if (wasCurRTD) c.FlushPendingEncoder();
+    if (c.DiagOn() && (wasRTD || wasCurRTD || (w >= 256 && h >= 256))) {
+        static int nSwapD = 0;
+        if (++nSwapD <= 64)
+            fprintf(stderr, "[TGLMT] gpuswapDSA#%d id=%u %dx%d wasRT=%d curRT=%d\n",
+                    nSwapD, t, w, h, (int)wasRTD, (int)wasCurRTD);
+    }
+    it->second.wasRT = false;
+    c.pendingTexRegions.erase(t);
     it->second.gpu = c.device->newTexture(w, h, ToMetalFormat(it->second.internalFormat));
 }
 void glTextureStorage3D(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g; }
@@ -1110,8 +1135,8 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
     bool hasUnpack = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/) != 0;
     if (!p && !hasUnpack) { c.errors.Record(0x0501); return; }
     if ((w >= 256 || h >= 256)) {
-        static int nBigDSA = 0;
-        if (++nBigDSA <= 8) {
+            static int nBigDSA = 0;
+            if (++nBigDSA <= 256) {
             fprintf(stderr,
                     "[TGLMT] bigTexSubDSA#%d id=%u lv=%d off=(%d,%d) %dx%d fmt=0x%x ty=0x%x "
                     "tex=%ux%u\n",

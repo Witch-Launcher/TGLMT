@@ -317,6 +317,20 @@ void glLinkProgram(GLuint p) {
         pr.shadowLike = hasDT && hasFog && hasProj && !hasLight && pr.vsSamplers.empty() &&
                         pr.fsSamplers.size() == 1 && k0 == '2';
     }
+    // Chẩn đoán: shader khai báo attribute bao nhiêu (inputs) và có dùng
+    // gl_VertexID không — so với casN=0 (VAO tắt mọi attrib) ở draw time.
+    // inputs>0 + casN=0 = pipeline có stage_in nhưng vertex descriptor rỗng
+    // → Metal đọc (0,0,0,1) → quad degenerate → atlas bake rỗng.
+    if (c.DiagOn()) {
+        static int nLink = 0;
+        if (++nLink <= 128)
+            fprintf(stderr,
+                    "[TGLMT] link#%d prog=%u vsInputs=%zu usesVertexID=%d usesInstID=%d "
+                    "vsOut=%zu fsIn=%zu blocks=%zu\n",
+                    nLink, p, vsC.inputs.size(), (int)vsC.usesVertexID,
+                    (int)vsC.usesInstanceID, vsC.outputs.size(), fsC.inputs.size(),
+                    vsC.blocks.size());
+    }
     pr.linked = true;
     (void)hasF;
     // 5. Apple backend: biên dịch MTLLibrary ngay tại link (lỗi biên dịch → link fail thật).
