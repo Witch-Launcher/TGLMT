@@ -45,7 +45,12 @@ public:
 
     // Bắt đầu frame: MakeCurrent + đảm bảo default target + bind FBO 0.
     // Trả false khi chưa Init hoặc (Apple mà) không có target.
-    bool BeginFrame();
+    //
+    // newFrame=false: chỉ gắn context (MakeCurrent được gọi giữa frame bởi
+    // chunk-uploader thread). TUYỆT ĐỐI không xoay target/ring ở chế độ này —
+    // nếu xoay theo mỗi lần MakeCurrent thì target mặc định đổi giữa chừng
+    // frame và ring bị ghi đè khi GPU còn đọc (vỡ hình).
+    bool BeginFrame(bool newFrame = true);
 
     // Kết thúc frame. layer=nullptr: headless (không present, vẫn true).
     // layer=CAMetalLayer*: blit target lên drawable. Trả false khi present lỗi.

@@ -88,9 +88,15 @@ void glUniformBlockBinding(GLuint p, GLuint b, GLuint bi) {
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
     for (auto& blk : it->second.uniformBlocks)
         if (blk.index == b) { blk.binding = bi; return; }
-    // block index chưa có (gọi trước link): lưu shadow để link giữ lại
-    // (đơn giản: bỏ qua + log, vì link sẽ mặc định binding 0; app vanilla gọi sau link)
-    c.LogDebug(0, 0, 0, 0, "glUniformBlockBinding: block index chưa link, giữ mặc định 0");
+    // block index chưa có (gọi trước link): link sẽ giữ binding từ lần trước
+    // hoặc layout(binding=N); log sang stderr vì LogDebug câm trên iOS (không debugCb).
+    if (c.DiagOn()) {
+        static int nMiss = 0;
+        if (++nMiss <= 64)
+            fprintf(stderr, "[TGLMT] ublockmiss#%d prog@%u idx=%u point=%u (chưa link, giữ layout/0)\n",
+                    nMiss, p, b, bi);
+        fflush(stderr);
+    }
     (void)bi;
 }
 void glShaderStorageBlockBinding(GLuint a, GLuint b, GLuint c_) { (void)a;(void)b;(void)c_; }

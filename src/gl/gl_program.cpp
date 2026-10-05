@@ -4,6 +4,8 @@
 #include "tglmt/Context.h"
 #include <algorithm>
 #include <cstdio>
+#include <string>
+#include <unordered_map>
 using namespace tglmt;
 
 namespace tglmt::gl {
@@ -221,23 +223,35 @@ void glLinkProgram(GLuint p) {
     // SamplerInfo+RotScale, fs dùng Globals+SamplerInfo+BlurConfig) → fs đọc
     // nhầm buffer (Radius rác → loop treo GPU → iOS ban submissions, đen màn).
     {
+        // Giữ binding từ lần link trước (app gọi glUniformBlockBinding sau link
+        // lần 1, không gọi lại sau relink) — xem addBlock bên dưới.
+        std::unordered_map<std::string, GLuint> oldBinds;
+        for (auto& b : pr.uniformBlocks) oldBinds[b.name] = b.binding;
         pr.uniformBlocks.clear();
         pr.vsBlocks.clear();
         pr.fsBlocks.clear();
         GLuint idx = 0;
-        auto addBlock = [&](const std::string& nm, bool isVS) {
+        auto addBlock = [&](const std::string& nm, int layoutBind, bool isVS) {
             for (auto& b : pr.uniformBlocks) if (b.name == nm) return;
             ProgramObject::UniformBlock ub;
             ub.name = nm; ub.index = idx++; ub.binding = 0; ub.isVS = isVS;
-            // giữ binding đã gọi glUniformBlockBinding trước link (nếu có)
+            ub.layoutBinding = layoutBind;
+            // Ưu tiên: layout(binding=N) trong GLSL → binding giữ từ link trước → 0.
+            // layout binding là giá trị mặc định đúng theo GL (glLinkProgram gán
+            // từ qualifier); glUniformBlockBinding sau link vẫn override bình thường.
+            if (layoutBind >= 0) ub.binding = (GLuint)layoutBind;
+            else {
+                auto ob = oldBinds.find(nm);
+                if (ob != oldBinds.end()) ub.binding = ob->second;
+            }
             pr.uniformBlocks.push_back(ub);
         };
         for (auto& b : vsC.blocks) {
-            addBlock(b.name, true);
+            addBlock(b.name, b.binding, true);
             pr.vsBlocks.push_back(b.name);
         }
         for (auto& b : fsC.blocks) {
-            addBlock(b.name, false);
+            addBlock(b.name, b.binding, false);
             pr.fsBlocks.push_back(b.name);
         }
         // Kích thước struct thật mỗi block (max end-offset members, không pad
@@ -255,13 +269,53 @@ void glLinkProgram(GLuint p) {
                     if (b.name == ub.name) need = std::max(need, trueSize(b.members));
                 for (auto& b : fsC.blocks)
                     if (b.name == ub.name) need = std::max(need, trueSize(b.members));
-                ub.minSize = need;
+                // std140: kích thước block luôn là bội số 16 (Minecraft dùng
+                // Std140SizeCalculator + roundToward(uboSize, alignment)). Bản cũ
+                // dùng max end-offset (không pad) nên dễ hơn slice thật 1..15
+                // byte → tưởng buffer thiếu → bind zero → ma trận toàn 0 →
+                // geometry suy biến (ô atlas trống / model vô hình).
+                ub.minSize = (need + 15) & ~(size_t)15;
+            }
+        }
+        // Diag: binding sau link — đối chiếu glUniformBlockBinding/ubobind trên máy.
+        if (c.DiagOn()) {
+            static int nLb = 0;
+            if (++nLb <= 120) {
+                std::string all;
+                for (auto& ub : pr.uniformBlocks) {
+                    char b[96];
+                    snprintf(b, sizeof(b), "%s#%u->b%u(lay%d,%zuB) ", ub.name.c_str(),
+                             ub.index, ub.binding, ub.layoutBinding, ub.minSize);
+                    all += b;
+                }
+                fprintf(stderr, "[TGLMT] linkblk#%d prog@%u %s\n", nLb, p, all.c_str());
+                fflush(stderr);
             }
         }
         // ZERO_TO_ONE cảnh báo: shader đã bake z-convert mặc định; app đổi ClipControl
         // depth cần relink (hiện log, M5c recompile tự động).
         if (c.state.ClipDepth() == 0x935F)
             c.LogDebug(0, 0, 0, 0, "glLinkProgram: ZERO_TO_ONE nhưng VS đã bake z-convert mặc định (cần relink)");
+    }
+    // Tag entity_shadow (Fix #6): DT+Fog+Proj, không Lighting/Lightmap, không vs
+    // sampler, đúng 1 fs 2D sampler (Sampler0 = shadow.png). AppleDrawGL soi draw
+    // của program này: bind sai id / shadow.png bị ghi đè nội dung → shadowmis#
+    // + dump texring (bắt chuỗi bind làm unit trỏ sai, không cần debugger).
+    {
+        bool hasDT = false, hasFog = false, hasProj = false, hasLight = false;
+        for (auto& ub : pr.uniformBlocks) {
+            if (ub.name == "DynamicTransforms") hasDT = true;
+            else if (ub.name == "Fog") hasFog = true;
+            else if (ub.name == "Projection") hasProj = true;
+            else if (ub.name == "Lighting" || ub.name == "Lightmap") hasLight = true;
+        }
+        char k0 = 0;
+        if (pr.fsSamplers.size() == 1) {
+            auto kit = pr.samplerKind.find(pr.fsSamplers[0]);
+            if (kit != pr.samplerKind.end()) k0 = kit->second;
+        }
+        pr.shadowLike = hasDT && hasFog && hasProj && !hasLight && pr.vsSamplers.empty() &&
+                        pr.fsSamplers.size() == 1 && k0 == '2';
     }
     pr.linked = true;
     (void)hasF;
@@ -282,6 +336,25 @@ void glLinkProgram(GLuint p) {
             pr.infoLog = "error: MSL fragment compile: " + err + "\n--- MSL head ---\n" +
                          pr.fragmentMSL.substr(0, 1200);
             return;
+        }
+    }
+    // Msluse (diag): số lần MSL tham chiếu `ubo_<Block>.` — trả lời trực tiếp
+    // "shader có ĐỌC block này không?". fs=0/vs=0 → block chết (vanilla strip
+    // → app không bind → zero-fallback vô hại); fs>0 mà binding sai (uboSmall
+    // #) → dữ liệu sai ĐANG được đọc = nguyên nhân đen sáng.
+    if (c.DiagOn()) {
+        auto refs = [](const std::string& s, const std::string& nm) {
+            size_t n = 0, pos = 0;
+            const std::string key = "ubo_" + nm + ".";
+            while ((pos = s.find(key, pos)) != std::string::npos) {
+                ++n;
+                pos += key.size();
+            }
+            return n;
+        };
+        for (auto& ub : pr.uniformBlocks) {
+            fprintf(stderr, "[TGLMT] msluse# prog@%u %s vs=%zu fs=%zu\n", p, ub.name.c_str(),
+                    refs(pr.vertexMSL, ub.name), refs(pr.fragmentMSL, ub.name));
         }
     }
 }

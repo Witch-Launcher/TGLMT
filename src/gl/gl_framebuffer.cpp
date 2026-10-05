@@ -2,13 +2,30 @@
 // Spec §9 (Framebuffer). Metal: colorAttachments[i]/depth/stencil, load/store.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include "tglmt/GLAppleDraw.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <set>
+#include <string>
 #include <vector>
 using namespace tglmt;
 
 namespace tglmt::gl {
+// Chẩn đoán clear (diag): log tổ hợp (fbo, mask, rgba) — dedupe cap 64.
+// Nguồn đen màn hình: clear sky-blue có bị gọi cho đúng fbo không, hay một
+// clear (0,0,0,0) nào đó quét đè world target.
+static void ClrProbeLog(Context& c, GLuint fbo, GLbitfield mask) {
+    if (!c.DiagOn()) return;
+    char key[96];
+    auto b = [](float v) { return (int)((v < 0 ? 0 : v > 1 ? 1 : v) * 255.0f + 0.5f); };
+    snprintf(key, sizeof(key), "%u|%u|%02X%02X%02X%02X", fbo, mask, b(c.clearColor[0]),
+             b(c.clearColor[1]), b(c.clearColor[2]), b(c.clearColor[3]));
+    static std::set<std::string> seen;
+    if (seen.size() >= 64 || !seen.insert(key).second) return;
+    fprintf(stderr, "[TGLMT] clr# fbo=%u mask=0x%x rgba=(%.3f,%.3f,%.3f,%.3f)\n", fbo, mask,
+            c.clearColor[0], c.clearColor[1], c.clearColor[2], c.clearColor[3]);
+}
 void glGenFramebuffers(GLsizei n, GLuint* f) {
     Context& c = Context::Current();
     c.registry.Gen(ObjectKind::Framebuffer, n, f);
@@ -22,6 +39,7 @@ void glCreateFramebuffers(GLsizei n, GLuint* f) {
 void glDeleteFramebuffers(GLsizei n, const GLuint* f) {
     Context& c = Context::Current();
     c.registry.Delete(ObjectKind::Framebuffer, n, f);
+    ++c.objectGen; // cache wrap-target theo FBO không còn hợp lệ
     for (GLsizei i = 0; i < n; ++i) c.fbos.erase(f[i]);
 }
 GLboolean glIsFramebuffer(GLuint f) {
@@ -75,16 +93,23 @@ void glFramebufferTexture2D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l) {
     if (fbo == 0) { c.errors.Record(0x0502); return; } // INVALID_OPERATION trên default FB
     auto it = c.fbos.find(fbo);
     if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
+    if (l < 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE (spec §9.2)
     auto& f = it->second;
-    if (a == 0x8CE0) f.colorTex[0] = x; // COLOR_ATTACHMENT0
-    else if (a >= 0x8CE0 && a <= 0x8CE7) f.colorTex[a - 0x8CE0] = x; // COLOR_ATTACHMENTn
-    else if (a == 0x8D00) f.depthTex = x;
-    else if (a == 0x8D20) f.stencilTex = x;
-    else if (a == 0x821A) f.depthStencilTex = x; // DEPTH_STENCIL_ATTACHMENT
+    if (a == 0x8CE0) { f.colorTex[0] = x; f.colorLevel[0] = l; } // COLOR_ATTACHMENT0
+    else if (a >= 0x8CE0 && a <= 0x8CE7) { f.colorTex[a - 0x8CE0] = x; f.colorLevel[a - 0x8CE0] = l; } // COLOR_ATTACHMENTn
+    else if (a == 0x8D00) { f.depthTex = x; f.depthLevel = l; }
+    else if (a == 0x8D20) { f.stencilTex = x; f.stencilLevel = l; }
+    else if (a == 0x821A) { f.depthStencilTex = x; f.depthStencilLevel = l; } // DEPTH_STENCIL_ATTACHMENT
     else { c.errors.Record(0x0500); return; }
     auto txt = c.textures.find(x);
-    if (txt != c.textures.end()) { f.w = txt->second.w; f.h = txt->second.h; }
-    (void)t; (void)tx; (void)l;
+    // Size FBO theo mip thật (w>>l): blit bounds + viewport mip bake đúng.
+    // wasRT chỉ cho level 0 (level>0 của texture 1-level không có storage GPU).
+    if (txt != c.textures.end()) {
+        GLint lw = (GLint)txt->second.w >> l, lh = (GLint)txt->second.h >> l;
+        f.w = lw > 0 ? lw : 1; f.h = lh > 0 ? lh : 1;
+        if (x && l == 0) txt->second.wasRT = true;
+    }
+    (void)t; (void)tx;
 }
 void glFramebufferTexture3D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l, GLint z) {
     (void)z; // TGLMT FBO model 2D: layer/z không phân biệt, attach như 2D.
@@ -95,23 +120,33 @@ void glFramebufferTextureLayer(GLenum t, GLenum a, GLuint x, GLint l, GLint laye
     glFramebufferTexture2D(t, a, 0x0DE1 /*TEXTURE_2D*/, x, l);
 }
 // Helper attach tôn trọng fbo chỉ định (fix bug bỏ qua `f` ở Named variants).
-static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex) {
+static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex, GLint level) {
     if (fbo == 0) { c.errors.Record(0x0502); return false; } // default FB không attach
     auto it = c.fbos.find(fbo);
     if (it == c.fbos.end()) { c.errors.Record(0x0502); return false; }
+    if (level < 0) { c.errors.Record(0x0501); return false; }
     auto& f = it->second;
-    if (attach == 0x8CE0) f.colorTex[0] = tex;
-    else if (attach >= 0x8CE0 && attach <= 0x8CE7) f.colorTex[attach - 0x8CE0] = tex;
-    else if (attach == 0x8D00) f.depthTex = tex;
-    else if (attach == 0x8D20) f.stencilTex = tex;
-    else if (attach == 0x821A) f.depthStencilTex = tex;
+    if (attach == 0x8CE0) { f.colorTex[0] = tex; f.colorLevel[0] = level; }
+    else if (attach >= 0x8CE0 && attach <= 0x8CE7) { f.colorTex[attach - 0x8CE0] = tex; f.colorLevel[attach - 0x8CE0] = level; }
+    else if (attach == 0x8D00) { f.depthTex = tex; f.depthLevel = level; }
+    else if (attach == 0x8D20) { f.stencilTex = tex; f.stencilLevel = level; }
+    else if (attach == 0x821A) { f.depthStencilTex = tex; f.depthStencilLevel = level; }
     else { c.errors.Record(0x0500); return false; }
     auto txt = c.textures.find(tex);
-    if (txt != c.textures.end() && tex) { f.w = txt->second.w; f.h = txt->second.h; }
+    if (txt != c.textures.end() && tex) {
+        GLint lw = (GLint)txt->second.w >> level, lh = (GLint)txt->second.h >> level;
+        f.w = lw > 0 ? lw : 1; f.h = lh > 0 ? lh : 1;
+        if (level == 0) txt->second.wasRT = true;
+    }
     return true;
 }
-void glNamedFramebufferTexture(GLuint f, GLenum a, GLuint x, GLint l) { (void)l; AttachToFBO(Context::Current(), f, a, x); }
-void glNamedFramebufferTextureLayer(GLuint f, GLenum a, GLuint x, GLint l, GLint layer) { (void)f;(void)a;(void)x;(void)l;(void)layer; }
+void glNamedFramebufferTexture(GLuint f, GLenum a, GLuint x, GLint l) { AttachToFBO(Context::Current(), f, a, x, l); }
+void glNamedFramebufferTextureLayer(GLuint f, GLenum a, GLuint x, GLint l, GLint layer) {
+    // TGLMT FBO model 2D: layer không phân biệt, attach như 2D NHƯNG tôn trọng
+    // f/a/x/l (bản cũ nuốt toàn bộ lệnh → attach sai câm).
+    (void)layer;
+    AttachToFBO(Context::Current(), f, a, x, l);
+}
 void glFramebufferParameteri(GLenum t, GLenum p, GLint v) { (void)t; Context::Current().state.SetShadow(p, &v, 4); }
 void glNamedFramebufferParameteri(GLuint f, GLenum p, GLint v) { (void)f; Context::Current().state.SetShadow(p, &v, 4); }
 GLenum glCheckFramebufferStatus(GLenum t) {
@@ -154,10 +189,10 @@ void glNamedFramebufferDrawBuffers(GLuint f, GLsizei n, const GLenum* b) {
 void glReadBuffer(GLenum b) { Context::Current().state.SetShadow(0x0C02 /*READ_BUFFER*/, &b, 4); }
 void glNamedFramebufferReadBuffer(GLuint f, GLenum b) { (void)f; glReadBuffer(b); }
 // Blit có default framebuffer tham gia (composite cuối menu/post chain ra màn
-// hình). Toàn bộ pipeline TGLMT lưu pixels theo quy ước thô (byte đầu = row 0
-// cả shadow lẫn GPU, không flip ở upload/copy; chỉ glReadPixels flip cho đúng
-// spec §18.2) nên GPU copy thô là đúng hướng — CPU fallback cũng copy thô để
-// nhất quán với đường FBO→FBO (`ws->second.pixels = rs->second.pixels`).
+// hình). Toàn bộ pipeline TGLMT lưu pixels theo quy ước GL-order (byte đầu =
+// row 0 = đáy GL, cả shadow lẫn GPU — do viewport GL-correct h<0; present
+// mới là chỗ lật hàng sang drawable) nên GPU copy thô là đúng hướng — CPU
+// fallback cũng copy thô để nhất quán với đường FBO→FBO.
 // Làm tươi shadow CPU từ GPU trước khi CPU fallback đọc pixels.
 // Draws Apple đi thẳng vào texture GPU (wrapAsTarget) mà không cập nhật
 // tx.pixels → shadow cũ toàn 0 → fallback CPU copy đen (blur downsample
@@ -208,6 +243,48 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         if (cit == rit->second.colorTex.end()) return;
         auto tit = c.textures.find(cit->second);
         if (tit == c.textures.end() || !tit->second.gpu) return;
+        // Blitprobe (diag đen): đọc NGUỒN trước khi blit ra màn hình — nội dung
+        // cuối frame thật sự là sky-blue hay đen. Flush+commit để draw hiện hành
+        // đã tới card trước getBytes (giống nhánh CPU fallback dưới). Throttle:
+        // lần đầu + đổi nguồn + mỗi 60 blit (~2.5s ở 24fps).
+        if (c.DiagOn() && tit->second.w > 0 && tit->second.h > 0) {
+            static uint64_t nBl = 0;
+            static GLuint lastSrc = 0;
+            ++nBl;
+            GLuint srcTex = cit->second;
+            if (nBl == 1 || srcTex != lastSrc || nBl % 60 == 0) {
+                lastSrc = srcTex;
+                c.FlushPendingEncoder();
+                c.CommitAndWait();
+                auto wt = c.device->wrapAsTarget(tit->second.gpu.get(), nullptr);
+                if (wt) {
+                    size_t w = tit->second.w, h = tit->second.h;
+                    std::vector<uint8_t> fb(w * h * 4, 0);
+                    if (wt->readback(fb.data(), w * 4)) {
+                        auto px = [&](size_t x, size_t y, unsigned* o) {
+                            const uint8_t* p = fb.data() + (y * w + x) * 4;
+                            o[0] = p[0]; o[1] = p[1]; o[2] = p[2]; o[3] = p[3];
+                        };
+                        unsigned top[4], ctr[4], bot[4];
+                        px(w / 2, h / 8, top);
+                        px(w / 2, h / 2, ctr);
+                        px(w / 2, h * 7 / 8, bot);
+                        size_t stride = std::max<size_t>(1, (w * h) / 8192), nz = 0, tot = 0;
+                        for (size_t i = 0; i < w * h; i += stride) {
+                            const uint8_t* q = fb.data() + i * 4;
+                            if (q[0] | q[1] | q[2] | q[3]) ++nz;
+                            ++tot;
+                        }
+                        fprintf(stderr,
+                                "[TGLMT] blitprobe# tex=%u %zux%zu top=(%u,%u,%u,%u) "
+                                "ctr=(%u,%u,%u,%u) bot=(%u,%u,%u,%u) nz=%zu/%zu\n",
+                                srcTex, w, h, top[0], top[1], top[2], top[3], ctr[0],
+                                ctr[1], ctr[2], ctr[3], bot[0], bot[1], bot[2], bot[3],
+                                nz, tot);
+                    }
+                }
+            }
+        }
         uint32_t cw = std::min({(uint32_t)sw, tit->second.w > sx ? tit->second.w - sx : 0,
                                 def->width() > dx ? def->width() - dx : 0});
         uint32_t ch = std::min({(uint32_t)sh, tit->second.h > sy ? tit->second.h - sy : 0,
@@ -226,7 +303,7 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         // Shadow có thể cũ (draws đi GPU-only) → làm tươi từ GPU trước.
         auto& tx = tit->second;
         c.FlushPendingEncoder(); // IR: commit batch trước khi readback shadow
-        c.device->commitAndWait();
+        c.CommitAndWait();
         RefreshShadowFromGPU(c, tx);
         if (tx.pixels.empty() || !tx.w || !tx.h) {
             c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: blit ra màn hình thiếu shadow, bỏ qua");
@@ -351,12 +428,12 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
                 }
                 c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: GPU blit fail, fallback CPU shadow");
                 // Rơi xuống CPU: cần shadow tươi.
-                c.device->commitAndWait();
+                c.CommitAndWait();
                 RefreshShadowFromGPU(c, rs->second);
             } else {
                 c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: scaled/LINEAR fallback CPU shadow (M5c sampled-quad)");
                 // Downsample blur/post: shadow cũ toàn 0 → đen. Làm tươi từ GPU.
-                c.device->commitAndWait();
+                c.CommitAndWait();
                 RefreshShadowFromGPU(c, rs->second);
             }
         }
@@ -420,9 +497,15 @@ void glClear(GLbitfield m) {
     Context& c = Context::Current();
     // Metal: renderPass loadAction=Clear + clearColor/Depth/Stencil — Null: ghi shadow để test đọc
     c.state.SetShadow(0x0B00 /*CLEAR_STATE_MARKER*/, &m, 4);
+    c.appleStats.glClears++; // chẩn đoán đen màn hình: clear có được gọi không
+    GLuint fbo = c.state.BoundDrawFBO();
+    if (m & 0x00004000u) ClrProbeLog(c, fbo, m & 0x00004000u);
+    // Immediate (đúng GL): clear trên CHÍNH fbo đang bind. Fallback deferred
+    // (Null / chưa có target) giữ nguyên hành vi cũ cho tests.
+    if (AppleClearNow(m)) return;
     c.applePendingClear = true; // M5b: draw Apple kế tiếp clear, sau đó LOAD
     c.appleClearMask |= m;
-    c.appleStats.glClears++; // chẩn đoán đen màn hình: clear có được gọi không
+    c.appleClearFBO = fbo; // clrmiss#: so với fbo của draw tiêu thụ
 }
 void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
     Context& c = Context::Current();
@@ -441,8 +524,11 @@ void glClearBufferfv(GLenum b, GLint d, const GLfloat* v) {
             c.clearColor[0] = v[0]; c.clearColor[1] = v[1]; c.clearColor[2] = v[2];
             c.clearColor[3] = (d >= 0 && v) ? v[3] : 1.0f;
             if (v) { c.clearColor[0] = v[0]; c.clearColor[1] = v[1]; c.clearColor[2] = v[2]; c.clearColor[3] = v[3]; }
+            ClrProbeLog(c, c.state.BoundDrawFBO(), 0x00004000u);
+            if (AppleClearNow(0x00004000u)) return;
             c.applePendingClear = true;
             c.appleClearMask |= 0x00004000u;
+            c.appleClearFBO = c.state.BoundDrawFBO();
         } else {
             c.LogDebug(0, 0, 0, 0, "glClearBufferfv COLOR drawbuffer>0 giữ shadow (MRT clear M5c)");
         }
@@ -450,8 +536,10 @@ void glClearBufferfv(GLenum b, GLint d, const GLfloat* v) {
     }
     if (b == 0x1801 /*DEPTH*/ && v) {
         c.clearDepth = v[0];
+        if (AppleClearNow(0x00000100u)) return;
         c.applePendingClear = true;
         c.appleClearMask |= 0x00000100u;
+        c.appleClearFBO = c.state.BoundDrawFBO();
         return;
     }
     if (b == 0x1802 /*STENCIL*/ && v) { c.clearStencil = (GLint)v[0]; return; }
@@ -469,8 +557,11 @@ void glClearBufferfi(GLenum b, GLint d, GLfloat dep, GLint st) {
     Context& c = Context::Current();
     (void)b; (void)d;
     c.clearDepth = dep; c.clearStencil = st;
+    GLbitfield m = 0x00000100u | 0x00000400u;
+    if (AppleClearNow(m)) return;
     c.applePendingClear = true;
-    c.appleClearMask |= 0x00000100u | 0x00000400u;
+    c.appleClearMask |= m;
+    c.appleClearFBO = c.state.BoundDrawFBO();
 }
 void glClearNamedFramebufferfv(GLuint f, GLenum b, GLint d, const GLfloat* v) {
     // DSA: clear FBO chỉ định — hiện tôn trọng f (bind tạm), đúng hơn bản cũ bỏ qua.

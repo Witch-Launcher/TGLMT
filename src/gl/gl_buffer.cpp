@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <set>
+#include <utility>
 using namespace tglmt;
 
 static BufferObject* BoundBuf(GLenum target, bool create = false) {
@@ -76,15 +78,64 @@ void Context::FlushBufferStaging(GLuint buf) {
         }
         merged.push_back(r);
     }
-    if (bo.gpu) {
-        size_t gpuLen = bo.gpu->length();
+    if (bo.gpu && !merged.empty()) {
+        // In-flight write guard (bug: chớp/tia khi nhiều thực thể).
+        // Commit encoder là NoWait → command buffer đã commit nhưng GPU CHƯA
+        // execute; memcpy shadow→GPU tại chỗ lúc này đổi dữ liệu mà draw cũ đang
+        // đọc (iOS shared memory) → vỡ hình/entity méo.
+        // TRƯỚC: newBufferWithBytes(TOÀN BỘ shadow) mỗi lần. Minecraft tái dùng
+        // 1 vertex buffer cho MỌI batch cùng VertexFormat ⇒ vài trăm lần
+        // alloc+full-copy mỗi frame (vừa chậm vừa ép iOS ban submissions).
+        // NAY: xoay sang 1 slot trong pool (buffer cũ vẫn sống vì Metal retain),
+        // copy đúng range đã gộp; slot quay lại khi GPU đã execute xong tới
+        // đợi dùng nó (usedGen <= cbCompleted).
+        // Buffer đang mapped (MC persistent-map UBO): con trỏ game trỏ thẳng
+        // vào gpu cũ → KHÔNG được đổi identity.
+        const bool inFlight = device && !bo.mapped && GpuBusy();
+        std::shared_ptr<metal::IBuffer> target = bo.gpu;
+        bool rotated = false;
+        if (inFlight) {
+            constexpr size_t kPool = 3; // đủ cho 2 frame đang bay
+            if (bo.pool.size() < kPool) bo.pool.resize(kPool);
+            const size_t need = bo.data.size() ? bo.data.size() : (size_t)1;
+            const uint64_t done = cbCompleted.load(std::memory_order_relaxed);
+            for (size_t i = 0; i < kPool; ++i) {
+                BufferObject::GpuSlot& sl = bo.pool[(bo.poolNext + i) % kPool];
+                if (sl.buf && sl.usedGen > done) continue; // GPU còn đang đọc slot này
+                if (!sl.buf || sl.buf->length() < need) {
+                    sl.buf = device->newBuffer(need, metal::StorageMode::Shared);
+                    if (!sl.buf) break;
+                    sl.usedGen = 0;
+                }
+                bo.poolNext = (bo.poolNext + i + 1) % kPool;
+                target = sl.buf;
+                rotated = true;
+                break;
+            }
+            if (!rotated) {
+                // Hết slot rảnh (GPU tụng lịch cao bất thường): chờ cho an toàn
+                // tuyệt đối thay vì ghi đè dữ liệu đang bay.
+                FlushPendingEncoder();
+                CommitAndWait();
+                ++appleStats.bufWaitStall;
+                target = bo.gpu;
+            } else {
+                ++appleStats.bufRotated;
+            }
+        }
+        size_t gpuLen = target->length();
         for (auto& m : merged) {
             if (m.off >= bo.data.size() || m.off >= gpuLen) continue;
             size_t n = std::min({m.len, bo.data.size() - m.off, gpuLen - m.off});
             if (!n) continue;
-            memcpy((uint8_t*)bo.gpu->contents() + m.off, bo.data.data() + m.off, n);
-            bo.gpu->didModifyRange(m.off, n);
+            memcpy((uint8_t*)target->contents() + m.off, bo.data.data() + m.off, n);
+            target->didModifyRange(m.off, n);
         }
+        if (rotated)
+            for (auto& sl : bo.pool)
+                if (sl.buf == target)
+                    sl.usedGen = cbCommitted.load(std::memory_order_relaxed);
+        bo.gpu = target; // draw sau dùng đúng buffer vừa ghi
     }
     ++appleStats.bufferFlushes;
     pendingBufRanges.erase(it);
@@ -135,21 +186,27 @@ void glBindBuffer(GLenum target, GLuint buffer) {
         if (it != c.vaos.end()) it->second.elementBuffer = buffer;
     }
 }
+// Dedupe log UBO bind: cùng (point,buf) lặp mọi frame → 1 dòng. Offsets biến
+// đổi liên tục (DynamicTransforms 140B × ~90 offset/frame) làm cap 96 đầy
+// trước → point 2/3 (Globals/Fog) không bao giờ lộ. Bỏ offset khỏi key.
+static bool UboBindLogNew(GLuint point, GLuint buf, long, long) {
+    static std::set<std::pair<GLuint, GLuint>> seen;
+    if (seen.size() >= 64) return false;
+    return seen.insert({point, buf}).second;
+}
 void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     Context& c = Context::Current();
     if (buffer && !c.buffers.count(buffer)) { c.errors.Record(0x0502); return; }
     if (target == 0x8A11 /*UNIFORM_BUFFER*/) {
         c.uniformBindPoints[index] = BufferRange{buffer, 0, 0};
         // Chẩn đoán misbound UBO: chỉ khi TGLMT_DIAG=1 (release giữ 60fps).
-        if (c.DiagOn()) {
+        if (c.DiagOn() && buffer && UboBindLogNew(index, buffer, 0, 0)) {
             static int nUB = 0;
-            if (++nUB <= 400 && buffer) {
-                auto it = c.buffers.find(buffer);
-                size_t sz = (it == c.buffers.end()) ? 0 : it->second.data.size();
-                fprintf(stderr, "[TGLMT] ubobind#%d point %u -> buf %u (%zuB)\n",
-                        nUB, index, buffer, sz);
-                fflush(stderr);
-            }
+            auto it = c.buffers.find(buffer);
+            size_t sz = (it == c.buffers.end()) ? 0 : it->second.data.size();
+            fprintf(stderr, "[TGLMT] ubobind#%d point %u -> buf %u (%zuB)\n",
+                    ++nUB, index, buffer, sz);
+            fflush(stderr);
         }
     } else if (target == 0x90D2 /*SHADER_STORAGE_BUFFER*/) {
         c.storageBindPoints[index] = BufferRange{buffer, 0, 0};
@@ -162,13 +219,11 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr o, G
     if (o < 0 || s < 0) { c.errors.Record(0x0501); return; }
     if (target == 0x8A11) {
         c.uniformBindPoints[index] = BufferRange{buffer, o, s};
-        if (c.DiagOn()) {
+        if (c.DiagOn() && buffer && UboBindLogNew(index, buffer, (long)o, (long)s)) {
             static int nUBR = 0;
-            if (++nUBR <= 400 && buffer) {
-                fprintf(stderr, "[TGLMT] uborange#%d point %u -> buf %u off=%ld size=%ld\n",
-                        nUBR, index, buffer, (long)o, (long)s);
-                fflush(stderr);
-            }
+            fprintf(stderr, "[TGLMT] uborange#%d point %u -> buf %u off=%ld size=%ld\n",
+                    ++nUBR, index, buffer, (long)o, (long)s);
+            fflush(stderr);
         }
     } else if (target == 0x90D2) {
         c.storageBindPoints[index] = BufferRange{buffer, o, s};

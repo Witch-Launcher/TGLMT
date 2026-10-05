@@ -16,6 +16,7 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <atomic>
 
 namespace tglmt {
 
@@ -29,6 +30,19 @@ struct BufferObject {
     size_t mapOffset = 0, mapLength = 0;
     GLbitfield mapAccess = 0;
     std::shared_ptr<metal::IBuffer> gpu; // Apple backend
+    // Pool buffer phụ cho in-flight write: khi GPU còn đang đọc `gpu` (đã commit,
+    // chưa execute) mà app ghi lại buffer này, ta xoay sang 1 slot pool khác thay
+    // vì newBuffer mỗi lần (Minecraft tái dùng 1 vertex buffer/VertexFormat cho
+    // MỌI batch trong frame → không pool thì alloc + full-copy mỗi draw).
+    // Slot đã dùng ở "đợi" nào được đánh dấu; slot an toàn khi GPU đã execute
+    // xong tới đợi đó (xem Context::cbCommitted/cbCompleted).
+    struct GpuSlot {
+        std::shared_ptr<metal::IBuffer> buf;
+        uint64_t usedGen = 0;
+    };
+    std::vector<GpuSlot> pool;
+    size_t poolNext = 0;
+    uint64_t lastReadGen = 0; // giữ cho log/diag
 };
 
 struct VertexAttrib {
@@ -77,12 +91,28 @@ struct TextureObject {
     GLenum internalFormat = 0x8058; // RGBA8
     uint32_t w = 0, h = 0, d = 0;
     std::vector<uint8_t> pixels;    // base level shadow (đủ cho unit test readback)
+    // Mip levels >0 (vanilla 26.x alloc + upload MỌI level qua TexImage/SubImage
+    // per-level: GlDevice.createTexture + MipmapGenerator). GPU hiện giữ base
+    // level duy nhất (non-mipmapped) nên các level này chỉ sống trong shadow để
+    // GetTexImage(level>0)/CPU fallback đúng + sẵn sàng cho mipmapped sau này.
+    struct MipLevel {
+        GLsizei w = 0, h = 0;
+        std::vector<uint8_t> pixels; // tight RGBA8 4B (w*h*4), rỗng = chưa upload
+    };
+    std::map<GLint, MipLevel> mipData; // level (>=1) -> shadow
     // Cubemap (panorama menu): 6 faces shadow riêng. GPU hiện dùng face 0 làm
     // placeholder 2D (cube Metal + sample vec3 là P1, xem limits.md).
     bool isCube = false;
     std::vector<uint8_t> faces[6];
+    // Diag: TỪNG LÀ color attachment của FBO (GuiItemAtlas bake etc) — nội dung
+    // đến từ render, CPU shadow luôn rỗng → probe iconatlas# đọc GPU trực tiếp.
+    bool wasRT = false;
     std::unordered_map<GLenum, GLint> params; // MIN_FILTER/WRAP_S/...
     std::shared_ptr<metal::ITexture> gpu;
+    // Như BufferObject::lastReadGen — encoder đã commit nhưng GPU chưa execute
+    // (lastReadGen == Context::waitGen) → ghi replaceRegion sẽ đổi nội dung
+    // mà draw cũ đang sample (in-flight write).
+    uint64_t lastReadGen = 0;
 };
 
 struct SamplerObject {
@@ -142,6 +172,10 @@ struct ProgramObject {
     // Loại sampler theo tên ('2' 2D, 'C' cube, 'A' array, 'S' shadow, 'B' buffer)
     // để AppleDrawGL bỏ bind khi texture target không khớp (tránh abort Metal).
     std::unordered_map<std::string, char> samplerKind;
+    // Tag program entity_shadow (Fix #6): DT+Fog+Proj, 1 fs 2D Sampler0, không
+    // vs sampler. AppleDrawGL dùng để bắt draw sample sai texture (quads bóng
+    // thấy texture gà) + dump texring tại chỗ.
+    bool shadowLike = false;
     // Uniform blocks (UBO read-only, vanilla 1.17+ / Sodium): tên → index/binding.
     // index là thứ tự khai báo gộp vs+fs (ổn định), binding từ glUniformBlockBinding
     // (mặc định 0). Buffer thật từ Context::uniformBindPoints[binding].
@@ -149,6 +183,7 @@ struct ProgramObject {
         std::string name;
         GLuint index = 0;
         GLuint binding = 0;
+        int layoutBinding = -1; // layout(binding=N) trong GLSL (-1 = không có)
         bool isVS = true;
         // Kích thước struct thật (end offset lớn nhất, KHÔNG pad 16 cuối) để
         // phát hiện buffer thiếu (misbound) trước khi bind GPU (A11 fault OOB).
@@ -165,7 +200,12 @@ struct ProgramObject {
 struct FramebufferObject {
     GLuint id = 0;
     std::unordered_map<GLenum, GLuint> colorTex; // attachment -> texture id
+    // Mip level của từng attachment (vanilla 26.x bake animation per-mip qua
+    // GlTextureView(texture, baseMipLevel, 1) + bindFrameBufferTextures(..., level)).
+    // Bỏ qua level (luôn 0) làm mọi mip bake alias level 0 → smear atlas.
+    std::unordered_map<GLenum, GLint> colorLevel; // attachment -> mip level (mặc định 0)
     GLuint depthTex = 0, stencilTex = 0, depthStencilTex = 0;
+    GLint depthLevel = 0, stencilLevel = 0, depthStencilLevel = 0;
     GLsizei w = 0, h = 0;
     std::vector<GLenum> drawBuffers = {0x8CE0}; // GL_COLOR_ATTACHMENT0
 };
@@ -225,6 +265,9 @@ public:
     // M5b: draw Apple đầu tiên sau glClear dùng loadActionClear, các draw sau LOAD.
     bool applePendingClear = true; // draw đầu đời cũng clear (target mới, xác định)
     GLbitfield appleClearMask = 0xFFFFFFFFu;
+    // FBO đang bound khi glClear gọi (0xFFFFFFFF = wildcard do Renderer tự set
+    // cho target mới). So với draw tiêu thụ để lộ clear áp sai target (clrmiss#).
+    uint32_t appleClearFBO = 0xFFFFFFFFu;
     // Thống kê M5b cho HUD chẩn đoán trên máy (không cần debugger).
     struct AppleStats {
         uint64_t drawsAttempted = 0; // số lần EmitDraw gọi AppleDrawGL
@@ -239,7 +282,24 @@ public:
         uint64_t rangeWarn = 0;      // draw đọc đỉnh/index vượt buffer (TBDR fault?)
         uint64_t hazardWarn = 0;     // draw vừa render vừa sample cùng texture
         uint64_t mipBase = 0;        // sampler 1-level + minfilter mipmap → base (fix A11)
+        uint64_t mipLevelSkipped = 0; // draw/clear vào mip level>0 của texture 1-level (animate bake) → bỏ qua an toàn
+        uint64_t mipStaged = 0;      // TexSubImage level>0 đã lưu shadow (GPU base-level không sync)
         uint64_t uboSmall = 0;       // UBO buffer thiếu so với struct → zero fallback (chống fault)
+        // In-flight write: GPU còn đang đọc shared memory này khi app ghi lại →
+        // phải xoay sang buffer pool slot khác (thay vì alloc MTLBuffer mới).
+        uint64_t bufRotated = 0;     // số lần xoay pool slot
+        uint64_t texRotated = 0;     // số lần texture phải chờ/giữ
+        uint64_t framesThrottled = 0;// số lần buộc chờ vì vượt ngân sách frame
+        uint64_t cbCommittedNow = 0, cbCompletedNow = 0; // mirror counter để log
+        uint64_t presentPasses = 0;  // số lần present bằng 1 render pass (flip)
+        uint64_t clearRegionFails = 0; // fillRegionColor fail (KHÔNG được xoá cả atlas)
+        // Chống in-flight write: ghi shadow→GPU vào buffer/texture mà encoder đã
+        // commit nhưng GPU chưa execute (commitAndWait chưa chạy).
+        uint64_t bufOrphan = 0;      // flush phải orphan (tạo MTLBuffer mới) thay vì ghi tại chỗ
+        uint64_t bufWaitStall = 0;   // flush buffer quá lớn → commitAndWait ( stall, hiếm )
+        uint64_t uboFromMap = 0;     // UBO đọc từ gpu->contents() vì buffer đang mapped
+        uint64_t texWasRTFlush = 0;  // flush staging trên texture wasRT (nội dung chỉ trên GPU)
+        uint64_t texWaitStall = 0;   // flush texture in-flight → commitAndWait trước khi ghi
         // IR lowering stats (chứng minh 1 GL → 0 Metal khi không đổi):
         uint64_t encodersCreated = 0; // số MTLRenderCommandEncoder đã tạo (muốn << draws)
         uint64_t encoderReused = 0;   // số draw tái dùng encoder đang mở (batching)
@@ -317,10 +377,15 @@ public:
         bool depth = false;
         bool blend = false;
         metal::AttachmentBlend blend0;
-        std::vector<metal::CustomAttrib> attribs;
+        uint32_t colorWriteMask = 0xF;
+        // Mảng cố định (tối đa 16 attrib theo GL): tránh vector + cấp phát lại
+        // mỗi draw khi so sánh pipeline key.
+        uint32_t nAttribs = 0;
+        metal::CustomAttrib attribs[16] = {};
         bool operator==(const PipelineKey& o) const {
             if (vsLib != o.vsLib || fsLib != o.fsLib || fmt != o.fmt ||
-                stride != o.stride || depth != o.depth || blend != o.blend)
+                stride != o.stride || depth != o.depth || blend != o.blend ||
+                colorWriteMask != o.colorWriteMask)
                 return false;
             if (blend) {
                 if (blend0.enabled != o.blend0.enabled || blend0.srcRGB != o.blend0.srcRGB ||
@@ -329,8 +394,8 @@ public:
                     blend0.alphaOp != o.blend0.alphaOp)
                     return false;
             }
-            if (attribs.size() != o.attribs.size()) return false;
-            for (size_t i = 0; i < attribs.size(); ++i) {
+            if (nAttribs != o.nAttribs) return false;
+            for (uint32_t i = 0; i < nAttribs; ++i) {
                 const auto& a = attribs[i];
                 const auto& b = o.attribs[i];
                 if (a.loc != b.loc || a.size != b.size || a.type != b.type ||
@@ -373,12 +438,53 @@ public:
     // DiagOn: chỉ bật diagnostic nặng (fprintf/readback/scan) khi env TGLMT_DIAG=1.
     // Release/Minecraft thật: tắt để giữ 60fps, vẫn giữ LogDebug callback.
     bool DiagOn();
+    // ---- TexBind ring (Fix #6: chẩn đoán bind divergence từ xa) ----
+    // Ghi mọi glActiveTexture/glBindTexture/glBindTextureUnit/glBindTextures/
+    // glGenTextures/glDeleteTextures (1 dòng/call, không alloc). Dump khi bind
+    // id chưa có trong registry (bindheal#) hoặc draw shadow-like sample sai
+    // texture (shadowmis#/shadowsig#) → thấy ngay call nào làm unit trỏ sai.
+    struct TexBindRec { uint64_t seq; char op; GLuint unit; GLuint tex; GLenum target; };
+    static constexpr int kTexRingN = 96;
+    TexBindRec texRing[kTexRingN] = {};
+    uint32_t texRingHead = 0, texRingCount = 0;
+    uint64_t texRingSeq = 0;
+    void RecordTexBind(char op, GLuint unit, GLuint tex, GLenum target) {
+        TexBindRec& r = texRing[texRingHead];
+        r.seq = ++texRingSeq; r.op = op; r.unit = unit; r.tex = tex; r.target = target;
+        texRingHead = (texRingHead + 1) % kTexRingN;
+        if (texRingCount < kTexRingN) ++texRingCount;
+    }
+    void DumpTexBindRing(const char* tag); // impl Context.cpp (oldest → newest)
     // Tài nguyên đã dùng trong pass đang mở (để conditional-flush: stage không
     // liên quan thì KHÔNG phá batching). Ghi nhận ở AppleDrawGL khi bind.
-    std::unordered_map<GLuint, uint64_t> pendingUsedBuffers;  // buf id -> frameSeq dùng
-    std::unordered_map<GLuint, uint64_t> pendingUsedTextures; // tex id -> frameSeq dùng
+    // Vector + linear find thay unordered_map: số phần tử rất nhỏ (vài chục
+    // buffer của 1 pass) nên unordered_map chỉ thêm malloc/free mỗi draw.
+    struct UsedRec { uint32_t id = 0; };
+    std::vector<UsedRec> pendingUsedBuffers;
+    std::vector<UsedRec> pendingUsedTextures;
     void NoteBufferUsed(GLuint buf);
     void NoteTextureUsed(GLuint tex);
+    static bool UsedHas(const std::vector<UsedRec>& v, GLuint id) {
+        for (const auto& r : v) if (r.id == id) return true;
+        return false;
+    }
+    // ---- FBO wrap cache ----
+    // device->wrapAsTarget() cấp phát 1 AppleTarget mới + mutex + set lookup mỗi
+    // draw (và takeDepthInit phải tra mỗi lần). Cache theo (fbo, colorTex, depthTex)
+    // + gen (gen tăng khi texture/FBO bị xoá) cho phép tái dùng target đang mở.
+    struct WrapEntry {
+        uint64_t gen = 0;
+        GLuint fbo = 0;
+        const metal::ITexture* col = nullptr;
+        const metal::ITexture* dep = nullptr;
+        std::shared_ptr<metal::IRenderTarget> tgt;
+    };
+    static constexpr int kWrapCacheN = 4;
+    WrapEntry wrapCache[kWrapCacheN];
+    uint32_t wrapNext = 0;
+    uint64_t objectGen = 1; // tăng khi texture/FBO bị xoá hoặc resize
+    std::shared_ptr<metal::IRenderTarget> WrapTarget(GLuint fbo, metal::ITexture* col,
+                                                     metal::ITexture* dep);
     // True nếu stage buffer/tex này bắt buộc flush encoder đang mở (đã dùng
     // trong pass). False → chỉ stage, giữ batching (đếm flushAvoided).
     bool MustFlushForBufferStage(GLuint buf);
@@ -394,6 +500,29 @@ public:
     uint64_t frameSeq = 0; // tăng mỗi EndFrame/NextFrame (triple-buffer rotation)
     std::pair<metal::IBuffer*, size_t> RingAlloc(size_t n, size_t align = 256);
     void NextFrame(); // xoay ring + tăng frameSeq (gọi ở BeginFrame/EndFrame)
+    // commitAndWait bọc lại để đếm "thế hệ GPU đã kịp execute". Mọi site
+    // device->commitAndWait() PHẢI qua đây, nếu không waitGen không tăng và
+    // FlushBufferStaging sẽ orphan thừa (đúng nhưng chậm).
+    void CommitAndWait();
+    uint64_t waitGen = 1; // tăng mỗi lần GPU đã execute xong mọi command đã commit
+    // ---- In-flight tracking (thay cho waitGen mỗi frame) ----
+    // AppleDevice tăng cbCommitted mỗi [commandBuffer commit] và cbCompleted trong
+    // addCompletedHandler. Một queue Metal thực thi IN ORDER ⇒ cbCompleted ==
+    // số việc đã xong; chênh lệch = số frame việc đang bay.
+    // In-flight write (ghi đè shared memory GPU đang đọc) chỉ xảy ra khi
+    // GpuBusy(); buffer lúc đó xoay sang pool slot khác thay vì alloc mới.
+    std::atomic<uint64_t> cbCommitted{0}; // Metal command buffer đã commit
+    std::atomic<uint64_t> cbCompleted{0}; // Metal command buffer đã execute xong
+    bool GpuBusy() const {
+        return cbCommitted.load(std::memory_order_relaxed) >
+               cbCompleted.load(std::memory_order_relaxed);
+    }
+    // Số frame trong flight tối đa trước khi buộc chờ (bảo vệ target/buffer pool).
+    static constexpr uint32_t kMaxFramesInFlight = 2;
+    // Chặn CPU chỉ khi vượt ngân sách frame đang bay. Trước đây SwapBuffers
+    // commitAndWait() MỖI frame → CPU/GPU nối tiếp (mất pipeline, +2 frame
+    // input latency → lia cam nhanh thấy model đứng lại). Giờ chỉ chặn khi cần.
+    void ThrottleGpu();
     // PSO prewarm (Phase 4): dựng trước pipeline cho program đã link để frame
     // đầu không hitch giây. Trả true nếu đã đảm bảo pipeline tồn tại.
     bool PrewarmPipelineForProgram(GLuint prog);

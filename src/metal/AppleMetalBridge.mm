@@ -8,10 +8,12 @@
 #import <QuartzCore/CAMetalLayer.h> // presentTarget (cả iOS lẫn macOS đều có QuartzCore)
 #import <TargetConditionals.h> // phân biệt iOS/macOS: synchronizeResource chỉ tồn tại trên macOS
 #include "tglmt/MetalInterface.h"
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 
 namespace tglmt::metal {
@@ -35,6 +37,11 @@ static MTLPixelFormat ToMTL(PixelFormat f) {
         case PixelFormat::R32Float: return MTLPixelFormatR32Float;
         case PixelFormat::R32Sint: return MTLPixelFormatR32Sint;
         case PixelFormat::R32Uint: return MTLPixelFormatR32Uint;
+        case PixelFormat::R8Sint: return MTLPixelFormatR8Sint;
+        case PixelFormat::R8Uint: return MTLPixelFormatR8Uint;
+        case PixelFormat::R16Sint: return MTLPixelFormatR16Sint;
+        case PixelFormat::R16Uint: return MTLPixelFormatR16Uint;
+        case PixelFormat::R16Float: return MTLPixelFormatR16Float;
         case PixelFormat::Depth32Float: return MTLPixelFormatDepth32Float;
 #if TARGET_OS_OSX
         case PixelFormat::Depth24Stencil8: return MTLPixelFormatDepth24Unorm_Stencil8;
@@ -133,10 +140,28 @@ private:
     id<MTLBuffer> buf_;
 };
 
+// Tập depth texture đã qua first-clear (per-texture, sống theo device +
+// mọi AppleTexture depth còn giữ ref → không UAF, không leak cross-test).
+struct DepthInitSet {
+    std::mutex mu;
+    std::set<void*> inited;
+};
+
 class AppleTexture : public ITexture {
 public:
     AppleTexture(id<MTLTexture> t, uint32_t w, uint32_t h, PixelFormat f)
         : tex_(t), w_(w), h_(h), f_(f) {}
+    // Depth Private khởi đầu rác: device nhớ texture nào đã init (per-texture,
+    // không per-wrapper — wrapper tạo mới mỗi draw nên flag trên wrapper sai
+    // thành force-clear mọi encoder mới = mất depth giữa frame = X-RAY).
+    // Giữ shared_ptr tới set để an toàn teardown (device có thể chết trước).
+    ~AppleTexture() {
+        if (depthInitSet_ && tex_) {
+            std::lock_guard<std::mutex> l(depthInitSet_->mu);
+            depthInitSet_->inited.erase((__bridge void*)tex_);
+        }
+    }
+    void trackDepthInit(std::shared_ptr<struct DepthInitSet> s) { depthInitSet_ = s; }
     uint32_t width() const override { return w_; }
     uint32_t height() const override { return h_; }
     PixelFormat pixelFormat() const override { return f_; }
@@ -148,6 +173,7 @@ private:
     id<MTLTexture> tex_;
     uint32_t w_, h_;
     PixelFormat f_;
+    std::shared_ptr<struct DepthInitSet> depthInitSet_;
 };
 
 class AppleLibrary : public ILibrary {
@@ -242,9 +268,10 @@ private:
 class AppleTarget : public IRenderTarget {
 public:
     AppleTarget(id<MTLTexture> color, PixelFormat fmt, id<MTLTexture> resolve,
-                id<MTLTexture> depth, uint32_t w, uint32_t h, bool msaa)
+                id<MTLTexture> depth, uint32_t w, uint32_t h, bool msaa,
+                bool depthFirstClear)
         : color_(color), fmt_(fmt), resolve_(resolve ? resolve : color), depth_(depth),
-          w_(w), h_(h), msaa_(msaa) {}
+          w_(w), h_(h), msaa_(msaa), depthFirstClear_(depthFirstClear) {}
     PixelFormat pixelFormat() const override { return fmt_; }
     uint32_t width() const override { return w_; }
     uint32_t height() const override { return h_; }
@@ -260,6 +287,7 @@ public:
     id<MTLTexture> resolve() const { return resolve_; }
     id<MTLTexture> depth() const { return depth_; }
     bool isMSAA() const { return msaa_; }
+    bool hasDepth() const override { return depth_ != nil; }
     // Depth Private khởi đầu rác → lần đầu dùng phải Clear (sau đó theo loadAction).
     bool takeDepthFirstClear() {
         bool r = depth_ && depthFirstClear_;
@@ -297,11 +325,15 @@ public:
         std::mutex mu;
         std::string lastCtx;
         bool firstErrLogged = false;
+        int faultLogs = 0;
     };
     AppleRenderEncoder(id<MTLCommandBuffer> cb, id<MTLRenderCommandEncoder> enc,
                        id<MTLTexture> target, LogFn log = nullptr,
-                       std::shared_ptr<SharedDiag> diag = nullptr)
-        : cb_(cb), enc_(enc), target_(target), log_(log), diag_(diag), ok_(cb && enc) {}
+                       std::shared_ptr<SharedDiag> diag = nullptr,
+                       std::atomic<uint64_t>* committed = nullptr,
+                       std::atomic<uint64_t>* completed = nullptr)
+        : cb_(cb), enc_(enc), target_(target), log_(log), diag_(diag),
+          countCommitted_(committed), countCompleted_(completed), ok_(cb && enc) {}
     void setViewport(const Viewport& vp) override {
         if (!ok_) return;
         MTLViewport m = {vp.x, vp.y, vp.w, vp.h, vp.n, vp.f};
@@ -418,19 +450,26 @@ public:
         if (!enc_ || !cb_) return false;
         [enc_ endEncoding];
         enc_ = nil;
-        // Chẩn đoán đen màn hình: GPU có thể error CB mà CPU không hay (A11).
-        // Bắt fault ĐẦU TIÊN kèm ngữ cảnh draw (prog/vao) rồi mới sample 1/120.
-        // (Ban submissions của iOS làm mọi CB sau đều status=5 "prior errors",
-        // che mất nguyên nhân gốc.)
+        // Đếm command buffer để Context biết còn frame nào đang bay (xem
+        // setCommandBufferCounters). Handler gắn cho MỌI commit: một queue Metal
+        // thực thi in-order nên completed là "đã xong tới đây". Không handler
+        // thì không biết khi nào an toàn ghi lại shared memory → phải
+        // commitAndWait mỗi frame (mất pipeline, +latency).
+        if (countCompleted_) {
+            std::atomic<uint64_t>* done = countCompleted_;
+            [cb_ addCompletedHandler:^(id<MTLCommandBuffer>) {
+                done->fetch_add(1, std::memory_order_relaxed);
+            }];
+        }
         {
-            static int nNoWait = 0;
-            ++nNoWait;
-            bool needFirst = false;
-            if (diag_) {
-                std::lock_guard<std::mutex> l(diag_->mu);
-                needFirst = !diag_->firstErrLogged;
-            }
-            if ((needFirst || (nNoWait % 120) == 0) && log_) {
+            // Chẩn đoán đen màn hình: GPU có thể error CB mà CPU không hay (A11).
+            // Bắt fault ĐẦU TIÊN kèm ngữ cảnh draw (prog/vao).
+            // (Ban submissions của iOS làm mọi CB sau đều status=5 "prior errors",
+            // che mất nguyên nhân gốc.)
+            // Bản cũ sample 1/120 → fault của bake encoder (hiếm, đúng cái cần)
+            // gần như luôn lọt. Block rẻ (~13 commit/frame); chỉ log khi fault:
+            // FIRST luôn log, sau đó cap 16 + 1/120 để không spam khi bị ban.
+            if (log_) {
                 LogFn log = log_;
                 std::shared_ptr<SharedDiag> diag = diag_;
                 [cb_ addCompletedHandler:^(id<MTLCommandBuffer> b) {
@@ -438,24 +477,31 @@ public:
                       NSString* e = [[b error] localizedDescription];
                       std::string ctx;
                       bool first = false;
+                      int n = 0;
                       if (diag) {
                           std::lock_guard<std::mutex> l(diag->mu);
                           ctx = diag->lastCtx;
                           first = !diag->firstErrLogged;
                           if (first) diag->firstErrLogged = true;
+                          n = ++diag->faultLogs;
                       }
-                      std::string msg = std::string(first ? "[TGLMT] FIRST drawCB fault ctx={" : "[TGLMT] drawCB status=") +
-                          (first ? ctx + "} status=" : "") +
-                          std::to_string((long)[b status]) + " err=" +
-                          (e ? [e UTF8String] : "?");
-                      log(msg);
+                      if (first || n <= 16 || (n % 120) == 0) {
+                          std::string msg = std::string(first ? "[TGLMT] FIRST drawCB fault ctx={" : "[TGLMT] drawCB status=") +
+                              (first ? ctx + "} status=" : "") +
+                              std::to_string((long)[b status]) + " err=" +
+                              (e ? [e UTF8String] : "?");
+                          log(msg);
+                      }
                   }
                 }];
             }
         }
+        NoteCommit();
         [cb_ commit];
         return ok_;
     }
+    void setCompletedCounter(std::atomic<uint64_t>* c) { countCompleted_ = c; }
+    void noteCommit() { NoteCommit(); }
     bool endAndCommit() override {
         if (!enc_ || !cb_) return false;
         [enc_ endEncoding];
@@ -471,11 +517,16 @@ public:
         return ok_ && [cb_ status] == MTLCommandBufferStatusCompleted;
     }
 private:
+    void NoteCommit() {
+        if (countCommitted_) countCommitted_->fetch_add(1, std::memory_order_relaxed);
+    }
     id<MTLCommandBuffer> cb_;
     id<MTLRenderCommandEncoder> enc_;
     id<MTLTexture> target_;
     LogFn log_;
     std::shared_ptr<SharedDiag> diag_;
+    std::atomic<uint64_t>* countCommitted_ = nullptr;
+    std::atomic<uint64_t>* countCompleted_ = nullptr;
     bool ok_;
 };
 
@@ -506,6 +557,16 @@ public:
         return b ? std::make_shared<AppleBuffer>(b) : nullptr;
     }
     std::shared_ptr<ITexture> newTexture(uint32_t w, uint32_t h, PixelFormat f) override {
+        // Guard: validateWithDevice THIẾU width/height quá max là abort không
+        // catch được (đã crash thật: buffer texture width 710178 > 16384).
+        // MTLDevice không expose maxTextureDimension2D → mọi Apple GPU A9+ = 16384.
+        const NSUInteger maxD = 16384;
+        if (w == 0 || h == 0 || w > maxD || h > maxD) {
+            if (log_)
+                log_("TGLMT: newTexture " + std::to_string(w) + "x" + std::to_string(h) +
+                     " vuot Metal max (" + std::to_string(maxD) + ") → bỏ qua");
+            return nullptr;
+        }
         MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:ToMTL(f)
                                             width:w height:h mipmapped:NO];
         // Integer/float-buffer textures chỉ đọc (.read), không render target
@@ -514,12 +575,26 @@ public:
             d.usage = MTLTextureUsageShaderRead;
         else
             d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-        d.storageMode = MTLStorageModeShared;
+        // Depth/Stencil CẤM Shared/Managed (validateWithDevice abort — đã crash
+        // thật khi glTexImage2D DEPTH_COMPONENT32F). Giống newDepthTexture: Private.
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            d.storageMode = MTLStorageModePrivate;
+        else
+            d.storageMode = MTLStorageModeShared;
         id<MTLTexture> t = [dev_ newTextureWithDescriptor:d];
-        return t ? std::make_shared<AppleTexture>(t, w, h, f) : nullptr;
+        if (!t) return nullptr;
+        auto tex = std::make_shared<AppleTexture>(t, w, h, f);
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            tex->trackDepthInit(depthInit_);
+        return tex;
     }
     std::shared_ptr<IEncoder> makeEncoder() override {
         return std::make_shared<TraceEncoder>(trace_);
+    }
+    void setCommandBufferCounters(std::atomic<uint64_t>* committed,
+                                  std::atomic<uint64_t>* completed) override {
+        cbCommitted_ = committed;
+        cbCompleted_ = completed;
     }
     void commitAndWait() override {
         // Barrier thật: commit rỗng + đợi → xả hết draws NoWait trước đó (cho
@@ -527,6 +602,11 @@ public:
         if (!queue_) return;
         id<MTLCommandBuffer> cb = [queue_ commandBuffer];
         if (!cb) return;
+        if (cbCompleted_)
+            [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+                cbCompleted_->fetch_add(1, std::memory_order_relaxed);
+            }];
+        NoteCommit(cb);
         [cb commit];
         [cb waitUntilCompleted];
         // Chẩn đoán đen màn hình: CPU-side đếm encode đủ mà GPU không chạy gì
@@ -677,14 +757,31 @@ public:
     std::shared_ptr<IRenderTarget> makeRenderTarget(uint32_t w, uint32_t h, PixelFormat f) override {
         auto t = std::dynamic_pointer_cast<AppleTexture>(newTexture(w, h, f));
         if (!t) return nullptr;
-        return std::make_shared<AppleTarget>(t->get(), f, nil, nil, w, h, false);
+        return std::make_shared<AppleTarget>(t->get(), f, nil, nil, w, h, false, false);
+    }
+    // Depth first-clear PER-TEXTURE (không per-wrapper): wrapper tạo mới mỗi
+    // draw mà flag ở wrapper thì mọi encoder mới đều force-clear depth → mất
+    // occlusion giữa frame (mây/nước/entity nhìn xuyên tường = X-RAY).
+    bool takeDepthInit(id<MTLTexture> t) {
+        if (!t) return false;
+        std::lock_guard<std::mutex> l(depthInit_->mu);
+        void* key = (__bridge void*)t;
+        if (depthInit_->inited.count(key)) return false;
+        depthInit_->inited.insert(key);
+        return true;
     }
     std::shared_ptr<IRenderTarget> wrapAsTarget(ITexture* color, ITexture* depth) override {
         AppleTexture* c = dynamic_cast<AppleTexture*>(color);
-        if (!c) return nullptr;
         AppleTexture* d = dynamic_cast<AppleTexture*>(depth);
+        if (!c && !d) return nullptr;
+        // Depth-only FBO (clearDepthTexture: glFramebufferTexture2D color=0) →
+        // target không color; makeClearEncoder gắn depth-attachment không color.
+        if (!c) return std::make_shared<AppleTarget>(nil, d->pixelFormat(), nil, d->get(),
+                                                     d->width(), d->height(), false,
+                                                     takeDepthInit(d->get()));
         return std::make_shared<AppleTarget>(c->get(), c->pixelFormat(), nil,
-                                             d ? d->get() : nil, c->width(), c->height(), false);
+                                             d ? d->get() : nil, c->width(), c->height(), false,
+                                             d ? takeDepthInit(d->get()) : false);
     }
     void setDefaultRenderTarget(std::shared_ptr<IRenderTarget> t) override { defaultTarget_ = t; }
     std::shared_ptr<IRenderTarget> defaultRenderTarget() override { return defaultTarget_; }
@@ -694,11 +791,15 @@ public:
         CAMetalLayer* layer = (__bridge CAMetalLayer*)metalLayer;
         @try {
             id<CAMetalDrawable> drawable = [layer nextDrawable];
-            if (!drawable) return false;
+            if (!drawable) {
+                if (log_) log_("presentTarget: nextDrawable nil (layer chưa vào window?)");
+                return false;
+            }
             id<MTLCommandBuffer> cb = [queue_ commandBuffer];
-            if (!cb) return false;
-            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-            if (!blit) return false;
+            if (!cb) {
+                if (log_) log_("presentTarget: commandBuffer nil");
+                return false;
+            }
             // Copy min(target, drawable) — lệch size (xoay màn hình) thì letterbox
             // phần còn lại thay vì overrun validation. Cùng RGBA8Unorm.
             NSUInteger dw = drawable.texture.width, dh = drawable.texture.height;
@@ -726,16 +827,104 @@ public:
                 fflush(stderr);
                 return false;
             }
-            MTLOrigin origin = {0, 0, 0};
-            MTLSize size = {cw, ch, 1};
-            [blit copyFromTexture:at->resolve()
-                      sourceSlice:0 sourceLevel:0 sourceOrigin:origin sourceSize:size
-                        toTexture:drawable.texture destinationSlice:0 destinationLevel:0
-                   destinationOrigin:origin];
-            [blit endEncoding];
+            // Memory target = GL-order (hàng 0 = đáy GL); drawable hàng 0 = trên
+            // màn hình → present phải LẬT DỌC.
+            // Bản cũ: loop từng hàng (1242 lệnh copyFromTexture / frame ở
+            // 2208x1242) — mỗi lệnh là 1 blit command có setup cost riêng nên
+            // nuốt phần lớn frame time trên A11 (đo được ~90ms/frame).
+            // Nay: 1 render pass + 1 fullscreen triangle lấy texture với v đảo —
+            // ~1 draw thay vì ~1242 blit.
+            if (!EnsureFlipPipeline(at->pixelFormat())) {
+                // Fallback: blit từng hàng (chậm hơn nhiều nhưng LUÔN đúng hình).
+                // Chỉ xảy ra nếu Metal từ chối shader flip — không bao giờ màn đen.
+                if (log_) log_("presentTarget: flip pipeline unavailable → row blit");
+                return PresentRowBlit(cb, at, drawable, cw, ch);
+            }
+            MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = drawable.texture;
+            rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            if (!enc) return false;
+            [enc setRenderPipelineState:flipPipe_];
+            MTLViewport vp = {0.0, 0.0, (double)dw, (double)dh, 0.0, 1.0};
+            [enc setViewport:vp];
+            [enc setFragmentTexture:at->resolve() atIndex:0];
+            if (flipSampler_) [enc setFragmentSamplerState:flipSampler_ atIndex:0];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding];
+            // Đọc texture TRƯỚC present: sau present, drawable.texture là
+            // không hợp lệ (log "should not be called after already presenting").
+            id<MTLTexture> dtex = drawable.texture;
             [cb presentDrawable:drawable];
+            // Handler + đếm cho MỌI frame present (không chỉ 3 frame probe):
+            // thiếu → cbCommitted - cbCompleted âm/dương sai, ThrottleGpu phải
+            // CommitAndWait mỗi frame.
+            if (cbCompleted_)
+                [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+                    cbCompleted_->fetch_add(1, std::memory_order_relaxed);
+                }];
+            NoteCommit(cb);
+            // PHẢI commit ở đây cho mọi frame. Nhánh probe trước đây nuốt
+            // commit → frame ≥ 4 không bao giờ present (màn đóng băng đúng
+            // loading frame 3) và drawable giữ bởi CB không commit làm
+            // nextDrawable chặn vô hạn → treo hình.
             [cb commit];
-            // Không wait (benchmark cần throughput); frame tiếp theo đồng bộ qua drawable.
+            // Tự kiểm: 3 frame đầu, đọc ngược 1 pixel giữa drawable sau khi
+            // GPU xong và so với pixel nguồn. Nếu lệch (hoặc đen) thì flip
+            // hỏng trên máy này → log rõ thay vì chỉ hiện "màn đen" giống
+            // nhau. Chỉ 3 lần, không ảnh hưởng throughput.
+            const bool probe = (presentProbe_ < 3);
+            if (probe) {
+                [cb waitUntilCompleted];
+                ++presentProbe_;
+                uint8_t got[4] = {0, 0, 0, 0}, want[4] = {0, 0, 0, 0}, notWant[4] = {0, 0, 0, 0};
+                // Drawable row 0 = trên; nguồn row 0 = đáy GL ⇒ điểm ở giữa
+                // drawable phải khớp pixel ở hàng ĐẢO của nguồn.
+                NSUInteger hSrc = (NSUInteger)at->height(), wSrc = (NSUInteger)at->width();
+                NSUInteger sy = (hSrc > 1) ? (hSrc - 1 - (NSUInteger)(dh / 2)) : 0;
+                NSUInteger sx = (wSrc > 1) ? (NSUInteger)(dw / 2) : 0;
+                if (sx >= wSrc) sx = wSrc - 1;
+                if (sy >= hSrc) sy = hSrc - 1;
+                @try {
+                    [dtex getBytes:got bytesPerRow:4
+                         fromRegion:MTLRegionMake2D((NSUInteger)(dw / 2), (NSUInteger)(dh / 2), 1, 1)
+                      mipmapLevel:0];
+                    [at->resolve() getBytes:want bytesPerRow:4
+                                fromRegion:MTLRegionMake2D(sx, sy, 1, 1) mipmapLevel:0];
+                    // cùng cách nhưng KHÔNG lật → phải KHÁC (nếu bằng nhau thì
+                    // flip không làm gì).
+                    NSUInteger ny = (hSrc > 1) ? (NSUInteger)(dh / 2) : 0;
+                    if (ny >= hSrc) ny = hSrc - 1;
+                    [at->resolve() getBytes:notWant bytesPerRow:4
+                                fromRegion:MTLRegionMake2D(sx, ny, 1, 1) mipmapLevel:0];
+                } @catch (NSException*) {}
+                // Chỉ kết luận "flip hỏng" khi drawable ĐEN trong khi nguồn có
+                // màu: đó đúng là triệu chứng màn đen. Không so trung tâm ảnh
+                // (gradient nên ±1 mức xanh là bình thường và gây báo động giả
+                // → tự ép về row-blit chậm).
+                const bool drawableBlack = (got[0] | got[1] | got[2] | got[3]) == 0;
+                const bool srcHasColor = (want[0] | want[1] | want[2] | want[3]) != 0;
+                const bool ok = !(drawableBlack && srcHasColor);
+                if (log_) {
+                    char b[224];
+                    snprintf(b, sizeof(b),
+                             "[TGLMT] presentflipcheck drawable=(%u,%u,%u,%u) "
+                             "src-mirror=(%u,%u,%u,%u) src-plain=(%u,%u,%u,%u) -> %s",
+                             got[0], got[1], got[2], got[3], want[0], want[1], want[2],
+                             want[3], notWant[0], notWant[1], notWant[2], notWant[3],
+                             ok ? "OK (flip dung)"
+                                : (got[0] == notWant[0] && got[1] == notWant[1])
+                                      ? "KHONG FLIP -> row blit"
+                                      : "MA THAY -> row blit");
+                    log_(b);
+                }
+                if (!ok) {
+                    flipFmt_ = 0; // ép fallback ở các frame sau
+                    flipPipe_ = nil;
+                }
+                return true;
+            }
             return true;
         } @catch (NSException*) { return false; }
     }
@@ -757,7 +946,10 @@ public:
         d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         d.storageMode = MTLStorageModePrivate; // depth không readback trực tiếp
         id<MTLTexture> t = [dev_ newTextureWithDescriptor:d];
-        return t ? std::make_shared<AppleTexture>(t, w, h, f) : nullptr;
+        if (!t) return nullptr;
+        auto tex = std::make_shared<AppleTexture>(t, w, h, f);
+        tex->trackDepthInit(depthInit_);
+        return tex;
     }
     std::shared_ptr<IRenderTarget> makeRenderTargetWithDepth(uint32_t w, uint32_t h,
             PixelFormat colorFmt) override {
@@ -765,7 +957,8 @@ public:
         auto dep = std::dynamic_pointer_cast<AppleTexture>(
             newDepthTexture(w, h, PixelFormat::Depth32Float));
         if (!c || !dep) return nullptr;
-        return std::make_shared<AppleTarget>(c->get(), colorFmt, nil, dep->get(), w, h, false);
+        return std::make_shared<AppleTarget>(c->get(), colorFmt, nil, dep->get(), w, h, false,
+                                             true /* fresh depth */);
     }
     std::shared_ptr<IRenderTarget> makeMSAATarget(uint32_t w, uint32_t h, uint32_t samples) override {
         if (samples < 2) return makeRenderTarget(w, h, PixelFormat::RGBA8Unorm);
@@ -779,7 +972,8 @@ public:
         auto res = std::dynamic_pointer_cast<AppleTexture>(
             newTexture(w, h, PixelFormat::RGBA8Unorm));
         if (!msaa || !res) return nullptr;
-        return std::make_shared<AppleTarget>(msaa, PixelFormat::RGBA8Unorm, res->get(), nil, w, h, true);
+        return std::make_shared<AppleTarget>(msaa, PixelFormat::RGBA8Unorm, res->get(), nil, w, h, true,
+                                             false /* MSAA không depth */);
     }
     std::shared_ptr<IRenderPipeline> makeMSAAPipeline(ILibrary* vsLib, const char* vsFn,
             ILibrary* fsLib, const char* fsFn, PixelFormat fmt, uint32_t samples) override {
@@ -839,6 +1033,11 @@ public:
             [blit copyFromTexture:s sourceSlice:0 sourceLevel:0 sourceOrigin:so sourceSize:ss
                         toTexture:d destinationSlice:0 destinationLevel:0 destinationOrigin:dd];
             [blit endEncoding];
+            if (cbCompleted_)
+                [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+                    cbCompleted_->fetch_add(1, std::memory_order_relaxed);
+                }];
+            NoteCommit(cb);
             [cb commit];
             [cb waitUntilCompleted];
             return [cb status] == MTLCommandBufferStatusCompleted;
@@ -1086,7 +1285,9 @@ public:
                    std::to_string(attribs[i].stride) + ";";
         bool useDepth = opts && opts->depth;
         bool useBlend = opts && opts->blend;
+        uint32_t writeMask = opts ? opts->colorWriteMask : 0xFu;
         key += useDepth ? "D" : "-";
+        key += "W" + std::to_string(writeMask);
         if (useBlend) {
             const AttachmentBlend& b = opts->blend0;
             key += "B" + std::to_string(b.srcRGB) + "," + std::to_string(b.dstRGB) + "," +
@@ -1106,6 +1307,8 @@ public:
         d.vertexDescriptor = vd;
         d.colorAttachments[0].pixelFormat = ToMTL(fmt);
         if (useDepth) d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        // glColorMask bits R=1 G=2 B=4 A=8 khớp MTLColorWriteMask (Red=1 ...).
+        d.colorAttachments[0].writeMask = (MTLColorWriteMask)(writeMask & 0xFu);
         if (useBlend) {
             const AttachmentBlend& b = opts->blend0;
             d.colorAttachments[0].blendingEnabled = YES;
@@ -1170,7 +1373,12 @@ public:
         // A11 không fetch LOD>0 (fault/đen với minfilter mipmap).
         d.mipFilter = sd.noMip ? MTLSamplerMipFilterNotMipmapped : MTLSamplerMipFilterLinear;
         d.maxAnisotropy = (NSUInteger)(sd.maxAniso >= 1.0f ? sd.maxAniso : 1);
-        d.lodMinClamp = 0.0f; d.lodMaxClamp = 1000.0f;
+        // LOD clamp theo GL_TEXTURE_MIN_LOD/MAX_LOD (sampler) + BASE/MAX_LEVEL
+        // (texture). Minecraft set MAX_LOD=0 cho sampler không mipmap và
+        // BASE/MAX_LEVEL=0 cho texture mỗi draw; bỏ qua thì Metal clamp 0..1000.
+        d.lodMinClamp = sd.lodMin < 0.0f ? 0.0f : sd.lodMin;
+        d.lodMaxClamp = sd.lodMax < d.lodMinClamp ? d.lodMinClamp : sd.lodMax;
+        if (sd.noMip) { d.lodMinClamp = 0.0f; d.lodMaxClamp = 0.0f; }
         id<MTLSamplerState> s = [dev_ newSamplerStateWithDescriptor:d];
         return s ? std::make_shared<AppleSampler>(s) : nullptr;
     }
@@ -1247,7 +1455,8 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_);
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_,
+                                                        cbCommitted_, cbCompleted_);
     }
     static MTLLoadAction ToMTLLoad(LoadOp o) {
         switch (o) {
@@ -1285,7 +1494,8 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_);
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_,
+                                                        cbCommitted_, cbCompleted_);
     }
     std::shared_ptr<IRenderEncoder> makeRenderEncoderLoad(IRenderTarget* target,
             IRenderPipeline* pipeline) override {
@@ -1313,12 +1523,273 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_);
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_,
+                                                        cbCommitted_, cbCompleted_);
+    }
+    // glClear immediate: clear-ONLY pass (không pipeline, không draw). Tôn trọng
+    // FBO đang bind; scissor truyền vào để test xác nhận loadAction có clip theo
+    // scissor_rect hay không (Metal spec mơ hồ — integration test tự kiểm).
+    std::shared_ptr<IRenderEncoder> makeClearEncoder(IRenderTarget* target,
+            const ClearColor& clear, double clearDepth, LoadOp colorLoad, LoadOp depthLoad,
+            const ScissorRect* scissor) override {
+        AppleTarget* at = dynamic_cast<AppleTarget*>(target);
+        if (!at || !queue_) return nullptr;
+        bool doColor = (colorLoad == LoadOp::Clear) && at->color();
+        bool doDepth = (depthLoad == LoadOp::Clear) && at->depth();
+        if (!doColor && !doDepth) return nullptr;
+        id<MTLCommandBuffer> cb = [queue_ commandBuffer];
+        if (!cb) return nullptr;
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        if (at->color()) {
+            rp.colorAttachments[0].texture = at->color();
+            rp.colorAttachments[0].loadAction =
+                doColor ? MTLLoadActionClear : MTLLoadActionLoad; // depth-only: giữ color
+            if (at->isMSAA()) {
+                rp.colorAttachments[0].resolveTexture = at->resolve();
+                rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+            } else {
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            }
+            rp.colorAttachments[0].clearColor =
+                MTLClearColorMake(clear.r, clear.g, clear.b, clear.a);
+        }
+        if (doDepth) {
+            rp.depthAttachment.texture = at->depth();
+            rp.depthAttachment.loadAction = MTLLoadActionClear;
+            rp.depthAttachment.storeAction = MTLStoreActionStore;
+            rp.depthAttachment.clearDepth = clearDepth;
+        }
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        if (!enc) return nullptr;
+        if (scissor && scissor->w > 0 && scissor->h > 0) {
+            MTLScissorRect s = {(NSUInteger)scissor->x, (NSUInteger)scissor->y,
+                                (NSUInteger)scissor->w, (NSUInteger)scissor->h};
+            [enc setScissorRect:s];
+        }
+        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_,
+                                                        cbCommitted_, cbCompleted_);
+    }
+    // Fallback chặy: blit từng hàng (đồi để lẟt dắng độ để, đảm hình nhắng).
+    bool flipCopy(ITexture* src, ITexture* dst) override {
+        AppleTexture* a = dynamic_cast<AppleTexture*>(src);
+        AppleTexture* b = dynamic_cast<AppleTexture*>(dst);
+        if (!a || !b || !queue_) return false;
+        if (a->pixelFormat() != b->pixelFormat()) return false;
+        if (!EnsureFlipPipeline(a->pixelFormat())) return false;
+        @try {
+            id<MTLCommandBuffer> cb = [queue_ commandBuffer];
+            if (!cb) return false;
+            MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = b->get();
+            rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            if (!enc) return false;
+            [enc setRenderPipelineState:flipPipe_];
+            MTLViewport vp = {0.0, 0.0, (double)b->width(), (double)b->height(), 0.0, 1.0};
+            [enc setViewport:vp];
+            [enc setFragmentTexture:a->get() atIndex:0];
+            if (flipSampler_) [enc setFragmentSamplerState:flipSampler_ atIndex:0];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding];
+            NoteCommit(cb);
+            [cb commit];
+            [cb waitUntilCompleted];
+            return [cb status] == MTLCommandBufferStatusCompleted;
+        } @catch (NSException*) { return false; }
+    }
+    bool PresentRowBlit(id<MTLCommandBuffer> cb, AppleTarget* at, id<CAMetalDrawable> drawable,
+                       NSUInteger cw, NSUInteger ch) {
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        if (!blit) return false;
+        for (NSUInteger i = 0; i < ch; ++i) {
+            MTLOrigin so = {0, ch - 1 - i, 0};
+            MTLOrigin dob = {0, i, 0};
+            MTLSize sz = {cw, 1, 1};
+            [blit copyFromTexture:at->resolve() sourceSlice:0 sourceLevel:0 sourceOrigin:so
+                      sourceSize:sz toTexture:drawable.texture destinationSlice:0
+                 destinationLevel:0 destinationOrigin:dob];
+        }
+        [blit endEncoding];
+        [cb presentDrawable:drawable];
+        if (cbCompleted_)
+            [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+                cbCompleted_->fetch_add(1, std::memory_order_relaxed);
+            }];
+        NoteCommit(cb);
+        [cb commit];
+        return true;
+    }
+    // ---- Present flip: 1 render pass thay v~1242 blit/h\u00e0ng ----------------
+    // MSL: fullscreen triangle, uv.y đảo để đổi GL-order (row 0 = đáy) sang
+    // drawable-order (row 0 = trên).
+    static const char* kFlipMSL() {
+        return
+            "#include <metal_stdlib>\n"
+            "using namespace metal;\n"
+            // Sampler hằng số: dạng sampler(tex, filter::…, address::…) bị MSL
+            // từ chối ("no matching constructor") vì đối số lọc/địa chỉ mơ hồ.
+            "constexpr sampler kFlipSampler(filter::nearest, address::clamp_to_edge);\n"
+            "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+            "vertex VOut tglmt_flip_vs(uint vid [[vertex_id]]) {\n"
+            "  float2 p = float2(float((vid << 1) & 2), float(vid & 2));\n"
+            "  VOut o;\n"
+            "  o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+            // Metal: đỉnh đáy màn hình (p.y=0) phải lấy hàng ĐÁY của texture
+            // (uv.y=1). Texture lưu theo thứ tự ảnh (hàng 0 = trên) nên cần
+            // uv.y = p.y. Dùng 1.0-p.y sẽ úp ngược toàn bộ hình.
+            "  o.uv = float2(p.x, p.y);\n"
+            "  return o;\n"
+            "}\n"
+            "fragment float4 tglmt_flip_fs(VOut in [[stage_in]],\n"
+            "                             texture2d<float> src [[texture(0)]]) {\n"
+            "  return src.sample(kFlipSampler, in.uv);\n"
+            "}\n";
+    }
+    bool EnsureFlipPipeline(PixelFormat fmt) {
+        if (flipPipe_ && flipFmt_ == (uint32_t)fmt) return true;
+        @try {
+            NSError* e = nil;
+            NSString* src = [NSString stringWithUTF8String:kFlipMSL()];
+            id<MTLLibrary> lib = [dev_ newLibraryWithSource:src options:nil error:&e];
+            if (!lib) {
+                if (log_) log_("flipLib: " + std::string(e ? [[e localizedDescription] UTF8String]
+                                                            : "nil"));
+                return false;
+            }
+            id<MTLFunction> vs = [lib newFunctionWithName:@"tglmt_flip_vs"];
+            id<MTLFunction> fs = [lib newFunctionWithName:@"tglmt_flip_fs"];
+            if (!vs || !fs) {
+                if (log_) log_("flipFn: vs/fs nil");
+                return false;
+            }
+            MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+            d.vertexFunction = vs; d.fragmentFunction = fs;
+            d.colorAttachments[0].pixelFormat = ToMTL(fmt);
+            id<MTLRenderPipelineState> pso =
+                [dev_ newRenderPipelineStateWithDescriptor:d error:&e];
+            if (!pso) {
+                if (log_) log_("flipPSO: " + std::string(e ? [[e localizedDescription] UTF8String]
+                                                            : "nil"));
+                return false;
+            }
+            if (!flipSampler_) {
+                MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+                sd.minFilter = MTLSamplerMinMagFilterNearest;
+                sd.magFilter = MTLSamplerMinMagFilterNearest;
+                sd.mipFilter = MTLSamplerMipFilterNotMipmapped;
+                sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+                sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+                flipSampler_ = [dev_ newSamplerStateWithDescriptor:sd];
+            }
+            flipPipe_ = pso;
+            flipFmt_ = (uint32_t)fmt;
+            return true;
+        } @catch (NSException* ex) {
+            if (log_) log_(std::string("flipEXC: ") + (ex ? [[ex reason] UTF8String] : "?"));
+            return false;
+        }
+    }
+    void NoteCommit(id<MTLCommandBuffer>) {
+        if (cbCommitted_) cbCommitted_->fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Scissor-region clear (GL parity): blit buffer→texture ghi ĐÚNG vùng —
+    // loadAction clear không clip theo scissor (kiểm chứng test_clear_targets).
+    // CB retain buffer đã encode → không cần giữ sau commit.
+    bool fillRegionColor(IRenderTarget* target, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                         const ClearColor& c) override {
+        return fillRegionColorAndDepth(target, x, y, w, h, c, 2.0 /*no depth clear*/);
+    }
+    bool fillRegionColorAndDepth(IRenderTarget* target, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                 const ClearColor& c, double clearDepth) override {
+        AppleTarget* at = dynamic_cast<AppleTarget*>(target);
+        if (!at || !queue_ || !w || !h) return false;
+        if (at->isMSAA()) return false; // blit buffer→texture không ghi được MSAA
+        PixelFormat f = at->pixelFormat();
+        bool bgra = (f == PixelFormat::BGRA8Unorm);
+        if (!bgra && f != PixelFormat::RGBA8Unorm) return false; // sRGB/float/int → fallback
+        id<MTLTexture> t = at->resolve();
+        if (!t) return false;
+        const bool wantDepth = (clearDepth <= 1.0) && (at->depth() != nil);
+        // Kẹp vùng vào kích thước texture.
+        uint32_t tw = (uint32_t)t.width, th = (uint32_t)t.height;
+        if (x >= tw || y >= th) return false;
+        if (x + w > tw) w = tw - x;
+        if (y + h > th) h = th - y;
+        auto to8 = [](double v) -> uint8_t {
+            double s = v < 0 ? 0 : (v > 1 ? 1 : v);
+            return (uint8_t)(s * 255.0 + 0.5);
+        };
+        uint8_t px[4] = {to8(c.r), to8(c.g), to8(c.b), to8(c.a)};
+        if (bgra) std::swap(px[0], px[2]);
+        // stride 256 (rule blit buffer copy); row thật w*4 byte đầu.
+        size_t stride = (((size_t)w * 4) + 255) & ~(size_t)255;
+        size_t need = stride * h;
+        // Buffer clear TÁI SỬ DỤNG (grow-on-demand). GuiItemAtlas clear 1 slot /
+        // item / frame (~300 lần) → newBufferWithBytes mỗi lần là ~300
+        // MTLBuffer + commit mỗi frame: vừa nặng vừa dễ chạm giới hạn
+        // submissions của iOS (mọi CB sau bị bỏ → mọi ô atlas đổ trống).
+        if (!clearBuf_ || clearBufSize_ < need) {
+            clearBuf_ = [dev_ newBufferWithLength:(NSUInteger)need
+                                          options:MTLResourceStorageModeShared];
+            if (!clearBuf_) return false;
+            clearBufSize_ = need;
+        }
+        uint8_t* dst = (uint8_t*)[clearBuf_ contents];
+        if (!dst) return false;
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t x2 = 0; x2 < w; ++x2)
+                memcpy(dst + (size_t)r * stride + (size_t)x2 * 4, px, 4);
+        @try {
+            id<MTLCommandBuffer> cb = [queue_ commandBuffer];
+            if (!cb) return false;
+            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+            if (!blit) return false;
+            [blit copyFromBuffer:clearBuf_ sourceOffset:0 sourceBytesPerRow:stride
+                 sourceBytesPerImage:stride * h
+                       sourceSize:MTLSizeMake(w, h, 1)
+                       toTexture:t destinationSlice:0 destinationLevel:0
+               destinationOrigin:MTLOriginMake(x, y, 0)];
+            [blit endEncoding];
+            // Depth clear (nếu có) trong CÙNG command buffer.
+            if (wantDepth) {
+                MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                rp.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+                rp.depthAttachment.texture = at->depth();
+                rp.depthAttachment.loadAction = MTLLoadActionClear;
+                rp.depthAttachment.storeAction = MTLStoreActionStore;
+                rp.depthAttachment.clearDepth = clearDepth;
+                id<MTLRenderCommandEncoder> de = [cb renderCommandEncoderWithDescriptor:rp];
+                if (de) [de endEncoding];
+            }
+            // Handler + đếm: command buffer này cũng phải được tính vào
+            // in-flight tracking, nếu không CPU tưởng GPU rảnh và ghi đè
+            // shared memory đang bay.
+            if (cbCompleted_)
+                [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+                    cbCompleted_->fetch_add(1, std::memory_order_relaxed);
+                }];
+            NoteCommit(cb);
+            [cb commit]; // không wait: thứ tự đảm bảo cùng queue
+            return true;
+        } @catch (NSException*) {
+            return false;
+        }
     }
 private:
     id<MTLDevice> dev_;
     id<MTLCommandQueue> queue_;
     LogFn log_;
+    std::atomic<uint64_t>* cbCommitted_ = nullptr;
+    std::atomic<uint64_t>* cbCompleted_ = nullptr;
+    id<MTLRenderPipelineState> flipPipe_ = nil; // present flip (1 draw thay vì ~1242 blit)
+    id<MTLSamplerState> flipSampler_ = nil;
+    uint32_t flipFmt_ = 0;
+    int presentProbe_ = 0;
+    id<MTLBuffer> clearBuf_ = nil;             // buffer cho fillRegionColor (tái sử dụng)
+    size_t clearBufSize_ = 0;
     std::vector<DrawTrace> trace_;
     std::map<std::string, id<MTLRenderPipelineState>> pcache_;
     std::map<uint64_t, id<MTLDepthStencilState>> dcache_; // IR: 16 depth states cache
@@ -1326,6 +1797,8 @@ private:
     std::shared_ptr<IRenderTarget> defaultTarget_;
     std::shared_ptr<AppleRenderEncoder::SharedDiag> diag_;
     std::mutex pmu_;
+    // Depth textures đã qua first-clear (per-texture). Xem takeDepthInit.
+    std::shared_ptr<DepthInitSet> depthInit_ = std::make_shared<DepthInitSet>();
 };
 
 std::shared_ptr<IDevice> CreateAppleDevice(LogFn log) {

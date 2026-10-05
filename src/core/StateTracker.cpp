@@ -76,16 +76,22 @@ GLuint StateTracker::BoundBuffer(GLenum t) const {
     auto it=bufferBindings_.find(t); return it==bufferBindings_.end()?0:it->second;
 }
 void StateTracker::BindTextureUnit(GLuint u, GLuint t, GLenum tgt){
-    if(u<kMaxTextureUnits){
-        if (texBound_[u]==t && (t==0 || texTarget_[u]==tgt || tgt==0)) {
-            // tgt==0 (DSA bind không target): giữ target cũ, coi như không đổi nếu id trùng
-            if (t==0 || tgt==0 || texTarget_[u]==tgt) return;
-        }
-        texBound_[u]=t;
-        if (tgt) texTarget_[u]=tgt;
-        else if (t==0) texTarget_[u]=0;
-        ++stateSeq_;
-    }
+    if (u >= kMaxTextureUnits) return;
+    // Per-target: cube/buffer bind KHÔNG đựng đè slot 2D (và ngược lại).
+    int slot = TexSlotOf(tgt);
+    bool changed = texBound_[u][slot] != t;
+    texBound_[u][slot] = t;
+    if (tgt) texTarget_[u] = tgt;
+    else if (t == 0) texTarget_[u] = 0;
+    if (changed) ++stateSeq_;
+}
+void StateTracker::UnbindTextureEverywhere(GLuint t){
+    if (!t) return;
+    bool any = false;
+    for (auto& unit : texBound_)
+        for (int s = 0; s < kTexTargets; ++s)
+            if (unit[s] == t) { unit[s] = 0; any = true; }
+    if (any) ++stateSeq_;
 }
 void StateTracker::SetActiveTexture(GLuint u){ if (activeTex_==u) return; activeTex_=u; ++stateSeq_; }
 void StateTracker::BindSampler(GLuint u, GLuint s){ if(u<kMaxTextureUnits) { if (samplerBound_[u]==s) return; samplerBound_[u]=s; ++stateSeq_; } }

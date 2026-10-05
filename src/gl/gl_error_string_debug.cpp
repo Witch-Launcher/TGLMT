@@ -21,19 +21,29 @@ const GLubyte* glGetString(GLenum n) {
         default: Context::Current().errors.Record(0x0500); return kEmpty;
     }
 }
+// Danh sách extension: CỐ TÌNH giữ nguyên 6 mục cũ.
+// KHÔNG thêm GL_ARB_direct_state_access / GL_ARB_vertex_attrib_binding /
+// GL_ARB_buffer_storage dù TGLMT "làm được": LWJGL dựng Capabilities từ
+// ĐÚNG danh sách string này, nên thêm vào sẽ đảo quyết định của Minecraft:
+//   DirectStateAccess.Core  (glNamedBufferSubData thay glBufferSubData)
+//   VertexArrayCache.Separate (glVertexAttribFormat/glBindVertexBuffer)
+//   BufferStorage.Immutable    (persistent mapping UBO/terrain)
+// Cả 3 đường đó chưa được kiểm chứng trên TGLMT và làm MC treo/mất dữ liệu
+// (đo được: chỉ 12 frame rồi đứng, uboMap 0 → 48). Danh sách phải khớp với
+// đường nào đã test, không phải đường nào "lý thuyết" hỗ trợ được.
+static const char* const kExts[] = {
+    "GL_ARB_gl_spirv",
+    "GL_ARB_indirect_parameters",
+    "GL_ARB_pipeline_statistics_query",
+    "GL_ARB_polygon_offset_clamp",
+    "GL_ARB_texture_filter_anisotropic",
+    "GL_KHR_no_error",
+};
+static const GLuint kNumExts = (GLuint)(sizeof(kExts) / sizeof(kExts[0]));
 const GLubyte* glGetStringi(GLenum n, GLuint i) {
-    static const GLubyte kExt0[] = "GL_ARB_gl_spirv";
-    static const GLubyte kExt1[] = "GL_ARB_indirect_parameters";
-    static const GLubyte kExt2[] = "GL_ARB_pipeline_statistics_query";
-    static const GLubyte kExt3[] = "GL_ARB_polygon_offset_clamp";
-    static const GLubyte kExt4[] = "GL_ARB_texture_filter_anisotropic";
-    static const GLubyte kExt5[] = "GL_KHR_no_error";
     if (n == 0x1F03) { // EXTENSIONS
-        switch (i) {
-            case 0: return kExt0; case 1: return kExt1; case 2: return kExt2;
-            case 3: return kExt3; case 4: return kExt4; case 5: return kExt5;
-            default: Context::Current().errors.Record(0x0501); return nullptr;
-        }
+        if (i < kNumExts) return (const GLubyte*)kExts[i];
+        return nullptr;
     }
     Context::Current().errors.Record(0x0500);
     return nullptr;
@@ -59,3 +69,6 @@ void glGetObjectPtrLabel(const void* p, GLsizei n, GLsizei* l, GLchar* b) { (voi
 GLenum glGetGraphicsResetStatus() { return 0x8252; } // NO_ERROR (GL 4.5 robustness)
 void glGetPointerv(GLenum p, void** v) { (void)p; *v = nullptr; }
 } // namespace tglmt::gl
+namespace tglmt {
+GLuint tglmt_num_extensions() { return gl::kNumExts; }
+} // namespace tglmt

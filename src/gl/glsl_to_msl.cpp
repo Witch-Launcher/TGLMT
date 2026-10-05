@@ -781,7 +781,14 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             std::string rep;
             if (sv.kind == 'B' || sv.kind == 'I' || sv.kind == 'U') {
                 if (args.size() != 2) { err = "texelFetch buffer chỉ 2 args (sampler, index)"; return false; }
-                rep = sname + "_tex.read(uint2(uint(" + args[1] + "), 0u))";
+                // Buffer texture đóng khung W=min(n,16384) hàng (Metal giới hạn
+                // width 16384; n=710178 → validate fail → abort). Đọc index i:
+                //   x = i % W, y = i / W (clamp y về hàng cuối → OOB-safe, đúng
+                //   GL "đọc quá size = undefined" thay vì GPU fault).
+                std::string ix = "uint(" + args[1] + ")";
+                std::string tn = sname + "_tex";
+                rep = tn + ".read(uint2(" + ix + " % " + tn + ".get_width(), min(" + ix +
+                      " / " + tn + ".get_width(), " + tn + ".get_height() - 1u)))";
             } else {
                 if (args.size() < 2 || args.size() > 3) { err = "texelFetch 2D cần (sampler, coord[, lod])"; return false; }
                 std::string lod = args.size() == 3 ? args[2] : "0";
@@ -1680,6 +1687,22 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         auto tryParseUBO = [&](const std::string& t, GLSLBlock& out) -> bool {
             std::string s = Trim(t);
             if (s.rfind("layout", 0) != 0 && s.rfind("uniform", 0) != 0) return false;
+            // layout(binding=N[, ...]) trước `uniform`: N là binding point thật
+            // (GL: glUniformBlockBinding mặc định = layout binding, KHÔNG phải 0).
+            // Bỏ qua = Globals đọc nhầm point 0 (đụng SamplerInfo 16B → zero fallback).
+            out.binding = -1;
+            if (s.rfind("layout", 0) == 0) {
+                size_t lp = s.find('(');
+                size_t rp = (lp == std::string::npos) ? std::string::npos : s.find(')', lp);
+                if (lp != std::string::npos && rp != std::string::npos) {
+                    std::string q = s.substr(lp + 1, rp - lp - 1);
+                    size_t bp = q.find("binding");
+                    if (bp != std::string::npos) {
+                        size_t eq = q.find('=', bp);
+                        if (eq != std::string::npos) out.binding = atoi(q.c_str() + eq + 1);
+                    }
+                }
+            }
             size_t ub = s.find("uniform");
             if (ub == std::string::npos) return false;
             size_t brace = s.find('{', ub);
@@ -2092,6 +2115,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                         return fail("UBO " + b.name + " khai báo lại khác members");
                     }
                 }
+                if (u.binding < 0 && b.binding >= 0) u.binding = b.binding;
                 break; // trùng hệt → bỏ bản sau
             }
             if (!seen) uniq.push_back(b);

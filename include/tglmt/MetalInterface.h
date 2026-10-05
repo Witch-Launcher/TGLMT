@@ -8,6 +8,7 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <atomic>
 
 namespace tglmt::metal {
 
@@ -16,7 +17,12 @@ enum class PixelFormat : uint32_t {
     BGRA8Unorm = 80, BGRA8Unorm_sRGB = 81,
     Depth32Float = 252, Depth24Stencil8 = 255, Stencil8 = 53,
     R8Unorm = 10, RG8Unorm = 30, RGBA16Float = 115, RGBA32Float = 125,
-    R32Float = 55, R32Sint = 56, R32Uint = 57, // buffer textures (CloudFaces)
+    // Số = MTLPixelFormat thật (MTLPixelFormat.h). Trước đây R32Sint/Uint ghi
+    // 56/57 (sai; thật 54/53) — vô hại vì ToMTL map theo switch, đã sửa đúng.
+    R32Float = 55, R32Sint = 54, R32Uint = 53, // buffer textures (CloudFaces)
+    // Buffer textures MC 26.1: samplerBuffer R8I/R8UI/R16I/R16UI/R16F (bug A).
+    R8Sint = 14, R8Uint = 13,
+    R16Sint = 24, R16Uint = 23, R16Float = 25,
 };
 // GL enum thô (giá trị từ gl.xml) cho blend/sampler — bridge ánh xạ sang MTL*.
 // Không include GL header ở đây để giữ IMetal độc lập platform.
@@ -24,10 +30,11 @@ struct AttachmentBlend {
     bool enabled = false;
     uint32_t srcRGB = 1;    // GL_ONE
     uint32_t dstRGB = 0;    // GL_ZERO
-    uint32_t srcAlpha = 1;  // GL_ONE
-    uint32_t dstAlpha = 0;  // GL_ZERO
+    uint32_t srcAlpha = 1;
+    uint32_t dstAlpha = 0;
     uint32_t rgbOp = 0x8006;   // GL_FUNC_ADD
     uint32_t alphaOp = 0x8006; // GL_FUNC_ADD
+    uint32_t writeMask = 0xF;  // glColorMask bits R=1 G=2 B=4 A=8 (= MTLColorWriteMask)
 };
 struct SamplerDesc {
     uint32_t minFilter = 0x2601; // GL_LINEAR
@@ -38,6 +45,12 @@ struct SamplerDesc {
     // noMip=true: texture chỉ có 1 level → tắt lọc mip (NotMipmapped) để
     // A11 không fetch LOD>0 (fault/đen). Đúng cho mọi texture UI 1-level.
     bool noMip = false;
+    // LOD clamp từ GL_TEXTURE_MIN_LOD/MAX_LOD (sampler object) và
+    // GL_TEXTURE_BASE_LEVEL/MAX_LEVEL (texture object). Minecraft set MAX_LOD=0
+    // cho MỌI sampler không mipmap và set BASE/MAX_LEVEL=0 cho mọi texture —
+    // bỏ qua thì Metal tự clamp 0..1000 (đọc ngoài atlas, mip sai).
+    float lodMin = 0.0f;
+    float lodMax = 1000.0f;
 };
 struct ScissorRect {
     uint32_t x = 0;
@@ -63,7 +76,8 @@ struct CustomAttrib {
 struct PipelineOpts {
     bool depth = false;              // target có depth → depthAttachmentPixelFormat
     bool blend = false;              // bật blending attachment 0
-    AttachmentBlend blend0;          // cấu hình blend khi blend=true
+    AttachmentBlend blend0;          // cấu hình blend khi blend=true (kèm writeMask)
+    uint32_t colorWriteMask = 0xF;   // glColorMask att0 (áp dụng cả khi blend tắt)
 };
 
 class ISamplerState {
@@ -146,6 +160,8 @@ public:
     virtual bool readback(void* dst, size_t bytesPerRow) = 0;
     // Format color thật của target (cho pipeline khớp + present kiểm tra).
     virtual PixelFormat pixelFormat() const { return PixelFormat::RGBA8Unorm; }
+    // Target có depth attachment không (để gộp clear màu+depth 1 command buffer).
+    virtual bool hasDepth() const { return false; }
 };
 
 class IRenderEncoder {
@@ -220,6 +236,13 @@ public:
     virtual std::shared_ptr<ITexture> newTexture(uint32_t w, uint32_t h, PixelFormat f) = 0;
     virtual std::shared_ptr<IEncoder> makeEncoder() = 0;
     virtual void commitAndWait() = 0;
+    // Apple: trỏ 2 con trỏ đếm command buffer đã commit / đã execute xong
+    // (addCompletedHandler). Context dùng để biết còn bao nhiêu frame đang bay
+    // mà KHÔNG cần commitAndWait mỗi frame (giữ pipelining + giảm latency).
+    virtual void setCommandBufferCounters(std::atomic<uint64_t>* committed,
+                                           std::atomic<uint64_t>* completed) {
+        (void)committed; (void)completed;
+    }
     virtual const std::vector<DrawTrace>& drawTrace() const = 0;
     virtual void clearTrace() = 0;
     // M5 render API — default nullptr (Null backend không GPU).
@@ -337,12 +360,47 @@ public:
         if (colorLoad == LoadOp::Load) return makeRenderEncoderLoad(target, pipeline);
         return makeRenderEncoder(target, pipeline, clear);
     }
+    // Encoder clear-ONLY (không draw → không pipeline): glClear tôn trọng FBO
+    // đang bind NGAY tại chỗ, thay vì "clear cho draw tiêu thụ" (deferred) —
+    // deferred làm clear mất khi 2 glClear liên tiếp và áp sai target khi draw
+    // kế tiếp ở FBO khác (sky đen, sprite atlas bị wipe). scissor=nullptr →
+    // clear toàn attachment; scissor≠nullptr → thử tôn trọng vùng (GL scissor).
+    // Trả nullptr → caller fallback deferred (Null backend).
+    virtual std::shared_ptr<IRenderEncoder> makeClearEncoder(IRenderTarget* target,
+            const ClearColor& clear, double clearDepth, LoadOp colorLoad, LoadOp depthLoad,
+            const ScissorRect* scissor) {
+        (void)target; (void)clear; (void)clearDepth;
+        (void)colorLoad; (void)depthLoad; (void)scissor;
+        return nullptr;
+    }
+    // Clear màu theo TỌA ĐỘ TARGET (hệ Metal, top-left). Nguyên nhân: Metal
+    // loadAction=Clear KHÔNG clip theo setScissorRect (đã kiểm chứng integration
+    // test) → scissor-clear của GL (GuiItemAtlas region) cần ghi đúng vùng.
+    // Chỉ format unorm 4-byte (RGBA8/BGRA8, không sRGB) + non-MSAA; ngược lại
+    // → false (caller fallback clear toàn attachment, có diag).
+    virtual bool fillRegionColor(IRenderTarget* target, uint32_t x, uint32_t y, uint32_t w,
+                                 uint32_t h, const ClearColor& c) {
+        (void)target; (void)x; (void)y; (void)w; (void)h; (void)c;
+        return false;
+    }
+    // Vùng màu + clear depth trong MỘT command buffer. GuiItemAtlas clear 1 ô
+    // / item / frame (~300 lần) — tách 2 command buffer + 1 MTLBuffer mỗi ô vừa
+    // nặng vừa dễ chạm giới hạn submissions của iOS (CB bị bỏ ⇒ atlas đổ trống).
+    virtual bool fillRegionColorAndDepth(IRenderTarget* target, uint32_t x, uint32_t y, uint32_t w,
+                                         uint32_t h, const ClearColor& c, double clearDepth) {
+        (void)target; (void)x; (void)y; (void)w; (void)h; (void)c; (void)clearDepth;
+        return false;
+    }
     // Default target cho FBO 0 (app/shell đặt; GL render vào đây).
     virtual void setDefaultRenderTarget(std::shared_ptr<IRenderTarget> t) { (void)t; }
     virtual std::shared_ptr<IRenderTarget> defaultRenderTarget() { return nullptr; }
     // Ghi nhận draw gần nhất (prog/vao/fbo) để handler lỗi GPU bất đồng bộ có
     // ngữ cảnh prog đầu tiên fault (A11 ban submissions sau fault hàng loạt).
     virtual void noteDrawContext(const std::string& s) { (void)s; }
+    // Lật dọc 1 texture (memory GL-order: hàng 0 = đáy) sang texture đích
+    // (drawable-order: hàng 0 = trên) bằng 1 render pass. Cùng shader/pipeline
+    // với presentTarget — tách riêng để test được hướng lật trên GPU thật.
+    virtual bool flipCopy(ITexture* src, ITexture* dst) { (void)src; (void)dst; return false; }
     // Present target lên màn hình qua CAMetalLayer* (void* để giữ header thuần C++).
     // Trả false khi layer/target không hợp lệ.
     virtual bool presentTarget(IRenderTarget* target, void* metalLayer) {

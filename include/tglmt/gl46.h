@@ -703,5 +703,8 @@ void glViewportIndexedf(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h
 void glViewportIndexedfv(GLuint index, const GLfloat *v); // introduced GL_VERSION_4_1
 void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout); // introduced GL_VERSION_3_2
 } // namespace gl
+// Số extension glGetStringi liệt kê (glGetIntegerv(GL_NUM_EXTENSIONS) dùng
+// hàm này — phải khớp tuyệt đối).
+GLuint tglmt_num_extensions();
 int GetCoreFunctionCount(); // = 698
 } // namespace tglmt

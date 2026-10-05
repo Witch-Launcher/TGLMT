@@ -49,6 +49,9 @@ Context::Context(const std::string& backend) : backendName(backend) {
         // thiếu Apple backend vs MTLCreateSystemDefaultDevice nil trên máy.
         backendName = backend + "(null-fallback)";
     }
+    // Đếm command buffer để biết GPU còn frame nào đang bay (thay cho
+    // commitAndWait mỗi frame — xem Context::ThrottleGpu).
+    if (device) device->setCommandBufferCounters(&cbCommitted, &cbCompleted);
 }
 Context& Context::Current() {
     if (tCurrent_) return *tCurrent_;
@@ -112,28 +115,69 @@ void Context::InvalidatePendingOnTargetChange() {
     (void)0;
 }
 // Deferred full: diag gate — getenv 1 lần, cache static.
+// iOS: app không kế thừa env từ shell → build -DTGLMT_FORCE_DIAG=ON (luôn true).
 bool Context::DiagOn() {
+#if defined(TGLMT_FORCE_DIAG)
+    return true;
+#else
     static int cached = -1;
     if (cached < 0) {
         const char* e = std::getenv("TGLMT_DIAG");
         cached = (e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y')) ? 1 : 0;
     }
     return cached == 1;
+#endif
 }
 void Context::NoteBufferUsed(GLuint buf) {
     if (!buf) return;
-    pendingUsedBuffers[buf] = frameSeq;
+    if (!UsedHas(pendingUsedBuffers, buf)) pendingUsedBuffers.push_back({buf});
+}
+// GPU đã execute xong mọi command đã commit → buffer đọc trước đó an toàn để
+// ghi tại chỗ. Tăng waitGen để FlushBufferStaging phân biệt in-flight.
+void Context::CommitAndWait() {
+    if (device) device->commitAndWait();
+    ++waitGen;
+    cbCompleted.store(cbCommitted.load(std::memory_order_relaxed),
+                      std::memory_order_relaxed);
+}
+// Chặn CPU chỉ khi vượt ngân sách frame đang bay. Trước đây SwapBuffers gọi
+// commitAndWait() MỖI frame → CPU và Metal nối tiếp (không pipeline) và mọi
+// frame đều phải chờ GPU xong trước khi dựng frame sau ⇒ thêm ~1 frame input
+// latency, thấy rõ khi lia cam nhanh. Giờ chỉ chặn khi thực sự tắc.
+void Context::ThrottleGpu() {
+    if (!device || device->isNull()) return;
+    // 1 vòng đủ: present đã commit nhưng chưa execute → 1 frame đang bay.
+    // Giới hạn số vòng để không bao giờ treo nếu backend không cập nhật counter
+    // (đã commit 1 lần rồi vẫn phải thoát).
+    for (int guard = 0; guard < 8; ++guard) {
+        if ((cbCommitted.load(std::memory_order_relaxed) -
+             cbCompleted.load(std::memory_order_relaxed)) < kMaxFramesInFlight)
+            return;
+        CommitAndWait();
+        ++appleStats.framesThrottled;
+    }
+}
+// Dump texring: 96 call bind gần nhất, chron order (cũ → mới) để thấy chuỗi
+// bind dẫn đến divergence (đổ tại bindheal#/shadowmis#).
+void Context::DumpTexBindRing(const char* tag) {
+    fprintf(stderr, "[TGLMT] texring#%s n=%u\n", tag ? tag : "?", texRingCount);
+    uint32_t start = (texRingCount < kTexRingN) ? 0 : texRingHead;
+    for (uint32_t i = 0; i < texRingCount; ++i) {
+        const TexBindRec& r = texRing[(start + i) % kTexRingN];
+        fprintf(stderr, "[TGLMT]   seq=%llu %c unit=%u tex=%u tgt=0x%x\n",
+                (unsigned long long)r.seq, r.op ? r.op : '?', r.unit, r.tex, r.target);
+    }
+    fflush(stderr);
 }
 void Context::NoteTextureUsed(GLuint tex) {
     if (!tex) return;
-    pendingUsedTextures[tex] = frameSeq;
+    if (!UsedHas(pendingUsedTextures, tex)) pendingUsedTextures.push_back({tex});
 }
 // Conditional-flush: chỉ flush khi tài nguyên stage đã được dùng trong pass
 // đang mở. Stage "lạ" (scratch/PBO/atlas chưa bind) thì giữ batching.
 bool Context::MustFlushForBufferStage(GLuint buf) {
     if (!pendingEncoder) return false;
-    auto it = pendingUsedBuffers.find(buf);
-    if (it == pendingUsedBuffers.end()) {
+    if (!UsedHas(pendingUsedBuffers, buf)) {
         ++appleStats.flushAvoided;
         return false;
     }
@@ -141,12 +185,27 @@ bool Context::MustFlushForBufferStage(GLuint buf) {
 }
 bool Context::MustFlushForTextureStage(GLuint tex) {
     if (!pendingEncoder) return false;
-    auto it = pendingUsedTextures.find(tex);
-    if (it == pendingUsedTextures.end()) {
+    if (!UsedHas(pendingUsedTextures, tex)) {
         ++appleStats.flushAvoided;
         return false;
     }
     return true;
+}
+// Cache target FBO: wrapAsTarget cấp phát AppleTarget + đánh dấu depth-init mỗi
+// draw. Cache theo (gen, fbo, color, depth) — gen tăng khi texture/FBO bị xoá
+// nên không bao giờ trả nhầm target đã bị giải phóng.
+std::shared_ptr<metal::IRenderTarget> Context::WrapTarget(GLuint fbo,
+        metal::ITexture* col, metal::ITexture* dep) {
+    for (int i = 0; i < kWrapCacheN; ++i) {
+        WrapEntry& e = wrapCache[i];
+        if (e.tgt && e.gen == objectGen && e.fbo == fbo && e.col == col && e.dep == dep)
+            return e.tgt;
+    }
+    auto tgt = device->wrapAsTarget(col, dep);
+    WrapEntry& e = wrapCache[wrapNext];
+    wrapNext = (wrapNext + 1) % kWrapCacheN;
+    e.gen = objectGen; e.fbo = fbo; e.col = col; e.dep = dep; e.tgt = tgt;
+    return tgt;
 }
 // Ring allocator: bump-pointer trên 1 trong 3 buffers, xoay theo frameSeq.
 // Mỗi buffer 4MB Shared, align 256 (uniform/index yêu cầu). Khi tràn hoặc

@@ -38,28 +38,36 @@ void Renderer::Resize(uint32_t w, uint32_t h) {
     if (w == 0 || h == 0) return;
     impl_->w = w;
     impl_->h = h;
+    if (impl_->ctx) ++impl_->ctx->objectGen; // cache wrap-target không còn hợp lệ
     impl_->target.reset(); // dựng lại ở BeginFrame kế tiếp
     if (impl_->ctx) {
         impl_->ctx->FlushPendingEncoder(); // IR: target cũ hết hiệu lực
         impl_->ctx->applePendingClear = true; // target mới phải clear lại
         impl_->ctx->appleClearMask = 0xFFFFFFFFu;
+        impl_->ctx->appleClearFBO = 0xFFFFFFFFu; // wildcard: clear cho draw kế tiếp
     }
 }
 
-bool Renderer::BeginFrame() {
+bool Renderer::BeginFrame(bool newFrame) {
     if (!impl_->initialized || !impl_->ctx) return false;
     Context::MakeCurrent(impl_->ctx.get());
-    impl_->ctx->NextFrame(); // triple-buffer ring rotation (deferred full)
+    if (newFrame) impl_->ctx->NextFrame(); // ring rotation (deferred full)
+    // KHÔNG xoay vòng target. MC 26.1 dựng MainTarget riêng (tex 41) rồi
+    // RenderTarget.blitToScreen() -> GlCommandEncoder.presentTexture() blit
+    // tex41 -> FBO 0; sau đó mới glfwSwapBuffers() present target này. Nên FBO 0
+    // đúng là nơi nhận ảnh cuối: phải là MỘT texture ổn định xuyên suốt, nếu
+    // xoay lớp thì presentTarget() lấy nhầm lớp chưa ai vẽ -> màn đen/rđ b.
     if (!impl_->target) {
         if (impl_->depth)
-            impl_->target = impl_->ctx->device->makeRenderTargetWithDepth(impl_->w, impl_->h,
-                                                                         impl_->fmt);
+            impl_->target =
+                impl_->ctx->device->makeRenderTargetWithDepth(impl_->w, impl_->h, impl_->fmt);
         else
             impl_->target = impl_->ctx->device->makeRenderTarget(impl_->w, impl_->h, impl_->fmt);
         if (impl_->target) {
             impl_->ctx->device->setDefaultRenderTarget(impl_->target);
             impl_->ctx->applePendingClear = true;
             impl_->ctx->appleClearMask = 0xFFFFFFFFu;
+            impl_->ctx->appleClearFBO = 0xFFFFFFFFu; // wildcard: clear cho draw kế tiếp
         }
     }
     if (!impl_->target && !impl_->ctx->device->isNull()) return false;

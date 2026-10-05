@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <set>
+#include <string>
 #include <vector>
 using namespace tglmt;
 
@@ -22,6 +25,45 @@ static void StageTexRegion(Context& c, GLuint texId, uint32_t x, uint32_t y, uin
     ++c.appleStats.texCoalesced;
 }
 
+// Diag (DiagOn): tỉ lệ pixel shadow khác 0 — trả lời "texture/atlas có data
+// thật không". Readback GPU thật chỉ ≤512×512 (stall); shadow là bản upload.
+static void LogShadowNZ(Context& c, const TextureObject& tx, GLuint id, const char* tag) {
+    if (!c.DiagOn()) return;
+    // Dedupe (tag,id): TexImage NULL-alloc (n=NULL, nz=0) là bình thường, lặp mỗi
+    // frame → nuốt sạch cap 24. Giữ 1 dòng/id, cap 32 để thấy đủ id khác.
+    static std::set<uint64_t> seen;
+    uint64_t key = (uint64_t)id << 32 ^ std::hash<std::string>{}(tag);
+    if (seen.size() >= 32 || !seen.insert(key).second) return;
+    int n = (int)seen.size();
+    if (tx.pixels.empty() || !tx.w || !tx.h) {
+        fprintf(stderr, "[TGLMT] shnz#%d %s tex=%u %ux%u EMPTY-shadow\n", n, tag, id, tx.w,
+                tx.h);
+        fflush(stderr);
+        return;
+    }
+    size_t npx = (size_t)tx.w * tx.h;
+    size_t bpp = tx.pixels.size() / npx;
+    if (!bpp) {
+        fprintf(stderr, "[TGLMT] shnz#%d %s tex=%u %ux%u shadow-short=%zu\n", n, tag, id,
+                tx.w, tx.h, tx.pixels.size());
+        fflush(stderr);
+        return;
+    }
+    size_t stride = std::max<size_t>(1, npx / 8192);
+    size_t nz = 0, tot = 0;
+    for (size_t i = 0; i < npx; i += stride) {
+        const uint8_t* p = tx.pixels.data() + i * bpp;
+        bool any = false;
+        for (size_t b = 0; b < bpp; ++b)
+            if (p[b]) { any = true; break; }
+        nz += any;
+        ++tot;
+    }
+    fprintf(stderr, "[TGLMT] shnz#%d %s tex=%u %ux%u bpp=%zu nz=%zu/%zu\n", n, tag, id,
+            tx.w, tx.h, bpp, nz, tot);
+    fflush(stderr);
+}
+
 namespace tglmt {
 // Flush 1 texture: gộp regions cùng format thành bbox duy nhất rồi SyncRegionToGPU
 // từ shadow (tight). Khác format → flush từng region riêng (không gộp sai conversion).
@@ -34,6 +76,14 @@ void Context::FlushTextureStaging(GLuint texId) {
         return;
     }
     TextureObject& tx = tit->second;
+    // In-flight guard: texture này vừa được sample bởi encoder ĐÃ commit mà GPU
+    // chưa execute (lastReadGen == waitGen) → replaceRegion lúc này đổi nội dung
+    // draw cũ đang đọc → vỡ texture/đốm. Đợi GPU trước (hiếm, ~4 lần/600 frame).
+    if (device && tx.lastReadGen == waitGen) {
+        FlushPendingEncoder();
+        CommitAndWait();
+        ++appleStats.texWaitStall;
+    }
     // Nhóm theo (format,type): vanilla dùng 1 format nên thường chỉ 1 nhóm → 1 bbox.
     // Sắp xếp để nhóm cùng format kề nhau.
     auto& regs = pit->second;
@@ -61,6 +111,16 @@ void Context::FlushTextureStaging(GLuint texId) {
         uint32_t x0 = regs[i].x, y0 = regs[i].y;
         uint32_t x1 = regs[i].x + regs[i].w, y1 = regs[i].y + regs[i].h;
         while (j + 1 < regs.size() && regs[j + 1].format == fmt && regs[j + 1].type == typ) {
+            if (tx.wasRT) {
+                // wasRT: shadow chỉ chứa bytes app thật sự upload (glTexSubImage);
+                // phần còn lại của texture chỉ sống trên GPU (bake qua FBO). Gộp
+                // bbox qua vùng giữa 2 region sẽ memcpy số 0 đè nội dung GPU →
+                // mất texture (kho đồ / block atlas). Chỉ gộp region chồng lấn/chạm.
+                const TexRegion& nr = regs[j + 1];
+                bool nearX = nr.x <= x1 + 4 && x0 <= nr.x + nr.w + 4;
+                bool nearY = nr.y <= y1 + 4 && y0 <= nr.y + nr.h + 4;
+                if (!nearX || !nearY) break;
+            }
             ++j;
             x0 = std::min(x0, regs[j].x);
             y0 = std::min(y0, regs[j].y);
@@ -102,17 +162,34 @@ void Context::FlushTextureStaging(GLuint texId) {
                         std::vector<uint8_t> rgba((size_t)bw * bh * 4);
                         for (uint32_t r = 0; r < bh; ++r)
                             for (uint32_t x = 0; x < bw; ++x) {
-                                const uint8_t* s = srcRows + (size_t)r * texRow + (size_t)x * 3;
+                                const uint8_t* s = srcRows + r * texRow + x * 3;
                                 uint8_t* d = rgba.data() + ((size_t)r * bw + x) * 4;
                                 d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
                             }
                         synced = device->updateTexture(tx.gpu.get(), x0, y0, bw, bh,
                                                        rgba.data(), (size_t)bw * 4);
                     } else {
+                        // LogDebug lặng khi app không gắn debugCb (vanilla iOS) →
+                        // stderr khi DiagOn: thấy ngay "format nào không lên GPU"
+                        // (vùng chỉ sống trong shadow → GPU rỗng → sprite discard).
+                        synced = true; // đã log texnop riêng, không kể là update fail
+                        static int nUnh = 0;
+                        if (DiagOn() && ++nUnh <= 32)
+                            fprintf(stderr,
+                                    "[TGLMT] texnop#%d id=%u fmt=0x%x ty=0x%x bbox=(%u,%u %ux%u) giu-shadow\n",
+                                    nUnh, texId, fmt, typ, x0, y0, bw, bh);
                         LogDebug(0, 0, 0, 0,
                                  "FlushTextureStaging: format/type chưa upload GPU (giữ shadow)");
                     }
-                    (void)synced;
+                    // updateTexture trả false (GPU không nhận) → cũng phải thấy được.
+                    if (DiagOn() && !synced) {
+                        static int nUpdFail = 0;
+                        if (++nUpdFail <= 16)
+                            fprintf(stderr,
+                                    "[TGLMT] texupd#%d id=%u fmt=0x%x ty=0x%x bbox=(%u,%u %ux%u) updateTexture=false\n",
+                                    nUpdFail, texId, fmt, typ, x0, y0, bw, bh);
+                    }
+                    if (tx.wasRT) ++appleStats.texWasRTFlush;
                     ++appleStats.texFlushes;
                 }
             }
@@ -143,8 +220,25 @@ static metal::PixelFormat ToMetalFormat(GLenum internalFormat) {
         case 0x8236: return metal::PixelFormat::R32Uint;           // R32UI (buffer)
         case 0x81A5: case 0x81A6: case 0x8CAC:                     // DEPTH16/24/32F
             return metal::PixelFormat::Depth32Float;
+        case 0x81A7: {                                             // DEPTH_COMPONENT32
+            // fixico8: GuiItemAtlas depth (GlConst DEPTH32→33191) từng rơi
+            // default → RGBA8Unorm → depth-attachment sai format vs pipeline
+            // Depth32Float → encoder nil/depth-test rác → bake icon bị reject.
+            static bool once = false;
+            if (!once) {
+                once = true;
+                if (Context::Current().DiagOn())
+                    fprintf(stderr,
+                            "[TGLMT] depthfmt# 0x81A7 DEPTH_COMPONENT32 → Depth32Float (fixico8)\n");
+            }
+            return metal::PixelFormat::Depth32Float;
+        }
         case 0x88F0: return metal::PixelFormat::Depth24Stencil8;   // DEPTH24_STENCIL8
         default:
+            if (Context::Current().DiagOn())
+                fprintf(stderr,
+                        "[TGLMT] ToMetalFormat: internalFormat 0x%X lạ → RGBA8Unorm\n",
+                        (unsigned)internalFormat);
             Context::Current().LogDebug(0, 0, 0, 0,
                 "ToMetalFormat: internalFormat lạ → RGBA8Unorm (M5b mở rộng)");
             return metal::PixelFormat::RGBA8Unorm;
@@ -267,6 +361,7 @@ void glGenTextures(GLsizei n, GLuint* t) {
     Context& c = Context::Current();
     c.registry.Gen(ObjectKind::Texture, n, t);
     for (GLsizei i = 0; i < n; ++i) c.textures[t[i]] = TextureObject{t[i]};
+    for (GLsizei i = 0; i < n && i < 4; ++i) c.RecordTexBind('G', 0, t[i], 0);
 }
 void glCreateTextures(GLenum target, GLsizei n, GLuint* t) {
     Context& c = Context::Current();
@@ -276,9 +371,29 @@ void glCreateTextures(GLenum target, GLsizei n, GLuint* t) {
 void glDeleteTextures(GLsizei n, const GLuint* t) {
     Context& c = Context::Current();
     c.registry.Delete(ObjectKind::Texture, n, t);
+    ++c.objectGen; // cache wrap-target: texture có thể bị giải phóng/ID tái dùng
     for (GLsizei i = 0; i < n; ++i) {
+        c.RecordTexBind('D', 0, t[i], 0);
         c.textures.erase(t[i]);
         c.pendingTexRegions.erase(t[i]);
+        // Spec §8.1: delete = unbind khỏi mọi unit. Không xóa → stale id:
+        // draw resolve thiếu → fallback đen; id tái sử dụng → sample nhầm.
+        c.state.UnbindTextureEverywhere(t[i]);
+        // Spec §9 (FBO completeness): attachment trỏ texture đã xóa → detach
+        // (về 0). Không detach: id tái sử dụng cho atlas mới (resource reload
+        // khi đổi setting) thì FBO cũ trỏ NHẦM sang atlas mới → draw bake cũ
+        // smear đè atlas mới → đen/mất texture sau "tắt đi mở lại".
+        for (auto& [fid, fbo] : c.fbos) {
+            for (auto it = fbo.colorTex.begin(); it != fbo.colorTex.end();) {
+                if (it->second == t[i]) {
+                    fbo.colorLevel.erase(it->first);
+                    it = fbo.colorTex.erase(it);
+                } else ++it;
+            }
+            if (fbo.depthTex == t[i]) { fbo.depthTex = 0; fbo.depthLevel = 0; }
+            if (fbo.stencilTex == t[i]) { fbo.stencilTex = 0; fbo.stencilLevel = 0; }
+            if (fbo.depthStencilTex == t[i]) { fbo.depthStencilTex = 0; fbo.depthStencilLevel = 0; }
+        }
     }
 }
 GLboolean glIsTexture(GLuint t) {
@@ -286,21 +401,57 @@ GLboolean glIsTexture(GLuint t) {
 }
 void glBindTexture(GLenum target, GLuint t) {
     Context& c = Context::Current();
-    if (t && !c.textures.count(t)) { c.errors.Record(0x0502); return; }
+    c.RecordTexBind('B', c.state.ActiveTexture(), t, target);
+    if (t && !c.textures.count(t)) {
+        // Heal (Fix #6): MC đã ghi cache của nó = id (guarded _bindTexture đã
+        // chạy) trong khi object chưa có trong Context → reject ở đây làm state
+        // lệch VĨNH VIỄN: draw resolve thiếu → fallback đen (mất chữ/GUI), upload
+        // BoundTex 0x0502 → MẤT glyph/sprite đến lần retry. Real GL bind name mới
+        // tự tạo object → tạo rỗng tại đây để state đi theo MC (nội dung sẽ có
+        // khi MC upload). Ghi log + dump texring để thấy chuỗi bind gây ra.
+        c.textures[t] = TextureObject{t};
+        c.textures[t].target = target;
+        c.state.BindTextureUnit(c.state.ActiveTexture(), t, target);
+        static uint64_t n = 0;
+        if (++n <= 32) {
+            fprintf(stderr, "[TGLMT] bindheal#%llu tex=%u tgt=0x%x (id chua co, tao rong)\n",
+                    (unsigned long long)n, t, target);
+            fflush(stderr);
+        }
+        if (c.DiagOn() && n <= 8) c.DumpTexBindRing("bindheal");
+        return;
+    }
     if (t) c.textures[t].target = target;
     c.state.BindTextureUnit(c.state.ActiveTexture(), t, target);
 }
 void glBindTextureUnit(GLuint u, GLuint t) {
     Context& c = Context::Current();
-    c.state.BindTextureUnit(u, t);
+    // DSA: binding point theo target CỦA OBJECT (spec §8.1 glBindTextureUnit).
+    GLenum tgt = 0x0DE1;
+    if (t) {
+        auto it = c.textures.find(t);
+        if (it != c.textures.end() && it->second.target) tgt = it->second.target;
+    }
+    c.RecordTexBind('U', u, t, tgt);
+    c.state.BindTextureUnit(u, t, tgt);
 }
 void glBindTextures(GLuint f, GLsizei n, const GLuint* t) {
     Context& c = Context::Current();
-    for (GLsizei i = 0; i < n; ++i) c.state.BindTextureUnit(f + i, t ? t[i] : 0);
+    for (GLsizei i = 0; i < n; ++i) {
+        GLuint id = t ? t[i] : 0;
+        GLenum tgt = 0x0DE1;
+        if (id) {
+            auto it = c.textures.find(id);
+            if (it != c.textures.end() && it->second.target) tgt = it->second.target;
+        }
+        c.RecordTexBind('S', f + i, id, tgt);
+        c.state.BindTextureUnit(f + i, id, tgt);
+    }
 }
 void glActiveTexture(GLenum tex) {
     Context& c = Context::Current();
     if (tex < 0x84C0 || tex >= 0x84C0 + 32) { c.errors.Record(0x0500); return; }
+    c.RecordTexBind('A', tex - 0x84C0, 0, 0);
     c.state.SetActiveTexture(tex - 0x84C0);
 }
 // Spec §8.1: mọi lệnh Tex* (không DSA) tác động lên texture đang bind tại
@@ -309,7 +460,9 @@ void glActiveTexture(GLenum tex) {
 static bool IsCubeFace(GLenum t) { return t >= 0x8515 && t <= 0x851A; }
 static TextureObject* BoundTex(Context& c, GLenum target) {
     GLuint unit = c.state.ActiveTexture();
-    GLuint id = c.state.BoundTexture(unit);
+    // Per-target: resolve slot theo target Tex* sắp dùng (face → slot cube),
+    // không để cube/buffer bind khác target đánh clobber (upload nhầm/sai object).
+    GLuint id = c.state.BoundTexture(unit, target);
     if (!id) { c.errors.Record(0x0502); return nullptr; }
     auto it = c.textures.find(id);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return nullptr; }
@@ -369,13 +522,31 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
             fflush(stderr);
         }
     }
-    // Mip levels >0: chỉ ghi nhận số levels, KHÔNG đụng base (bug cũ: ghi đè
-    // w/h/pixels bằng level nhỏ nhất → TexSubImage level 0 fail bounds →
-    // texture rỗng. Game 26.x alloc mọi mip qua TexImage2D NULL trước).
-    // GPU TGLMT chỉ giữ base level (generateMipmap cần texture mipmapped).
+    // Mip levels >0: ghi nhận số levels + shadow per-level (vanilla 26.x alloc
+    // mọi mip qua TexImage2D NULL rồi upload từng level: MipmapGenerator +
+    // writeToTexture per-mip). GPU TGLMT hiện chỉ giữ base level (non-mipmapped,
+    // sampler NotMipmapped) nên KHÔNG đụng base; shadow per-level phục vụ
+    // GetTexImage(level>0)/CPU fallback + mipmapped tương lai. Bug cũ: chỉ đếm
+    // levels, SubImage level>0 bị drop câm → readback mip đen.
     if (level > 0) {
         if (level + 1 > tx.levels) tx.levels = level + 1;
-        c.LogDebug(0, 0, 0, 0, "glTexImage2D: mip level>0 giữ base (GPU base-level)");
+        if (w > 0 && h > 0) {
+            auto& ml = tx.mipData[level];
+            ml.w = w; ml.h = h;
+            size_t bpp = Bpp(format, type);
+            ml.pixels.assign((size_t)w * h * bpp, 0);
+            if (hasData && (format == 0x1908 || format == 0x1903 || format == 0x8227) &&
+                type == 0x1401) {
+                size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+                size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                              (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+                const uint8_t* src = pixBase + skip;
+                for (GLsizei r = 0; r < h; ++r)
+                    memcpy(ml.pixels.data() + (size_t)r * w * bpp, src + r * rowLen,
+                           (size_t)w * bpp);
+            }
+        }
+        c.LogDebug(0, 0, 0, 0, "glTexImage2D: mip level>0 lưu shadow (GPU base-level)");
         (void)border;
         return;
     }
@@ -419,6 +590,11 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     }
     tx.isCube = false;
     tx.w = w; tx.h = h; tx.internalFormat = internalformat; tx.levels = level + 1;
+    // Realloc level 0 = storage MỚI (resource reload đổi setting/atlas mới):
+    // xóa mip shadows cũ (sai size) + wasRT cũ (FBO bake của đời trước). Giữ
+    // lại là smear atlas mới bằng nội dung GPU/shadow cũ → đen sau reload.
+    tx.mipData.clear();
+    tx.wasRT = false;
     size_t n = (size_t)w * h * Bpp(format, type);
     tx.pixels.assign(n, 0);
     if (hasData) {
@@ -483,9 +659,18 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
                                     raw.data(), (size_t)w * 4);
             c.LogDebug(0, 0, 0, 0, "glTexImage2D: RGBA/BGRA UINT raw upload");
         } else {
+            // LogDebug lặng (không debugCb trên iOS) → in stderr khi DiagOn.
+            static int nUnhImg = 0;
+            if (c.DiagOn() && ++nUnhImg <= 16)
+                fprintf(stderr,
+                        "[TGLMT] texnop-img#%d id=%u %dx%d fmt=0x%x ty=0x%x giu-shadow\n",
+                        nUnhImg, tp->id, w, h, format, type);
             c.LogDebug(0, 0, 0, 0, "glTexImage2D: format/type chưa upload GPU (giữ shadow)");
         }
     }
+    // Chẩn đoán: shadow có data thật không (trả lời "atlas rỗng?").
+    // Bỏ qua upload NULL (glTexImage n=NULL = alloc rỗng, nz=0 — bình thường).
+    if (c.DiagOn() && pixels && (w >= 256 || h >= 256)) LogShadowNZ(c, tx, tp->id, "teximage");
     (void)border; (void)level;
 }
 void glTexImage1D(GLenum t, GLint l, GLint inf, GLsizei w, GLint b, GLenum f, GLenum ty, const void* p) {
@@ -516,9 +701,35 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
             fflush(stderr);
         }
     }
-    // Level>0: GPU chỉ giữ base, không corrupt base shadow (xem TexImage).
+    // Level>0: GPU chỉ giữ base. Lưu vào shadow per-level (đúng GL: level có
+    // dữ liệu riêng, GetTexImage(level) đọc được) thay vì drop câm như trước.
+    // Không sync GPU (texture non-mipmapped, sampler NotMipmapped → không sample).
     if (level > 0) {
-        c.LogDebug(0, 0, 0, 0, "glTexSubImage2D: mip level>0 bỏ qua (GPU base-level)");
+        auto it = t.mipData.find(level);
+        if (it == t.mipData.end()) { c.errors.Record(0x0501); return; }
+        auto& ml = it->second;
+        if (xoff < 0 || yoff < 0 || w < 0 || h < 0 ||
+            (size_t)(xoff + w) > (size_t)ml.w || (size_t)(yoff + h) > (size_t)ml.h) {
+            c.errors.Record(0x0501); return;
+        }
+        size_t bpp = Bpp(format, type);
+        size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+        size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                      (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+        size_t total = skip + (h > 0 ? ((size_t)(h - 1) * rowLen + (size_t)w * bpp) : 0);
+        bool okBase = true;
+        const uint8_t* pixBase = UnpackBase(c, pixels, total, okBase);
+        if (!okBase) { c.errors.Record(0x0501); return; }
+        const uint8_t* src = pixBase + skip;
+        if (ml.pixels.size() < (size_t)ml.w * ml.h * bpp)
+            ml.pixels.resize((size_t)ml.w * ml.h * bpp, 0);
+        for (GLsizei r = 0; r < h; ++r) {
+            uint8_t* dst = ml.pixels.data() + ((size_t)(yoff + r) * ml.w + (size_t)xoff) * bpp;
+            memcpy(dst, src + r * rowLen, (size_t)w * bpp);
+        }
+        if (level + 1 > t.levels) t.levels = level + 1;
+        ++c.appleStats.mipStaged;
+        c.LogDebug(0, 0, 0, 0, "glTexSubImage2D: mip level>0 lưu shadow (GPU base-level)");
         return;
     }
     // SubImage lên face cubemap: ghi vào face slot + sync GPU face đó.
@@ -565,6 +776,8 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
         StageTexRegion(c, tp->id, (uint32_t)xoff, (uint32_t)yoff, (uint32_t)w, (uint32_t)h,
                        format, type);
     }
+    // Diag: sub-upload vùng lớn → shadow có data thật không (atlas streaming).
+    if (c.DiagOn() && pixels && (w >= 256 || h >= 256)) LogShadowNZ(c, t, tp->id, "texsub");
 }
 void glTexSubImage1D(GLenum t, GLint l, GLint x, GLsizei w, GLenum f, GLenum ty, const void* p) {
     glTexSubImage2D(t, l, x, 0, w, 1, f, ty, p);
@@ -605,7 +818,7 @@ void glGenerateMipmap(GLenum target) {
     // Vanilla atlas: minFilter mipmap nhưng texture tạo non-mipmapped → GPU trả false,
     // giữ base-level (render được, shimmer nhẹ). M5c tạo mipmapped khi levels>1.
     GLuint unit = c.state.ActiveTexture();
-    GLuint id = c.state.BoundTexture(unit);
+    GLuint id = c.state.BoundTexture(unit, target); // per-target (cube/buffer không clobber 2D)
     auto it = c.textures.find(id);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
     if (it->second.gpu && c.device->generateMipmaps(it->second.gpu.get())) return;
@@ -645,8 +858,8 @@ void glCopyTexImage1D(GLenum a, GLint b, GLenum d, GLint e, GLint f, GLsizei g, 
 void glCopyTexImage2D(GLenum a, GLint b, GLenum d, GLint e, GLint f, GLsizei g, GLsizei h, GLint i) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
 void glCopyTexSubImage1D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLsizei f) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f; }
 // Copy framebuffer (READ) → texture (blur/post-chain, menu loading đen nếu stub).
-// Quy ước thô như blit (không flip; chỉ ReadPixels flip): copy raw GPU→GPU khi
-// cùng format, rồi sync shadow từ GPU để GetTexImage/ReadPixels sau đó thấy mới.
+// Quy ước GL-order (hàng 0 = đáy GL) cho cả 2 đầu → copy raw GPU→GPU không flip,
+// rồi sync shadow từ GPU để GetTexImage/ReadPixels sau đó thấy mới.
 static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
                             GLint xoff, GLint yoff, GLint x, GLint y,
                             GLsizei w, GLsizei h) {
@@ -687,7 +900,7 @@ static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
     c.FlushPendingEncoder(); // IR: commit batch trước khi copy (không stale TBDR)
     c.FlushAllBufferStaging();
     c.FlushAllTextureStaging();
-    c.device->commitAndWait(); // xả draws NoWait trước khi copy (không stale TBDR)
+    c.CommitAndWait(); // xả draws NoWait trước khi copy (không stale TBDR)
     bool gpuOk = false;
     if (readFbo == 0) {
         auto def = c.device->defaultRenderTarget();
@@ -832,7 +1045,7 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
     c.FlushPendingEncoder(); // IR: commit batch trước khi blit copy
     c.FlushAllBufferStaging();
     c.FlushAllTextureStaging();
-    c.device->commitAndWait();
+    c.CommitAndWait();
     if (src.gpu->pixelFormat() == dst.gpu->pixelFormat() &&
         c.device->blitCopy(src.gpu.get(), dst.gpu.get(),
                            (uint32_t)srcX, (uint32_t)srcY,

@@ -68,6 +68,17 @@ public:
     // --- blend ---
     std::array<BlendState, kMaxDrawBuffers>& Blend() { dirtyPipeline_ = true; return blend_; }
     const std::array<BlendState, kMaxDrawBuffers>& Blend() const { return blend_; }
+    // --- color write mask (glColorMask/glColorMaski): bits R=1 G=2 B=4 A=8,
+    // mặc định 0xF. Từng là no-op → depth-prepass/transparency ghi màu bậy.
+    void SetColorMask(GLuint buf, uint8_t mask) {
+        if (buf < (GLuint)kMaxDrawBuffers && colorMask_[buf] != mask) {
+            colorMask_[buf] = mask;
+            dirtyPipeline_ = true;
+        }
+    }
+    uint8_t ColorMask(GLuint buf = 0) const {
+        return buf < (GLuint)kMaxDrawBuffers ? colorMask_[buf] : (uint8_t)0xF;
+    }
     void SetBlendColor(float r, float g, float b, float a);
     void GetBlendColor(float out[4]) const {
         out[0] = blendColor_[0]; out[1] = blendColor_[1];
@@ -123,11 +134,43 @@ public:
     // --- bindings (shadow, Metal encode dùng) ---
     void BindBuffer(GLenum target, GLuint buf);
     GLuint BoundBuffer(GLenum target) const;
+    // Per-target slots (GL §8.1: mỗi unit có binding point RIÊNG cho từng target).
+    // Bug cũ: gộp 1 slot/unit → cube (panorama) / buffer (clouds isamplerBuffer
+    // unit0 mỗi frame) bind PHÁ binding 2D của unit → MC guarded _bindTexture
+    // skip (cache đã đúng) → TGLMT resolve sai texture → sampdeny fallback đen
+    // (mất chữ/GUI, model chớp) + upload BoundTex 0x0502 MẤT glyph/sprite.
+    static constexpr int kTexTargets = 6; // 0=2D 1=cube 2=buffer 3=array 4=3D 5=rect
+    static int TexSlotOf(GLenum target) {
+        switch (target) {
+            case 0x8513: case 0x8515: case 0x8516: case 0x8517:
+            case 0x8518: case 0x8519: case 0x851A: return 1; // CUBE + faces
+            case 0x8C2A: return 2; // TEXTURE_BUFFER
+            case 0x8C1A: return 3; // TEXTURE_2D_ARRAY
+            case 0x806F: return 4; // TEXTURE_3D
+            case 0x8078: return 5; // TEXTURE_RECTANGLE
+            default: return 0;     // TEXTURE_2D / 1D / unknown
+        }
+    }
     void BindTextureUnit(GLuint unit, GLuint tex, GLenum target = 0);
+    // Spec §8.1: glDeleteTextures unbind id khỏi MỌI unit (không để stale →
+    // draw resolve NOT FOUND → fallback đen + id tái sử dụng sample nhầm).
+    void UnbindTextureEverywhere(GLuint tex);
     void SetActiveTexture(GLuint unit);
     GLuint ActiveTexture() const { return activeTex_; }
+    // Slot 2D (compat; đa số sampler là 2D).
     GLuint BoundTexture(GLuint unit) const {
-        return unit < (GLuint)kMaxTextureUnits ? texBound_[unit] : 0;
+        return unit < (GLuint)kMaxTextureUnits ? texBound_[unit][0] : 0;
+    }
+    // Tra theo target của sampler (face cubemap → slot cube; 0 → 2D).
+    GLuint BoundTexture(GLuint unit, GLenum target) const {
+        return unit < (GLuint)kMaxTextureUnits ? texBound_[unit][TexSlotOf(target)] : 0;
+    }
+    // Hazard check: id đang bind ở BẤT KỲ target slot nào của unit.
+    bool AnyBoundAtUnit(GLuint unit, GLuint id) const {
+        if (!id || unit >= (GLuint)kMaxTextureUnits) return false;
+        for (int s = 0; s < kTexTargets; ++s)
+            if (texBound_[unit][s] == id) return true;
+        return false;
     }
     GLenum BoundTextureTarget(GLuint unit) const {
         return unit < (GLuint)kMaxTextureUnits ? texTarget_[unit] : 0;
@@ -169,6 +212,7 @@ private:
     std::unordered_map<GLenum, bool> caps_;
     std::unordered_map<GLenum, std::unordered_map<GLuint, bool>> capsI_;
     std::array<BlendState, kMaxDrawBuffers> blend_;
+    std::array<uint8_t, kMaxDrawBuffers> colorMask_ = {0xF, 0xF, 0xF, 0xF, 0xF, 0xF, 0xF, 0xF};
     float blendColor_[4] = {0, 0, 0, 0};
     DepthState depth_;
     StencilFace stenFront_, stenBack_;
@@ -182,8 +226,8 @@ private:
     GLenum clipOrigin_ = 0x8CA1; // LOWER_LEFT (đã đối chiếu gl.xml; trước đây ghi nhầm 0x8CA0)
     GLenum clipDepth_ = 0x935E;  // NEGATIVE_ONE_TO_ONE (đã đối chiếu; trước đây nhầm 0x8CA1)
     std::unordered_map<GLenum, GLuint> bufferBindings_;
-    std::array<GLuint, kMaxTextureUnits> texBound_ = {};
-    std::array<GLenum, kMaxTextureUnits> texTarget_ = {};
+    std::array<std::array<GLuint, kTexTargets>, kMaxTextureUnits> texBound_ = {};
+    std::array<GLenum, kMaxTextureUnits> texTarget_ = {}; // target bind gần nhất (getter)
     std::array<GLuint, kMaxTextureUnits> samplerBound_ = {};
     GLuint activeTex_ = 0;
     GLuint boundVAO_ = 0, boundProgram_ = 0, boundXFB_ = 0;

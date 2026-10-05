@@ -2,6 +2,7 @@
 // Nguyên tắc: Set* đã lưu shadow → Get* trả shadow; chưa Set → giá trị mặc định spec.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <algorithm>
 #include <cstring>
 using namespace tglmt;
 
@@ -22,7 +23,7 @@ static bool StaticLimit(GLenum p, GLint* v) {
     switch (p) {
         case 0x821B: *v = 4; break;      // MAJOR_VERSION
         case 0x821C: *v = 6; break;      // MINOR_VERSION
-        case 0x821D: *v = 6; break;      // NUM_EXTENSIONS (khớp glGetStringi)
+        case 0x821D: *v = (GLint)tglmt_num_extensions(); break; // khớp glGetStringi
         case 0x821E: *v = 0; break;      // CONTEXT_FLAGS (không debug bit)
         case 0x0D33: *v = 8192; break;   // MAX_TEXTURE_SIZE
         case 0x8073: *v = 2048; break;   // MAX_3D_TEXTURE_SIZE
@@ -160,6 +161,12 @@ void glGetProgramiv(GLuint p, GLenum q, GLint* v) {
     if (q == 0x8B82) *v = it->second.linked ? 1 : 0;       // LINK_STATUS
     else if (q == 0x8B84) *v = (GLint)it->second.infoLog.size();
     else if (q == 0x8B86) *v = (GLint)it->second.shaders.size(); // ATTACHED_SHADERS
+    // ACTIVE_UNIFORM_BLOCKS (0x8A36=35382): GlProgram.setupUniforms path#2
+    // loop [0,count) gọi glGetActiveUniformBlockName tìm builtin {Projection,
+    // Lighting, Fog, Globals} không khai trong pipeline. Stub trả 0 → loop
+    // không chạy → Globals KHÔNG BAO GIỜ ĐƯỢC BIND cho prog ngoài pipeline
+    // desc (terrain/blur) → CameraBlockPos rác, MenuBlurRadius rác.
+    else if (q == 0x8A36) *v = (GLint)it->second.uniformBlocks.size();
     else *v = 0;
 }
 void glGetProgramInfoLog(GLuint p, GLsizei n, GLsizei* l, GLchar* log) {
@@ -188,8 +195,65 @@ void glGetActiveUniform(GLuint p, GLuint i, GLsizei n, GLsizei* l, GLint* s, GLe
         name[0] = 0;
     }
 }
-void glGetActiveUniformBlockiv(GLuint p, GLuint b, GLenum q, GLint* v) { (void)p;(void)b;(void)q; *v = 0; }
-void glGetActiveUniformBlockName(GLuint p, GLuint b, GLsizei n, GLsizei* l, GLchar* name) { (void)p;(void)b; if(l)*l=0; if(name&&n>0)name[0]=0; }
+// Tìm block theo index (index space = uniformBlocks[].index dense 0..N-1,
+// cùng không gian với glGetUniformBlockIndex — khớp GL vì linker gán dense).
+static ProgramObject::UniformBlock* FindUniformBlock(Context& c, GLuint p, GLuint b) {
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return nullptr; }
+    for (auto& ub : it->second.uniformBlocks)
+        if (ub.index == b) return &ub;
+    c.errors.Record(0x0501 /*INVALID_VALUE: uniform block index vượt range*/);
+    return nullptr;
+}
+void glGetActiveUniformBlockiv(GLuint p, GLuint b, GLenum q, GLint* v) {
+    if (!v) return;
+    Context& c = Context::Current();
+    auto* ub = FindUniformBlock(c, p, b);
+    if (!ub) { *v = 0; return; }
+    switch (q) {
+        case 0x8A3F: *v = (GLint)ub->binding; break;          // UNIFORM_BLOCK_BINDING
+        case 0x8A40: *v = (GLint)ub->minSize; break;          // UNIFORM_BLOCK_DATA_SIZE
+        // NAME_LENGTH gồm NUL (GL spec). LWJGL glGetActiveUniformBlockName(p,i)
+        // (2-arg) query enum này TRƯỚC rồi malloc(bufSize): trả 0 → bufSize=0 →
+        // tên rỗng → GlProgram.setupUniforms path#2 skip builtin (Globals) →
+        // không gán point → draw bind nhầm buffer point0 (uboSmall zero fallback).
+        case 0x8A41: *v = (GLint)ub->name.size() + 1; break;   // UNIFORM_BLOCK_NAME_LENGTH
+        // Flag theo stage thật (vsBlocks/fsBlocks): block gộp 2 stage → cả 2 = 1.
+        // 0x8A45 là REFERENCED_BY_GEOMETRY_SHADER (TGLMT không có geometry → 0),
+        // fragment là 0x8A46 (trước đây ghi nhầm 0x8A45 = fragment).
+        case 0x8A44: {                                        // REFERENCED_BY_VERTEX_SHADER
+            auto pit = c.programs.find(p);
+            *v = (pit != c.programs.end() &&
+                  std::find(pit->second.vsBlocks.begin(), pit->second.vsBlocks.end(),
+                            ub->name) != pit->second.vsBlocks.end()) ? 1 : 0;
+            break;
+        }
+        case 0x8A45: *v = 0; break;                           // REFERENCED_BY_GEOMETRY_SHADER
+        case 0x8A46: {                                        // REFERENCED_BY_FRAGMENT_SHADER
+            auto pit = c.programs.find(p);
+            *v = (pit != c.programs.end() &&
+                  std::find(pit->second.fsBlocks.begin(), pit->second.fsBlocks.end(),
+                            ub->name) != pit->second.fsBlocks.end()) ? 1 : 0;
+            break;
+        }
+        default: *v = 0; break;
+    }
+}
+// GlProgram.setupUniforms path#2: glGetActiveUniformBlockName(programId, i)
+// với i ∈ [0, ACTIVE_UNIFORM_BLOCKS) → tên block (vd "Globals").
+void glGetActiveUniformBlockName(GLuint p, GLuint b, GLsizei n, GLsizei* l, GLchar* name) {
+    Context& c = Context::Current();
+    auto* ub = FindUniformBlock(c, p, b);
+    if (!ub) {
+        if (l) *l = 0;
+        if (name && n > 0) name[0] = 0;
+        return;
+    }
+    size_t k = std::min((size_t)(n > 0 ? n - 1 : 0), ub->name.size());
+    if (k && name) memcpy(name, ub->name.c_str(), k);
+    if (name && n > 0) name[k] = 0;
+    if (l) *l = (GLsizei)k;
+}
 void glGetActiveUniformName(GLuint p, GLuint i, GLsizei n, GLsizei* l, GLchar* name) { (void)p;(void)i; if(l)*l=0; if(name&&n>0)name[0]=0; }
 void glGetActiveUniformsiv(GLuint p, GLsizei n, const GLuint* idx, GLenum q, GLint* v) { (void)p;(void)idx;(void)q; for(GLsizei i=0;i<n;++i)v[i]=0; }
 void glGetActiveAtomicCounterBufferiv(GLuint p, GLuint b, GLenum q, GLint* v) { (void)p;(void)b;(void)q; *v=0; }

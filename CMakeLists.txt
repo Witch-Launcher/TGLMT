@@ -8,6 +8,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(TGLMT_APPLE_METAL "Biên dịch AppleMetalBridge.mm (chỉ macOS/iOS)" OFF)
 option(TGLMT_BUILD_TESTS "Build tests" ON)
 option(TGLMT_BUILD_SHARED "Build tglmt.dylib shared cho launcher render" ON)
+option(TGLMT_FORCE_DIAG "Chẩn đoán luôn-on (máy thật; TGLMT_DIAG=1 không set được từ launcher)" OFF)
+if(TGLMT_FORCE_DIAG)
+  add_compile_definitions(TGLMT_FORCE_DIAG=1)
+endif()
 
 include_directories(include)
 

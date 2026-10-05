@@ -5,7 +5,10 @@
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <set>
 #include <vector>
 using namespace tglmt;
 
@@ -40,7 +43,7 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
         c.FlushPendingEncoder(); // IR: commit batch encoder mở trước khi đọc
         c.FlushAllBufferStaging();
         c.FlushAllTextureStaging();
-        c.device->commitAndWait(); // xả draws NoWait trước khi đọc (đúng, không stale)
+        c.CommitAndWait(); // xả draws NoWait trước khi đọc (đúng, không stale)
         std::shared_ptr<metal::IRenderTarget> tgt;
         if (tex) {
             if (!tex->gpu) { c.errors.Record(0x0502); return; }
@@ -52,13 +55,14 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
             size_t need = (size_t)w * h * 4;
             std::vector<uint8_t> full((size_t)tgt->width() * tgt->height() * 4, 0);
             if (tgt->readback(full.data(), (size_t)tgt->width() * 4)) {
-                // Đọc vào buffer tạm tight trước (đúng flip spec §18.2), rồi mới
-                // ghi ra đích (con trỏ thật hoặc PBO offset).
+                // Đọc vào buffer tạm tight trước, rồi mới ghi ra đích (con trỏ
+                // thật hoặc PBO offset). Memory target = GL-order (hàng 0 = đáy
+                // GL — do viewport GL-correct h<0) → đọc thẳng hàng y+r,
+                // không lật (spec §18.2 đạt được nhờ quy ước memory).
                 std::vector<uint8_t> out((size_t)w * h * 4, 0);
-                // GL origin bottom-left vs Metal top-left: lật hàng (đúng spec §18.2).
                 size_t tw = tgt->width(), th = tgt->height();
                 for (GLsizei r = 0; r < h; ++r) {
-                    GLsizei srcRow = (GLsizei)th - 1 - (y + r);
+                    GLsizei srcRow = y + r;
                     if (srcRow < 0 || (size_t)srcRow >= th) continue; // hàng ngoài → giữ 0
                     size_t copyW = std::min((size_t)w, tw > (size_t)x ? tw - (size_t)x : 0);
                     if (copyW)
@@ -149,24 +153,67 @@ static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {
     itt->second.internalFormat = inf;
     if (itb == c.buffers.end()) return;
     itt->second.pixels = itb->second.data; // view CPU
-    // GPU: R32I/R32UI/R32F → texture int Nx1 để shader .read(index).
-    // Format khác: shadow only (đủ cho probe, P1 mở rộng).
-    if (inf == 0x8235 || inf == 0x8236 || inf == 0x822E) {
-        size_t n = itb->second.data.size() / 4;
+    // GPU: buffer texture → texture Nx1 để shader .read(index).
+    // Bảng format thật (MC 26.1 dùng cả R8I — bug "sampdeny#... ifmt=0x8231"):
+    //   0x8235 R32I(4B)  0x8236 R32UI(4B)  0x822E R32F(4B)
+    //   0x8231 R8I(1B)   0x8232 R8UI(1B)
+    //   0x8233 R16I(2B)  0x8234 R16UI(2B)  0x822D R16F(2B)
+    // Format không có trong bảng: shadow only + log bufnop# (DiagOn).
+    struct BufTexEnt { GLenum gl; size_t elem; metal::PixelFormat pf; };
+    static const BufTexEnt kBufTex[] = {
+        {0x8235, 4, metal::PixelFormat::R32Sint},
+        {0x8236, 4, metal::PixelFormat::R32Uint},
+        {0x822E, 4, metal::PixelFormat::R32Float},
+        {0x8231, 1, metal::PixelFormat::R8Sint},
+        {0x8232, 1, metal::PixelFormat::R8Uint},
+        {0x8233, 2, metal::PixelFormat::R16Sint},
+        {0x8234, 2, metal::PixelFormat::R16Uint},
+        {0x822D, 2, metal::PixelFormat::R16Float},
+    };
+    const BufTexEnt* pick = nullptr;
+    for (auto& e : kBufTex)
+        if (e.gl == inf) { pick = &e; break; }
+    if (pick) {
+        size_t elem = pick->elem;
+        metal::PixelFormat pf = pick->pf;
+        size_t n = itb->second.data.size() / elem;
         if (n == 0) n = 1;
-        itt->second.w = (uint32_t)n;
-        itt->second.h = 1;
-        std::vector<uint8_t> tmp(n * 4, 0);
+        // Metal giới hạn width 16384 (A11 validate → abort). n=710178 từng crash:
+        // `MTLTextureDescriptor has width (710178) greater than ... 16384`.
+        // Đóng khung W=min(n,16384) hàng, H=ceil(n/W) — shader đọc theo
+        // (i%W, i/W) (xem glsl_to_msl texelFetch buffer) nên index < n vẫn đúng.
+        const size_t kMaxW = 16384;
+        uint32_t W = (uint32_t)std::min<size_t>(n, kMaxW);
+        uint32_t H = (uint32_t)((n + W - 1) / W);
+        itt->second.w = W;
+        itt->second.h = H;
+        std::vector<uint8_t> tmp((size_t)W * H * elem, 0);
         memcpy(tmp.data(), itb->second.data.data(),
                std::min(tmp.size(), itb->second.data.size()));
         itt->second.pixels = tmp;
         itt->second.gpu = c.device->newTextureWithBytes(
-            (uint32_t)n, 1, itt->second.internalFormat == 0x8235 ? metal::PixelFormat::R32Sint
-                         : itt->second.internalFormat == 0x8236 ? metal::PixelFormat::R32Uint
-                                                                 : metal::PixelFormat::R32Float,
-            tmp.data(), n * 4);
+            W, H, pf, tmp.data(), (size_t)W * elem);
         if (!itt->second.gpu)
             c.LogDebug(0, 0, 0, 0, "glTexBuffer: GPU int texture fail, shadow only");
+        if (c.DiagOn()) {
+            static std::set<uint64_t> seenBB;
+            uint64_t key = ((uint64_t)tex << 20) ^ ((uint64_t)inf << 4) ^
+                           (uint64_t)(n >> 10);
+            if (seenBB.size() < 24 && seenBB.insert(key).second) {
+                static int nBB = 0;
+                fprintf(stderr,
+                        "[TGLMT] bufbind#%d tex#%u ifmt=0x%04x bytes=%zu n=%zu %ux%u gpu=%d\n",
+                        ++nBB, tex, inf, itb->second.data.size(), n, W, H,
+                        (int)(itt->second.gpu != nullptr));
+                fflush(stderr);
+            }
+        }
+    } else if (c.DiagOn()) {
+        static int nBN = 0;
+        if (++nBN <= 8)
+            fprintf(stderr, "[TGLMT] bufnop#%d ifmt=0x%04x (buffer texture format chưa hỗ trợ, shadow only)\n",
+                    nBN, inf);
+        fflush(stderr);
     }
 }
 void glTexBuffer(GLenum t, GLenum inf, GLuint b) {

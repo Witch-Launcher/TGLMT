@@ -125,6 +125,9 @@ void glVertexAttribIFormat(GLuint i, GLint size, GLenum type, GLuint rel) {
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
     v->attribs[i].size = size; v->attribs[i].type = type; v->attribs[i].relativeOffset = rel; v->attribs[i].isInt = true;
+    // Format integer: normalized/isLong của lần gọi trước không còn ý nghĩa
+    // (VAO có thể được dùng lại cho format khác → descriptor sai âm thầm).
+    v->attribs[i].normalized = 0; v->attribs[i].isLong = false;
     VAOSyncAttribOffset(*v, i);
 }
 void glVertexAttribLFormat(GLuint i, GLint size, GLenum type, GLuint rel) {
@@ -133,6 +136,7 @@ void glVertexAttribLFormat(GLuint i, GLint size, GLenum type, GLuint rel) {
     VertexArrayObject* v = CurVAO(c);
     if (!v) return;
     v->attribs[i].size = size; v->attribs[i].type = type; v->attribs[i].relativeOffset = rel; v->attribs[i].isLong = true;
+    v->attribs[i].normalized = 0; v->attribs[i].isInt = false;
     VAOSyncAttribOffset(*v, i);
 }
 void glBindVertexBuffer(GLuint bi, GLuint buf, GLintptr off, GLsizei stride) {

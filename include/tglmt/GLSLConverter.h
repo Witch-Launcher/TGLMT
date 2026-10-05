@@ -44,11 +44,12 @@ struct GLSLVar {
     bool isArray = false;  // sampler2DArray → texture2d_array
     bool isShadow = false; // sampler2DShadow → texture2D approx (bỏ compare ref)
 };
-// Uniform block (UBO read-only): `layout(std140) uniform Block { members }`.
+// Uniform block (UBO read-only): `layout(std140[, binding=N]) uniform Block { ... }`.
 struct GLSLBlock {
     std::string name;
     std::vector<GLSLVar> members;
     size_t bufferSize = 0;
+    int binding = -1; // layout(binding=N): -1 = không khai báo (mặc định 0)
 };
 // Location tạm cho varying/attribute thiếu layout: LinkProgram viết lại số thật.
 constexpr int kTempLocBase = 900;

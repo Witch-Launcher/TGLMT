@@ -115,8 +115,15 @@ void glScissorIndexedv(GLuint i, const GLint* v) {
     if (i == 0 && v) Context::Current().state.SetScissor(v[0], v[1], v[2], v[3]);
 }
 void glClipControl(GLenum o, GLenum d) { Context::Current().state.SetClipControl(o, d); }
-void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) { (void)r;(void)g;(void)b;(void)a; }
-void glColorMaski(GLuint i, GLboolean r, GLboolean g, GLboolean b, GLboolean a) { (void)i;(void)r;(void)g;(void)b;(void)a; }
+void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
+    uint8_t m = (r ? 1 : 0) | (g ? 2 : 0) | (b ? 4 : 0) | (a ? 8 : 0);
+    Context& c = Context::Current();
+    for (int i = 0; i < 8; ++i) c.state.SetColorMask((GLuint)i, m);
+}
+void glColorMaski(GLuint i, GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
+    uint8_t m = (r ? 1 : 0) | (g ? 2 : 0) | (b ? 4 : 0) | (a ? 8 : 0);
+    if ((int)i < 8) Context::Current().state.SetColorMask(i, m);
+}
 void glDepthRangeArrayfvNV(GLuint a, GLsizei b, const GLfloat* c_) { (void)a;(void)b;(void)c_; }
 void glLogicOp(GLenum o) { Context::Current().state.SetShadow(0x0BF1, &o, 4); }
 void glSampleCoverage(GLfloat v, GLboolean inv) { (void)v;(void)inv; }

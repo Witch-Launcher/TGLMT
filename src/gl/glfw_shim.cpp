@@ -86,9 +86,16 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
         st.renderer->context().FlushPendingEncoder();
         st.renderer->context().FlushAllBufferStaging();
         st.renderer->context().FlushAllTextureStaging();
-        st.renderer->context().device->commitAndWait();
+        // KHÔNG commitAndWait() mỗi frame. Trước đây chờ GPU xong trước khi
+        // present ⇒ CPU↔GPU nối tiếp (mất pipeline, tốn ~1 frame input latency,
+        // thấy rõ khi lia cam nhanh) và present phải chờ thêm vòng blit.
+// Nay chỉ chặn khi số frame đang bay vượt ngân sách (ThrottleGpu). An toàn
+    // vì command buffer Metal chạy đúng thứ tự submit trên cùng queue: frame
+    // N+1 chỉ ghi FBO 0 sau khi present của frame N đã đọc xong.
+        st.renderer->context().ThrottleGpu();
     }
     bool ok = st.renderer->EndFrame(metalLayer);
+    if (ok) ++st.renderer->context().appleStats.presentPasses;
     // Chẩn đoán đen màn hình trên máy thật: log counters throttled.
     // drawsEnc < drawsAtt nhiều => pipeline/target rớt ở AppleDrawGL;
     // drawsEnc ~= drawsAtt mà vẫn đen => dữ liệu (vertex/uniform/texture).
@@ -133,13 +140,21 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     center[3] = one[3];
                 }
             }
+            // Tag build: force-diag nhận diện được ngay dòng frame=1 trong log
+            // (phát hiện sai dylib trên máy — TGLMT_DIAG không set được từ launcher).
+#if defined(TGLMT_FORCE_DIAG)
+            static const char* kBuildTag = "p1-flip-throttle";
+#else
+            static const char* kBuildTag = "p1-flip-throttle";
+#endif
             fprintf(stderr,
-                    "[TGLMT] build=b5-readfix-ubo frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
+                    "[TGLMT] build=%s frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
                     "misc=%llu clears=%llu blits=%llu copyTex=%llu mipBase=%llu "
-                    "range=%llu hazard=%llu uboSmall=%llu target=%p %ux%u "
+                    "range=%llu hazard=%llu uboSmall=%llu mipSkip=%llu texWasRTFl=%llu target=%p %ux%u "
                     "vp=%.0fx%.0f@%.0f,%.0f center=(%u,%u,%u,%u) present=%d\n",
-                    (unsigned long long)nSwap, dt, (unsigned long long)(a.drawsAttempted - pAtt),
+                    kBuildTag, (unsigned long long)nSwap, dt,
+                    (unsigned long long)(a.drawsAttempted - pAtt),
                     (unsigned long long)(a.drawsEncoded - pEnc),
                     (unsigned long long)a.drawsAttempted, (unsigned long long)a.drawsEncoded,
                     a.progEncoded.size(), (unsigned long long)a.noProgram,
@@ -149,15 +164,22 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.mipBase,
                     (unsigned long long)a.rangeWarn, (unsigned long long)a.hazardWarn,
                     (unsigned long long)a.uboSmall,
+                    (unsigned long long)a.mipLevelSkipped, (unsigned long long)a.texWasRTFlush,
                     (const void*)tgt.get(), tw, th, vp.x, vp.y, vp.w, vp.h, center[0],
                     center[1], center[2], center[3], (int)ok);
             // IR batching counters (riêng 1 dòng để dễ grep trên latestlog):
             // encNew<<draws chứng minh 1 encoder cho N draws; skip/merge >0
             // chứng minh dirty-check + coalesce có chạy trên máy thật.
+            Context& cx = st.renderer->context();
+            a.cbCommittedNow = cx.cbCommitted.load();
+            a.cbCompletedNow = cx.cbCompleted.load();
             fprintf(stderr,
                     "[TGLMT] ir frame=%llu encNew=%llu encReuse=%llu pipeRe=%llu "
                     "pipeLk=%llu pipeSkip=%llu uniRe=%llu depthRe=%llu stSkip=%llu "
-                    "bufCoal=%llu bufFl=%llu texCoal=%llu texFl=%llu\n",
+                    "bufCoal=%llu bufFl=%llu texCoal=%llu texFl=%llu "
+                    "bufRot=%llu bufWait=%llu uboMap=%llu texWasRT=%llu texWait=%llu "
+                    "ringAlloc=%llu ringWrap=%llu tempAlloc=%llu thr=%llu "
+                    "cbC=%llu cbD=%llu clrFail=%llu pres=%llu\n",
                     (unsigned long long)nSwap, (unsigned long long)a.encodersCreated,
                     (unsigned long long)a.encoderReused, (unsigned long long)a.pipelineReused,
                     (unsigned long long)a.pipelineLookups,
@@ -165,7 +187,14 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.uniformReused, (unsigned long long)a.depthReused,
                     (unsigned long long)a.stateSkipped, (unsigned long long)a.bufferCoalesced,
                     (unsigned long long)a.bufferFlushes, (unsigned long long)a.texCoalesced,
-                    (unsigned long long)a.texFlushes);
+                    (unsigned long long)a.texFlushes, (unsigned long long)a.bufRotated,
+                    (unsigned long long)a.bufWaitStall, (unsigned long long)a.uboFromMap,
+                    (unsigned long long)a.texWasRTFlush, (unsigned long long)a.texWaitStall,
+                    (unsigned long long)a.ringAllocs, (unsigned long long)a.ringWraps,
+                    (unsigned long long)a.tempAllocs, (unsigned long long)a.framesThrottled,
+                    (unsigned long long)a.cbCommittedNow, (unsigned long long)a.cbCompletedNow,
+                    (unsigned long long)a.clearRegionFails,
+                    (unsigned long long)a.presentPasses);
             fflush(stderr);
             pAtt = a.drawsAttempted;
             pEnc = a.drawsEncoded;
