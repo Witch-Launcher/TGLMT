@@ -185,9 +185,13 @@ struct ProgramObject {
         GLuint binding = 0;
         int layoutBinding = -1; // layout(binding=N) trong GLSL (-1 = không có)
         bool isVS = true;
-        // Kích thước struct thật (end offset lớn nhất, KHÔNG pad 16 cuối) để
-        // phát hiện buffer thiếu (misbound) trước khi bind GPU (A11 fault OOB).
+        // minSize = kích thước std140 làm tròn 16 == GL UNIFORM_BLOCK_DATA_SIZE.
         size_t minSize = 0;
+        // trueSize = end offset lớn nhất (KHÔNG pad cuối) — ngưỡng "buffer thiếu".
+        // App bind đúng struct thật (140/56/40/12B) vẫn phải ĐƯỢC UPLOAD với pad 0
+        // phía sau; dùng minSize làm ngưỡng sẽ zero-fallback oan → ma trận = 0 →
+        // geometry suy biến (ô atlas trống / model vô hình).
+        size_t trueSize = 0;
     };
     std::vector<UniformBlock> uniformBlocks;
     // Thứ tự block KHAI BÁO RIÊNG mỗi stage (khớp [[buffer(17+bi)]] mà converter
@@ -285,6 +289,7 @@ public:
         uint64_t mipLevelSkipped = 0; // draw/clear vào mip level>0 của texture 1-level (animate bake) → bỏ qua an toàn
         uint64_t mipStaged = 0;      // TexSubImage level>0 đã lưu shadow (GPU base-level không sync)
         uint64_t uboSmall = 0;       // UBO buffer thiếu so với struct → zero fallback (chống fault)
+        uint64_t uboPad = 0;         // UBO thiếu đúng pad std140 (≤16B) → upload thật + pad 0
         // In-flight write: GPU còn đang đọc shared memory này khi app ghi lại →
         // phải xoay sang buffer pool slot khác (thay vì alloc MTLBuffer mới).
         uint64_t bufRotated = 0;     // số lần xoay pool slot

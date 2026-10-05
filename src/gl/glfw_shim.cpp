@@ -151,7 +151,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     "[TGLMT] build=%s frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
                     "misc=%llu clears=%llu blits=%llu copyTex=%llu mipBase=%llu "
-                    "range=%llu hazard=%llu uboSmall=%llu mipSkip=%llu texWasRTFl=%llu target=%p %ux%u "
+                    "range=%llu hazard=%llu uboSmall=%llu uboPad=%llu mipSkip=%llu texWasRTFl=%llu target=%p %ux%u "
                     "vp=%.0fx%.0f@%.0f,%.0f center=(%u,%u,%u,%u) present=%d\n",
                     kBuildTag, (unsigned long long)nSwap, dt,
                     (unsigned long long)(a.drawsAttempted - pAtt),
@@ -164,6 +164,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.mipBase,
                     (unsigned long long)a.rangeWarn, (unsigned long long)a.hazardWarn,
                     (unsigned long long)a.uboSmall,
+                    (unsigned long long)a.uboPad,
                     (unsigned long long)a.mipLevelSkipped, (unsigned long long)a.texWasRTFlush,
                     (const void*)tgt.get(), tw, th, vp.x, vp.y, vp.w, vp.h, center[0],
                     center[1], center[2], center[3], (int)ok);

@@ -1021,9 +1021,14 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         auto uploadBlock = [&](const std::string& nm) -> UboBind {
             UboBind r;
             GLuint point = 0;
-            size_t need = 0;
+            size_t need = 0, trueNeed = 0;
             for (auto& b : pr.uniformBlocks)
-                if (b.name == nm) { point = b.binding; need = b.minSize; break; }
+                if (b.name == nm) {
+                    point = b.binding;
+                    need = b.minSize;
+                    trueNeed = b.trueSize ? b.trueSize : b.minSize;
+                    break;
+                }
             auto bit = c.uniformBindPoints.find(point);
             if (bit == c.uniformBindPoints.end() || !bit->second.buffer) {
                 c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " unbound, zero fallback");
@@ -1043,6 +1048,17 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
             auto t = c.buffers.find(bit->second.buffer);
             if (t == c.buffers.end() || t->second.data.empty()) {
+                if (c.DiagOn()) {
+                    static std::set<uint64_t> loggedNodata;
+                    uint64_t nk = ((uint64_t)prog << 32) ^ std::hash<std::string>{}(nm);
+                    if (loggedNodata.size() < 32 && loggedNodata.insert(nk).second) {
+                        fprintf(stderr,
+                                "[TGLMT] uboNodata#%zu prog@%u %s point=%u buf=%u%s\n",
+                                loggedNodata.size(), prog, nm.c_str(), point,
+                                bit->second.buffer, (t == c.buffers.end()) ? " missing" : " empty");
+                        fflush(stderr);
+                    }
+                }
                 c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " nodata, zero fallback");
                 return r;
             }
@@ -1058,21 +1074,29 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                                           : t->second.data.size() - off;
             len = std::min(len, t->second.data.size() - off);
             if (!len) return r;
-            // Buffer thiếu so với struct shader cần (misbound: vd Globals đọc
-            // nhầm buffer SamplerInfo 16B trong khi struct 56B) → đọc OOB hoặc
-            // rác điều khiển loop (MenuBlurRadius khổng lồ → treo GPU → iOS ban
-            // submissions, đen + đứng hình). Zero fallback giữ GPU sống (GL coi
-            // là undefined, blur thành sharp còn hơn fault).
-            if (need && len < need) {
+            // Buffer thiếu hơn HẾT struct shader đọc (trueSize: misbound, vd
+            // Globals đọc nhầm buffer SamplerInfo 16B trong khi struct 52B) →
+            // đọc OOB hoặc rác điều khiển loop (MenuBlurRadius khổng lồ → treo
+            // GPU → iOS ban submissions, đen + đứng hình). Zero fallback giữ GPU
+            // sống (GL coi là undefined, blur thành sharp còn hơn fault).
+            //
+            // Nguong dung trueSize (KHONG phai minSize da lam tron 140→144):
+            // app bind dung struct that (khong gom pad cuoi) → chi thieu chinh
+            // pad std140. Zero-fallback luc do PHA SO MA NGHIA (ProjectionMatrix/
+            // SpriteMatrix = 0 → gl_Position = 0 → draw degenerate → atlas bake +
+            // terrain + GUI VO HINH). Thuong gap: SpriteAnimationInfo 140/144,
+            // Fog 40/48, Globals 56/64, BlurConfig 12/16.
+            if (need && len < trueNeed) {
                 ++c.appleStats.uboSmall;
                 static std::set<uint64_t> loggedSmall;
                 uint64_t sk = ((uint64_t)prog << 32) ^ std::hash<std::string>{}(nm);
                 if (loggedSmall.size() < 32 && loggedSmall.insert(sk).second) {
                     if (c.DiagOn()) {
                         fprintf(stderr,
-                                "[TGLMT] uboSmall#%zu prog@%u %s have=%zu need=%zu point=%u buf=%u\n",
-                                loggedSmall.size(), prog, nm.c_str(), len, need, point,
-                                bit->second.buffer);
+                                "[TGLMT] uboSmall#%zu prog@%u %s have=%zu need=%zu true=%zu "
+                                "point=%u buf=%u\n",
+                                loggedSmall.size(), prog, nm.c_str(), len, need, trueNeed,
+                                point, bit->second.buffer);
                         fflush(stderr);
                     }
                     char b[160];
@@ -1083,12 +1107,27 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 }
                 return r;
             }
+            if (need && len < need) {
+                ++c.appleStats.uboPad;
+                static std::set<uint64_t> loggedPad;
+                uint64_t pk = ((uint64_t)prog << 32) ^ std::hash<std::string>{}(nm);
+                if (c.DiagOn() && loggedPad.size() < 32 && loggedPad.insert(pk).second) {
+                    fprintf(stderr,
+                            "[TGLMT] uboPad#%zu prog@%u %s have=%zu need=%zu true=%zu "
+                            "point=%u buf=%u pad-std140\n",
+                            loggedPad.size(), prog, nm.c_str(), len, need, trueNeed, point,
+                            bit->second.buffer);
+                    fflush(stderr);
+                }
+            }
             // Pad 0 lên bội số 16 (std140 pad; A11 TBDR nghiêm OOB).
             // Ring upload trực tiếp từ shadow; padBuf chỉ alloc khi len lẻ 16.
             // Buffer đang mapped (map trả con trỏ GPU): shadow CHƯA phản ánh
             // bytes game vừa ghi → phải đọc từ gpu->contents(), không đọc shadow
             // (đọc shadow = ma trận cũ → entity méo/chớp).
             size_t padded = (len + 15) & ~((size_t)15);
+            // Không bao giờ upload ngắn hơn minSize (shader đọc tới đó → OOB A11).
+            if (need > padded) padded = (need + 15) & ~((size_t)15);
             const uint8_t* srcPtr = nullptr;
             if (t->second.mapped && t->second.gpu) {
                 const uint8_t* g = (const uint8_t*)t->second.gpu->contents();
@@ -1590,6 +1629,25 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     c.appleStats.drawsEncoded++;
     c.appleStats.progEncoded[prog]++;
+    // fboDraw#: ĐẾM draw THẬT mỗi FBO (không qua quota dedup 8/prog) — trả lời
+    // "bake atlas có chạy hàng trăm draw không hay chỉ 8 draw". Kèm size encoder
+    // đang mở: lệch vs FBO = vẽ vào sai target (nguyên nhân atlas rỗng).
+    if (c.DiagOn() && c.state.BoundDrawFBO() != 0) {
+        static std::map<std::pair<GLuint, GLuint>, uint64_t> nFbo;
+        auto& n = nFbo[{c.state.BoundDrawFBO(), prog}];
+        uint64_t cur = ++n;
+        if (cur <= 4 || (cur % 256) == 0) {
+            uint32_t ew = 0, eh = 0;
+            if (c.pendingTarget) { ew = c.pendingTarget->width(); eh = c.pendingTarget->height(); }
+            fprintf(stderr,
+                    "[TGLMT] fboDraw# fbo=%u tex=%u prog=%u n=%llu enc=%ux%u "
+                    "encTex=%u encFbo=%u\n",
+                    (unsigned)c.state.BoundDrawFBO(), (unsigned)drawColorTexId,
+                    prog, (unsigned long long)cur, ew, eh,
+                    (unsigned)c.pendingColorTex, (unsigned)c.pendingDrawFBO);
+            fflush(stderr);
+        }
+    }
     // Chẩn đoán đen màn hình: chỉ khi TGLMT_DIAG=1. Release bỏ qua toàn bộ
     // dump (fprintf + wrapAsTarget readback trong dump = sync stall).
     if (c.DiagOn())
@@ -1605,24 +1663,38 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             if (!atlasProbed) {
                 for (auto& ub : pr.uniformBlocks) {
                     if (ub.name != "ChunkSection") continue;
-                    auto tit = c.textures.find(tex0);
-                    if (tit != c.textures.end() && tit->second.gpu &&
-                        tit->second.w >= 1024 && tit->second.h >= 256) {
-                        atlasProbed = true;
-                        size_t w = tit->second.w, h = tit->second.h;
+                    atlasProbed = true;
+                    // Đọc MỌI atlas lớn đã từng là render-target (blocks/gui/items)
+                    // thay vì chỉ tex0: trả lời "tất cả atlas rỗng hay chỉ 1 cái".
+                    int nProbe = 0;
+                    for (auto& kv : c.textures) {
+                        auto& t = kv.second;
+                        if (!t.wasRT || !t.gpu || t.w < 512 || t.h < 512) continue;
+                        if (nProbe++ >= 8) break;
+                        size_t w = t.w, h = t.h;
                         std::vector<uint8_t> fb(w * h * 4, 0);
                         // Readback KHÔNG flush/commit = thấy dữ liệu cũ → kết luận
                         // sai ("atlas rỗng" oan). Bắt buộc commit trước khi đọc.
                         c.FlushPendingEncoder();
                         c.CommitAndWait();
-                        auto wt = c.device->wrapAsTarget(tit->second.gpu.get(), nullptr);
+                        auto wt = c.device->wrapAsTarget(t.gpu.get(), nullptr);
                         if (wt && wt->readback(fb.data(), w * 4)) {
-                            size_t stride = std::max<size_t>(1, (w * h) / 8192), nz = 0,
-                                                                                     tot = 0;
-                            for (size_t i = 0; i < w * h; i += stride) {
-                                const uint8_t* q = fb.data() + i * 4;
-                                if (q[0] | q[1] | q[2] | q[3]) ++nz;
-                                ++tot;
+                            // Lưới 2D (không phải stride dọc): stride dọc chỉ chọn
+                            // 16 cột → bỏ sót sprite 16px. Lưới ≥16px/cột TRÙM mọi
+                            // sprite 16px nên nz mới phản ánh coverage thật.
+                            size_t nx = std::min<size_t>(128, w), ny = std::min<size_t>(128, h);
+                            size_t nz = 0, tot = 0, bandNz[16] = {0};
+                            for (size_t by = 0; by < ny; ++by) {
+                                size_t y = by * h / ny;
+                                for (size_t bx = 0; bx < nx; ++bx) {
+                                    size_t x = bx * w / nx;
+                                    const uint8_t* q = fb.data() + (y * w + x) * 4;
+                                    ++tot;
+                                    if (q[0] | q[1] | q[2] | q[3]) {
+                                        ++nz;
+                                        bandNz[std::min<size_t>(15, by * 16 / ny)]++;
+                                    }
+                                }
                             }
                             auto px = [&](size_t x, size_t y, unsigned* o) {
                                 const uint8_t* p = fb.data() + (y * w + x) * 4;
@@ -1632,16 +1704,24 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                             px(0, 0, p00);
                             px(w / 2, h / 2, pmid);
                             px(w - 1, h - 1, pnn);
+                            char bands[160];
+                            snprintf(bands, sizeof(bands),
+                                     "%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu",
+                                     bandNz[0], bandNz[1], bandNz[2], bandNz[3], bandNz[4],
+                                     bandNz[5], bandNz[6], bandNz[7], bandNz[8], bandNz[9],
+                                     bandNz[10], bandNz[11], bandNz[12], bandNz[13],
+                                     bandNz[14], bandNz[15]);
                             fprintf(stderr,
                                     "[TGLMT] atlasprobe# tex=%u %zux%zu nz=%zu/%zu "
                                     "px00=(%u,%u,%u,%u) mid=(%u,%u,%u,%u) "
-                                    "pxnn=(%u,%u,%u,%u)\n",
-                                    tex0, w, h, nz, tot, p00[0], p00[1], p00[2], p00[3],
+                                    "pxnn=(%u,%u,%u,%u) prog@%u\n"
+                                    "[TGLMT] atlasbands# tex=%u b0..b15=%s\n",
+                                    kv.first, w, h, nz, tot, p00[0], p00[1], p00[2], p00[3],
                                     pmid[0], pmid[1], pmid[2], pmid[3], pnn[0], pnn[1],
-                                    pnn[2], pnn[3]);
+                                    pnn[2], pnn[3], prog, kv.first, bands);
                         } else {
                             fprintf(stderr, "[TGLMT] atlasprobe# tex=%u readback FAIL\n",
-                                    tex0);
+                                    kv.first);
                         }
                     }
                     break;
@@ -2224,13 +2304,21 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 float bc[4];
                 c.state.GetBlendColor(bc);
                 auto sc = c.state.GetScissor();
+                ViewportState vp0 = c.state.GetViewport(0);
+                uint32_t rtW = target ? target->width() : 0, rtH = target ? target->height() : 0;
+                uint32_t ff = c.state.FrontFace();
+                if (c.state.ClipOrigin() != 0x8CA2)
+                    ff = (ff == 0x0900) ? 0x0901u : 0x0900u;
                 fprintf(stderr,
                         "[TGLMT]   state blend=%d cull=%d/%d depth=%d scissor=%d[%d,%d,%d,%d] "
-                        "clear=(%.2f,%.2f,%.2f,%.2f)\n",
+                        "clear=(%.2f,%.2f,%.2f,%.2f) "
+                        "vp=(%.0f,%.0f,%.0fx%.0f) rt=%ux%u frontF=0x%x mask=%d\n",
                         (int)c.state.IsEnabled(0x0BE2), (int)c.state.IsEnabled(0x0B44),
                         c.state.CullMode(), (int)c.state.IsEnabled(0x0B71),
                         (int)c.state.IsEnabled(0x0C11), sc.x, sc.y, sc.w, sc.h, c.clearColor[0],
-                        c.clearColor[1], c.clearColor[2], c.clearColor[3]);
+                        c.clearColor[1], c.clearColor[2], c.clearColor[3],
+                        vp0.x, vp0.y, vp0.w, vp0.h, rtW, rtH, ff,
+                        (int)c.state.ColorMask(0));
             }
             fflush(stderr);
         }

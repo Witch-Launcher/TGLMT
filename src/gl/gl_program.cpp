@@ -274,6 +274,7 @@ void glLinkProgram(GLuint p) {
                 // dùng max end-offset (không pad) nên dễ hơn slice thật 1..15
                 // byte → tưởng buffer thiếu → bind zero → ma trận toàn 0 →
                 // geometry suy biến (ô atlas trống / model vô hình).
+                ub.trueSize = need;
                 ub.minSize = (need + 15) & ~(size_t)15;
             }
         }
