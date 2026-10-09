@@ -153,6 +153,7 @@ void Context::NoteBufferUsed(GLuint buf) {
 // GPU đã execute xong mọi command đã commit → buffer đọc trước đó an toàn để
 // ghi tại chỗ. Tăng waitGen để FlushBufferStaging phân biệt in-flight.
 void Context::CommitAndWait() {
+    PhaseTimer pt(appleStats, &AppleStats::nsStall);
     if (device) device->commitAndWait();
     ++waitGen;
     cbCompleted.store(cbCommitted.load(std::memory_order_relaxed),
@@ -238,7 +239,7 @@ void Context::RefreshMemStats() {
                   TexelBytes(t.gpu->pixelFormat());
         ++nt;
     }
-    uint64_t bsh = 0, gb = 0, gpool = 0, nb = 0;
+    uint64_t bsh = 0, gb = 0, gpool = 0, nb = 0, npool = 0, maxb = 0;
     // ĐẾM UNIQUE: sau lần xoay đầu, bo.gpu trỏ vào chính 1 slot của bo.pool
     // (gl_buffer.cpp: `bo.gpu = target`) → cộng cả hai là đếm đôi.
     // Tách pool ra riêng: pool là thứ TGLMT GIỮ THÊM để tránh chờ GPU, còn
@@ -254,7 +255,11 @@ void Context::RefreshMemStats() {
             if (p && seen.insert(p.get()).second) gpool += p->length();
         };
         addBase(b.gpu);
-        for (auto& s : b.pool) addPool(s.buf);
+        for (auto& s : b.pool) {
+            if (s.buf) ++npool;
+            addPool(s.buf);
+        }
+        if (b.gpu && b.gpu->length() > maxb) maxb = b.gpu->length();
         ++nb;
     }
     uint64_t ring = 0;
@@ -271,6 +276,8 @@ void Context::RefreshMemStats() {
     appleStats.nTextures = nt;
     appleStats.nBuffers = nb;
     appleStats.nBufferStaged = (uint64_t)pendingBufRanges.size();
+    appleStats.nPool = npool;
+    appleStats.maxBuf = maxb;
 }
 
 // Dump texring: 96 call bind gần nhất, chron order (cũ → mới) để thấy chuỗi

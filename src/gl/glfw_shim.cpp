@@ -106,6 +106,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
         using clock = std::chrono::steady_clock;
         static uint64_t nSwap = 0;
         static uint64_t pAtt = 0, pEnc = 0;
+        static uint64_t pDraw = 0, pClr = 0, pEnd = 0, pStall = 0;
         static clock::time_point pT = clock::now();
         ++nSwap;
         bool first12 = nSwap <= 12;
@@ -113,6 +114,12 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             auto now = clock::now();
             long dt = (long)std::chrono::duration_cast<std::chrono::milliseconds>(now - pT).count();
             auto& a = st.renderer->context().appleStats;
+            // Phân rã dt theo pha (ms trong cửa sổ này): draw/clear/present/stall.
+            // draw+clr+end+stall << dt ⇒ thời gian nằm ngoài TGLMT (game/MobileGlues).
+            long msDraw = (long)((a.nsDraw - pDraw) / 1000000);
+            long msClr = (long)((a.nsClear - pClr) / 1000000);
+            long msEnd = (long)((a.nsEnd - pEnd) / 1000000);
+            long msStall = (long)((a.nsStall - pStall) / 1000000);
             uint32_t tw = 0, th = 0;
             auto tgt = st.renderer->context().device->defaultRenderTarget();
             if (tgt) {
@@ -143,16 +150,17 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             // Tag build: force-diag nhận diện được ngay dòng frame=1 trong log
             // (phát hiện sai dylib trên máy — TGLMT_DIAG không set được từ launcher).
 #if defined(TGLMT_FORCE_DIAG)
-            static const char* kBuildTag = "p1-flip-throttle";
+            static const char* kBuildTag = "p2-phase-time";
 #else
-            static const char* kBuildTag = "p1-flip-throttle";
+            static const char* kBuildTag = "p2-phase-time";
 #endif
             fprintf(stderr,
                     "[TGLMT] build=%s frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
                     "att=%llu enc=%llu progs=%zu noProg=%llu noTgt=%llu noPipe=%llu "
                     "misc=%llu clears=%llu blits=%llu copyTex=%llu mipBase=%llu "
                     "range=%llu hazard=%llu uboSmall=%llu uboPad=%llu mipSkip=%llu texWasRTFl=%llu target=%p %ux%u "
-                    "vp=%.0fx%.0f@%.0f,%.0f center=(%u,%u,%u,%u) present=%d\n",
+                    "vp=%.0fx%.0f@%.0f,%.0f center=(%u,%u,%u,%u) present=%d "
+                    "drawMs=%ld clrMs=%ld endMs=%ld stallMs=%ld\n",
                     kBuildTag, (unsigned long long)nSwap, dt,
                     (unsigned long long)(a.drawsAttempted - pAtt),
                     (unsigned long long)(a.drawsEncoded - pEnc),
@@ -167,7 +175,8 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.uboPad,
                     (unsigned long long)a.mipLevelSkipped, (unsigned long long)a.texWasRTFlush,
                     (const void*)tgt.get(), tw, th, vp.x, vp.y, vp.w, vp.h, center[0],
-                    center[1], center[2], center[3], (int)ok);
+                    center[1], center[2], center[3], (int)ok,
+                    msDraw, msClr, msEnd, msStall);
             // IR batching counters (riêng 1 dòng để dễ grep trên latestlog):
             // encNew<<draws chứng minh 1 encoder cho N draws; skip/merge >0
             // chứng minh dirty-check + coalesce có chạy trên máy thật.
@@ -203,7 +212,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             fprintf(stderr,
                     "[TGLMT] mem frame=%llu shadowMB=%llu (tex=%llu mip=%llu face=%llu buf=%llu) "
                     "gpuMB=%llu (tex=%llu buf=%llu pool=%llu ring=%llu) "
-                    "nTex=%llu nBuf=%llu staged=%llu\n",
+                    "nTex=%llu nBuf=%llu staged=%llu nPool=%llu maxBufMB=%llu\n",
                     (unsigned long long)nSwap,
                     (unsigned long long)((a.memTexBase + a.memTexMip + a.memTexFace +
                                           a.memBufShadow) >>(20)),
@@ -218,10 +227,15 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)(a.memGpuBufPool >> 20),
                     (unsigned long long)(a.memGpuRing >> 20),
                     (unsigned long long)a.nTextures, (unsigned long long)a.nBuffers,
-                    (unsigned long long)a.nBufferStaged);
+                    (unsigned long long)a.nBufferStaged, (unsigned long long)a.nPool,
+                    (unsigned long long)(a.maxBuf >> 20));
             fflush(stderr);
             pAtt = a.drawsAttempted;
             pEnc = a.drawsEncoded;
+            pDraw = a.nsDraw;
+            pClr = a.nsClear;
+            pEnd = a.nsEnd;
+            pStall = a.nsStall;
             pT = now;
         }
     }

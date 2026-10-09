@@ -17,6 +17,7 @@
 #include <string>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 
 namespace tglmt {
 
@@ -370,8 +371,32 @@ public:
         uint64_t memGpuBufPool = 0;   // sum BufferObject::pool slots (xoay in-flight)
         uint64_t memGpuRing = 0;      // sum Context::ringBuf (temp upload 3x4MB)
         uint64_t nTextures = 0, nBuffers = 0, nBufferStaged = 0;
+        // Phân chia thời gian CPU theo pha (nanoseconds, tích luỹ) — log build=
+        // tách ra drawMs/clrMs/endMs/stallMs để biết frame ~50ms đi đâu khi
+        // thr=0 (GPU không nghẽn) mà FPS vẫn thấp. Không cần profiler trên máy.
+        uint64_t nsDraw = 0;         // trong AppleDrawGL (encode 1 draw)
+        uint64_t nsClear = 0;        // trong glClear
+        uint64_t nsEnd = 0;          // trong Renderer::EndFrame (flush + present)
+        uint64_t nsStall = 0;        // trong Context::CommitAndWait (chờ GPU xong)
+        uint64_t nPool = 0;          // số slot pool đang có buffer (mem frame=)
+        uint64_t maxBuf = 0;         // buffer lớn nhất (bytes) — ai chiếm buf=420MB
     };
     AppleStats appleStats;
+
+    // RAII đo thời gian CPU của một pha: khai báo biến ở đầu hàm, huỷ tự cộng
+    // thời gian vào AppleStats::*field. Không nhánh return nào bị sót.
+    struct PhaseTimer {
+        AppleStats* st;
+        uint64_t AppleStats::*field;
+        std::chrono::steady_clock::time_point t0;
+        PhaseTimer(AppleStats& s, uint64_t AppleStats::*f)
+            : st(&s), field(f), t0(std::chrono::steady_clock::now()) {}
+        ~PhaseTimer() {
+            auto d = std::chrono::steady_clock::now() - t0;
+            st->*field +=
+                (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+        }
+    };
 
     // IR lowering — deferred materialization (1 OpenGL → 0 Metal nếu chưa cần):
     // pendingEncoder giữ MTLRenderCommandEncoder mở xuyên suốt các draw liên tiếp

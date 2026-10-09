@@ -79,6 +79,7 @@ bool Renderer::EndFrame(void* metalLayer) {
     // IR: flush batch encoder trước khi present (nếu không, draws còn nằm trong
     // encoder mở chưa commit → present thiếu hình).
     Context::MakeCurrent(impl_->ctx.get());
+    Context::PhaseTimer pt(impl_->ctx->appleStats, &Context::AppleStats::nsEnd);
     impl_->ctx->FlushPendingEncoder();
     impl_->ctx->FlushAllBufferStaging();
     impl_->ctx->FlushAllTextureStaging();

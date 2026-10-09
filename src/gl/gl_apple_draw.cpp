@@ -324,6 +324,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                  bool indexed, size_t indexByteOff, GLuint eboId, GLsizei inst,
                  GLint baseVertex, GLuint baseInstance, GLint first) {
     Context& c = Context::Current();
+    Context::PhaseTimer pt(c.appleStats, &Context::AppleStats::nsDraw);
     if (c.device->isNull()) return false;
     if (count <= 0) return true; // no-op đã lọc ở EmitDraw, giữ an toàn
     c.appleStats.drawsAttempted++;

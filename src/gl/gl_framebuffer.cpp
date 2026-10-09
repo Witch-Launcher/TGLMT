@@ -513,6 +513,7 @@ void glInvalidateNamedFramebufferData(GLuint f, GLsizei n, const GLenum* a) { (v
 void glInvalidateNamedFramebufferSubData(GLuint f, GLsizei n, const GLenum* a, GLint x, GLint y, GLsizei w, GLsizei h) { (void)f;(void)n;(void)a;(void)x;(void)y;(void)w;(void)h; }
 void glClear(GLbitfield m) {
     Context& c = Context::Current();
+    Context::PhaseTimer pt(c.appleStats, &Context::AppleStats::nsClear);
     // Metal: renderPass loadAction=Clear + clearColor/Depth/Stencil — Null: ghi shadow để test đọc
     c.state.SetShadow(0x0B00 /*CLEAR_STATE_MARKER*/, &m, 4);
     c.appleStats.glClears++; // chẩn đoán đen màn hình: clear có được gọi không
