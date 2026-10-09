@@ -36,6 +36,10 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
     if (tx.levels > 0 && level >= tx.levels) { c.errors.Record(0x0501); return; }
     // Mip level>0: đọc từ shadow per-level (TexImage/SubImage level>0 đã lưu).
     // Trước đây trả 0 câm → copyTextureToBuffer(mip)/screenshot mip đen.
+    // P1: shadow base-level có thể đã bị bỏ (Apple backend). Bản đọc từ GPU sống
+    // ở đây — KHÔNG ghi ngược vào tx.pixels, nếu không shadow sẽ hồi sinh và
+    // nuốt mất đúng phần bộ nhớ mà P1 tiết kiệm.
+    std::vector<uint8_t> gpuScratch;
     const std::vector<uint8_t>* srcPix = &tx.pixels;
     GLsizei tw = (GLsizei)tx.w, th = (GLsizei)tx.h;
     if (level != 0) {
@@ -82,25 +86,12 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
         }
         c.errors.Record(0x0501); return;
     }
-    // Làm tươi shadow từ GPU (đúng pixels cho screenshot sau render).
-    // Chỉ khi shadow RGBA8 4B (font R8/RG8 không bao giờ là đích screenshot).
+    // Đọc thẳng từ GPU (đúng pixels cho screenshot sau render).
     // Chỉ level 0 có storage GPU (mip>0 đọc shadow đã lưu ở trên).
-    if (level == 0 && c.device && !c.device->isNull() && tx.gpu && tx.w && tx.h &&
-        tx.pixels.size() >= (size_t)tx.w * tx.h * 4 &&
-        (tx.internalFormat == 0x8058 || tx.internalFormat == 0x8C43 ||
-         tx.internalFormat == 0)) {
-        c.FlushPendingEncoder(); // IR: commit batch trước khi readback
-        c.FlushAllBufferStaging();
-        c.FlushAllTextureStaging();
-        c.CommitAndWait(); // xả draws NoWait (không stale TBDR)
-        auto wrapped = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
-        if (wrapped) {
-            std::vector<uint8_t> full((size_t)tx.w * tx.h * 4, 0);
-            if (wrapped->readback(full.data(), (size_t)tx.w * 4))
-                tx.pixels = std::move(full);
-        }
-        srcPix = &tx.pixels;
-    }
+    // Không còn kiện "shadow đủ 4B" — shadow có thể rỗng chủ đích (P1); nội dung
+    // thật nằm trên GPU. Font R8/RG8 loại bởi internalFormat (không phải đích
+    // screenshot), tránh readback 4B/px trên texture 1B/px.
+    if (level == 0 && c.ReadTextureGPU(tx, gpuScratch)) srcPix = &gpuScratch;
     if (srcPix->size() < (size_t)tw * th * 4) {
         static int nShort = 0;
         if (++nShort <= 8) {
@@ -135,9 +126,10 @@ static void GetTexSubImpl(Context& c, TextureObject& tx, GLint level, GLint x, G
         auto bit = c.buffers.find(packBuf);
         if (bit == c.buffers.end()) { c.errors.Record(0x0502); return; }
         pboOff = (size_t)pixels;
-        if (pboOff + need > bit->second.data.size())
-            bit->second.data.resize(pboOff + need, 0);
-        pboVec = &bit->second.data;
+        // PBO pack ghi thẳng vào shadow → MutablePbo materialize nếu Apple
+        // backend đã bỏ shadow (P1), rồi resize đủ [0, pboOff+need).
+        pboVec = c.MutablePbo(packBuf, pboOff + need);
+        if (!pboVec) { c.errors.Record(0x0502); return; }
         dstBase = pboVec->data() + pboOff + skip;
     } else {
         dstBase = (uint8_t*)pixels + skip;

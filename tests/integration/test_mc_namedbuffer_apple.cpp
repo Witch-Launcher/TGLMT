@@ -15,6 +15,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 using namespace tglmt;
@@ -213,6 +214,36 @@ int main() {
         glDrawArrays(0x0004, 0, 3);
         Check(glGetError() == 0, "gl error case3");
         Check(ReadCenterRed(), "NamedSubData UBO ve do");
+    }
+    // Case 4 (P1b buffer shadow — chống hồi sinh): glBufferData PHẢI drop bản
+    // CPU vì GPU buffer là Shared. Shadow còn → 418MB rò trên iPhone 8 Plus
+    // (mem frame=600: shadowMB=451 buf=418) → jetsam per-process-limit.
+    {
+        GLuint b;
+        glGenBuffers(1, &b);
+        glBindBuffer(0x8892, b);
+        const size_t N = 64 * 1024;
+        glBufferData(0x8892, N, nullptr, 0x88E4);
+        Check(ctx.buffers.count(b) && ctx.buffers[b].data.empty(),
+              "glBufferData(nullptr) khong giu CPU shadow");
+        std::vector<unsigned char> rd(N, 0xAA);
+        glGetBufferSubData(0x8892, 0, N, rd.data());
+        Check(glGetError() == 0, "gl error case4 get");
+        bool allZero = true;
+        for (size_t i = 0; i < N; ++i)
+            if (rd[i]) { allZero = false; break; }
+        Check(allZero, "Buffer(nullptr) doc lai van zeros");
+        unsigned char pat[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        glBufferSubData(0x8892, 16, sizeof(pat), pat);
+        unsigned char out[8] = {0};
+        glGetBufferSubData(0x8892, 16, 8, out);
+        Check(memcmp(out, pat, 8) == 0, "SubData carry ghi dung khi khong shadow");
+        unsigned char seed[16] = {9};
+        glBufferData(0x8892, 16, seed, 0x88E4);
+        Check(ctx.buffers[b].data.empty(), "glBufferData(data) khong giu CPU shadow");
+        memset(rd.data(), 0, 16);
+        glGetBufferSubData(0x8892, 0, 16, rd.data());
+        Check(rd[0] == 9, "Buffer(data) doc dung tu GPU");
     }
     if (gFails) return 1;
     printf("test_mc_namedbuffer_apple PASS (Named write path sync GPU)\n");

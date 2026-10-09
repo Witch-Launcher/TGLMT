@@ -11,17 +11,27 @@
 #include <vector>
 using namespace tglmt;
 
+static size_t Bpp(GLenum format, GLenum type);                          // def dưới file
+static bool SyncRegionToGPU(Context& c, TextureObject& tx, GLint xoff, GLint yoff, GLsizei w,
+                            GLsizei h, const uint8_t* srcRows, size_t srcRowLen, GLenum format,
+                            GLenum type);
+
 // IR staging cho texture uploads (upload coalescing):
-// glTexSubImage* chỉ update shadow + stage region; replaceRegion dồn đến flush
-// (trước draw sampling texture / blit / readback). Nhiều sub-uploads kề nhau
-// trong 1 frame (font atlas streaming) gộp thành 1 bbox → 1 replaceRegion.
+// glTexSubImage* ghi region kèm PAYLOAD bytes (P1) + stage; replaceRegion dồn đến
+// flush (trước draw sampling texture / blit / readback). Payload đi theo region
+// nên flush không cần shadow CPU → bỏ được bản sao base-level từng texture.
 static void StageTexRegion(Context& c, GLuint texId, uint32_t x, uint32_t y, uint32_t w,
-                           uint32_t h, GLenum format, GLenum type) {
+                           uint32_t h, GLenum format, GLenum type, const uint8_t* tight) {
     if (!w || !h) return;
     // Deferred full: chỉ flush khi texture này đã dùng trong pass đang mở.
     // Atlas streaming (font glyphs) stage hàng chục regions/frame mà không phá batching.
     if (c.pendingEncoder && c.MustFlushForTextureStage(texId)) c.FlushPendingEncoder();
-    c.pendingTexRegions[texId].push_back(Context::TexRegion{x, y, w, h, format, type});
+    Context::TexRegion r{x, y, w, h, format, type, {}};
+    if (tight) {
+        size_t bpp = Bpp(format, type);
+        r.bytes.assign(tight, tight + (size_t)w * h * bpp);
+    }
+    c.pendingTexRegions[texId].push_back(std::move(r));
     ++c.appleStats.texCoalesced;
 }
 
@@ -64,9 +74,67 @@ static void LogShadowNZ(Context& c, const TextureObject& tx, GLuint id, const ch
     fflush(stderr);
 }
 
+// Upload 1 rect tight-ish (nguồn có pitch srcRowLen) lên GPU: conversion giống
+// hệt đường bbox cũ + cùng bộ log (texnop / texupd / texWasRTFlush / texFlushes).
+// Dùng cho cả 2 nguồn: shadow CPU (backend giữ shadow) và payload carry (P1).
+static void UploadTexRect(Context& c, TextureObject& tx, GLuint texId, uint32_t x0,
+                          uint32_t y0, uint32_t bw, uint32_t bh, GLenum fmt, GLenum typ,
+                          const uint8_t* srcRows, size_t srcRowLen) {
+    if (!bw || !bh || !srcRows) return;
+    bool synced = false;
+    if (typ == 0x1401 && (fmt == 0x1908 || fmt == 0x1903 || fmt == 0x8227 || fmt == 0x1906)) {
+        size_t bpp = Bpp(fmt, typ);
+        std::vector<uint8_t> tight((size_t)bw * bh * bpp);
+        for (uint32_t r = 0; r < bh; ++r)
+            memcpy(tight.data() + (size_t)r * bw * bpp, srcRows + (size_t)r * srcRowLen,
+                   (size_t)bw * bpp);
+        synced = c.device->updateTexture(tx.gpu.get(), x0, y0, bw, bh, tight.data(),
+                                         (size_t)bw * bpp);
+    } else if (typ == 0x1401 && fmt == 0x80E1) {
+        std::vector<uint8_t> rgba((size_t)bw * bh * 4);
+        for (uint32_t r = 0; r < bh; ++r)
+            for (uint32_t x = 0; x < bw; ++x) {
+                const uint8_t* s = srcRows + (size_t)r * srcRowLen + (size_t)x * 4;
+                uint8_t* d = rgba.data() + ((size_t)r * bw + x) * 4;
+                d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+            }
+        synced = c.device->updateTexture(tx.gpu.get(), x0, y0, bw, bh, rgba.data(),
+                                         (size_t)bw * 4);
+    } else if (fmt == 0x1907 && typ == 0x1401) {
+        std::vector<uint8_t> rgba((size_t)bw * bh * 4);
+        for (uint32_t r = 0; r < bh; ++r)
+            for (uint32_t x = 0; x < bw; ++x) {
+                const uint8_t* s = srcRows + (size_t)r * srcRowLen + (size_t)x * 3;
+                uint8_t* d = rgba.data() + ((size_t)r * bw + x) * 4;
+                d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+            }
+        synced = c.device->updateTexture(tx.gpu.get(), x0, y0, bw, bh, rgba.data(),
+                                         (size_t)bw * 4);
+    } else {
+        // LogDebug lặng khi app không gắn debugCb (vanilla iOS) → stderr khi DiagOn.
+        synced = true; // đã log texnop riêng, không kể là update fail
+        static int nUnh = 0;
+        if (c.DiagOn() && ++nUnh <= 32)
+            fprintf(stderr,
+                    "[TGLMT] texnop#%d id=%u fmt=0x%x ty=0x%x bbox=(%u,%u %ux%u) giu-shadow\n",
+                    nUnh, texId, fmt, typ, x0, y0, bw, bh);
+        c.LogDebug(0, 0, 0, 0,
+                   "FlushTextureStaging: format/type chưa upload GPU (giữ shadow)");
+    }
+    if (c.DiagOn() && !synced) {
+        static int nUpdFail = 0;
+        if (++nUpdFail <= 16)
+            fprintf(stderr,
+                    "[TGLMT] texupd#%d id=%u fmt=0x%x ty=0x%x bbox=(%u,%u %ux%u) updateTexture=false\n",
+                    nUpdFail, texId, fmt, typ, x0, y0, bw, bh);
+    }
+    if (tx.wasRT) ++c.appleStats.texWasRTFlush;
+    ++c.appleStats.texFlushes;
+}
+
 namespace tglmt {
-// Flush 1 texture: gộp regions cùng format thành bbox duy nhất rồi SyncRegionToGPU
-// từ shadow (tight). Khác format → flush từng region riêng (không gộp sai conversion).
+// Flush 1 texture: gộp regions cùng format thành bbox duy nhất. Nguồn: shadow
+// nếu còn, ngược lại payload carry (P1) chép vào bbox trung gian — vẫn 1 upload.
 void Context::FlushTextureStaging(GLuint texId) {
     auto pit = pendingTexRegions.find(texId);
     if (pit == pendingTexRegions.end() || pit->second.empty()) return;
@@ -134,63 +202,63 @@ void Context::FlushTextureStaging(GLuint texId) {
             if (bw && bh) {
                 size_t bpp = bppOf(fmt, typ);
                 size_t texRow = (size_t)tx.w * bpp;
-                // Shadow có thể ngắn (R8/RG8 font): chỉ sync khi đủ chỗ.
                 if (tx.pixels.size() >= (size_t)tx.h * texRow) {
-                    const uint8_t* srcRows = tx.pixels.data() + (size_t)y0 * texRow + (size_t)x0 * bpp;
-                    // SyncRegionToGPU khai báo ở dưới trong file — forward qua lambda?
-                    // Gọi trực tiếp device->updateTexture cho path raw tight;
-                    // các path conversion (BGRA/RGB) xử lý gọn tại đây.
-                    bool synced = false;
-                    if (typ == 0x1401 && (fmt == 0x1908 || fmt == 0x1903 || fmt == 0x8227 || fmt == 0x1906)) {
-                        std::vector<uint8_t> tight((size_t)bw * bh * bpp);
-                        for (uint32_t r = 0; r < bh; ++r)
-                            memcpy(tight.data() + (size_t)r * bw * bpp,
-                                   srcRows + (size_t)r * texRow, (size_t)bw * bpp);
-                        synced = device->updateTexture(tx.gpu.get(), x0, y0, bw, bh,
-                                                       tight.data(), (size_t)bw * bpp);
-                    } else if (typ == 0x1401 && fmt == 0x80E1) {
-                        std::vector<uint8_t> rgba((size_t)bw * bh * 4);
-                        for (uint32_t r = 0; r < bh; ++r)
-                            for (uint32_t x = 0; x < bw; ++x) {
-                                const uint8_t* s = srcRows + (size_t)r * texRow + (size_t)x * 4;
-                                uint8_t* d = rgba.data() + ((size_t)r * bw + x) * 4;
-                                d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+                    // Shadow còn (Null backend / format không upload được) → 1 bbox,
+                    // đọc thẳng từ shadow, không cần bản đệm.
+                    UploadTexRect(*this, tx, texId, x0, y0, bw, bh, fmt, typ,
+                                  tx.pixels.data() + (size_t)y0 * texRow +
+                                      (size_t)x0 * bpp,
+                                  texRow);
+                } else {
+                    // P1: shadow base-level đã bỏ trên Apple → nguồn là payload
+                    // carry của từng region. Vẫn GỘP thành 1 upload (giữ đặc tính
+                    // coalesce) bằng cách chép payload vào bbox trung gian — không
+                    // đọc shadow, không đụng pixel chưa từng staged (wasRT atlas).
+                    // Chỉ gộp được khi các region ghép chính xác bbox (không hở,
+                    // không đè): nếu có hở, hở sẽ nhận 0 → vỡ nội dung GPU đã bake
+                    // → fallback upload từng region (đúng từng vùng).
+                    uint64_t cover = 0;
+                    bool allBytes = true;
+                    for (size_t k = i; k <= j && allBytes; ++k) {
+                        const TexRegion& r = regs[k];
+                        if (r.bytes.empty()) { allBytes = false; break; }
+                        if (r.x < tx.w && r.y < tx.h)
+                            cover += (uint64_t)std::min(r.w, tx.w - r.x) *
+                                     (uint64_t)std::min(r.h, tx.h - r.y);
+                    }
+                    if (allBytes && cover == (uint64_t)bw * (uint64_t)bh) {
+                        std::vector<uint8_t> box((size_t)bw * bh * bpp, 0);
+                        for (size_t k = i; k <= j; ++k) {
+                            const TexRegion& r = regs[k];
+                            uint32_t cw = std::min(r.w, tx.w - r.x);
+                            uint32_t ch = std::min(r.h, tx.h - r.y);
+                            cw = std::min(cw, bw - (r.x - x0));
+                            ch = std::min(ch, bh - (r.y - y0));
+                            if (!cw || !ch) continue;
+                            size_t rStride = (size_t)r.w * bpp; // bytes tight theo r.w
+                            for (uint32_t rr = 0; rr < ch; ++rr) {
+                                uint8_t* d = box.data() +
+                                             (((size_t)(r.y - y0) + rr) * bw +
+                                              (r.x - x0)) * bpp;
+                                memcpy(d, r.bytes.data() + (size_t)rr * rStride,
+                                       (size_t)cw * bpp);
                             }
-                        synced = device->updateTexture(tx.gpu.get(), x0, y0, bw, bh,
-                                                       rgba.data(), (size_t)bw * 4);
-                    } else if (fmt == 0x1907 && typ == 0x1401) {
-                        std::vector<uint8_t> rgba((size_t)bw * bh * 4);
-                        for (uint32_t r = 0; r < bh; ++r)
-                            for (uint32_t x = 0; x < bw; ++x) {
-                                const uint8_t* s = srcRows + r * texRow + x * 3;
-                                uint8_t* d = rgba.data() + ((size_t)r * bw + x) * 4;
-                                d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
-                            }
-                        synced = device->updateTexture(tx.gpu.get(), x0, y0, bw, bh,
-                                                       rgba.data(), (size_t)bw * 4);
+                        }
+                        UploadTexRect(*this, tx, texId, x0, y0, bw, bh, fmt, typ,
+                                      box.data(), (size_t)bw * bpp);
                     } else {
-                        // LogDebug lặng khi app không gắn debugCb (vanilla iOS) →
-                        // stderr khi DiagOn: thấy ngay "format nào không lên GPU"
-                        // (vùng chỉ sống trong shadow → GPU rỗng → sprite discard).
-                        synced = true; // đã log texnop riêng, không kể là update fail
-                        static int nUnh = 0;
-                        if (DiagOn() && ++nUnh <= 32)
-                            fprintf(stderr,
-                                    "[TGLMT] texnop#%d id=%u fmt=0x%x ty=0x%x bbox=(%u,%u %ux%u) giu-shadow\n",
-                                    nUnh, texId, fmt, typ, x0, y0, bw, bh);
-                        LogDebug(0, 0, 0, 0,
-                                 "FlushTextureStaging: format/type chưa upload GPU (giữ shadow)");
+                        for (size_t k = i; k <= j; ++k) {
+                            const TexRegion& r = regs[k];
+                            if (r.bytes.empty()) continue; // không nguồn → bỏ (đúng)
+                            if (r.x >= tx.w || r.y >= tx.h) continue;
+                            uint32_t cw = std::min(r.w, tx.w - r.x);
+                            uint32_t ch = std::min(r.h, tx.h - r.y);
+                            if (!cw || !ch) continue;
+                            UploadTexRect(*this, tx, texId, r.x, r.y, cw, ch, r.format,
+                                          r.type, r.bytes.data(),
+                                          (size_t)cw * bppOf(r.format, r.type));
+                        }
                     }
-                    // updateTexture trả false (GPU không nhận) → cũng phải thấy được.
-                    if (DiagOn() && !synced) {
-                        static int nUpdFail = 0;
-                        if (++nUpdFail <= 16)
-                            fprintf(stderr,
-                                    "[TGLMT] texupd#%d id=%u fmt=0x%x ty=0x%x bbox=(%u,%u %ux%u) updateTexture=false\n",
-                                    nUpdFail, texId, fmt, typ, x0, y0, bw, bh);
-                    }
-                    if (tx.wasRT) ++appleStats.texWasRTFlush;
-                    ++appleStats.texFlushes;
                 }
             }
         }
@@ -278,12 +346,14 @@ static size_t UnpackRowLen(Context& c, size_t w, size_t bpp) {
 static const uint8_t* UnpackBase(Context& c, const void* pixels, size_t total, bool& ok) {
     GLuint up = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/);
     if (!up) { ok = true; return (const uint8_t*)pixels; }
-    auto it = c.buffers.find(up);
-    if (it == c.buffers.end()) { ok = false; return nullptr; }
+    // PBO có thể vừa được glBufferSubData stage → SyncBuffer xả trước khi đọc.
+    // Shadow CPU có thể rỗng (Apple backend — P1) → đọc thẳng GPU memory chung.
+    Context::BufferView v = c.SyncBuffer(up);
+    if (!v.p) { ok = false; return nullptr; }
     size_t off = (size_t)pixels;
-    if (off + total > it->second.data.size()) { ok = false; return nullptr; }
+    if (off + total > v.size) { ok = false; return nullptr; }
     ok = true;
-    return it->second.data.data() + off;
+    return v.p + off;
 }
 // Sync 1 vùng pixels lên GPU: RGBA/RED/RG/UBYTE raw (tight), RGB/UBYTE expand
 // alpha 255. srcRows trỏ vùng (xoff,yoff,w,h) với pitch srcRowLen. Trả true
@@ -597,7 +667,11 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     bool wasRTBefore = tx.wasRT;
     tx.wasRT = false;
     size_t n = (size_t)w * h * Bpp(format, type);
-    tx.pixels.assign(n, 0);
+    // P1: unpack vào buffer TẠM. Bản shadow base-level chỉ được GIỮ lại khi
+    // (a) device Null — shadow LÀ tài nguyên, hoặc (b) format không có đường
+    // upload lên GPU — shadow là bản nội dung duy nhất. Còn lại: GPU buffer là
+    // Shared memory đã là bản đúng → drop bản sao CPU (2043MB jetsam).
+    std::vector<uint8_t> unpacked(n, 0);
     if (hasData) {
         // áp unpackAlignment + ROW_LENGTH (spec §8.5)
         size_t bpp = Bpp(format, type);
@@ -605,7 +679,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
         size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
                       c.state.PixelStore().unpackSkipPixels * bpp;
         const uint8_t* src = pixBase + skip;
-        for (GLsizei r = 0; r < h; ++r) memcpy(tx.pixels.data() + r * w * bpp, src + r * rowLen, (size_t)w * bpp);
+        for (GLsizei r = 0; r < h; ++r) memcpy(unpacked.data() + r * w * bpp, src + r * rowLen, (size_t)w * bpp);
     }
     // Re-specify texture ĐANG LÀ render target của encoder đang mở: encoder cũ
     // giữ wrapper (AppleTarget) của gpu ĐỜI CŨ → draw kế tiếp trong cùng pass
@@ -626,19 +700,25 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     // Vanilla atlas RGBA/UBYTE tight; JPG panorama là RGB/UBYTE → expand alpha 255.
     // Font RED8 (LUMINANCE) → R8 raw. BGRA/UBYTE (widgets/gui) → swizzle R<->B.
     // Mọi format khác giữ shadow + log.
+    // Format/type có đường upload lên GPU không (quyết định giữ shadow hay drop).
+    bool gpuFmt =
+        ((format == 0x1908 || format == 0x1903 || format == 0x8227) && type == 0x1401) ||
+        (format == 0x80E1 && type == 0x1401) || (format == 0x1907 && type == 0x1401) ||
+        ((format == 0x1908 || format == 0x80E1) &&
+         (type == 0x8367 || type == 0x8368 || type == 0x1405 || type == 0x1404));
     if (tx.gpu && hasData && w > 0 && h > 0) {
         if ((format == 0x1908 || format == 0x1903 || format == 0x8227) && type == 0x1401) {
-            // pixels đã unpack vào tx.pixels tight → upload trực tiếp
+            // đã unpack tight vào `unpacked` → upload trực tiếp
             size_t bpp = Bpp(format, type);
-            if (tx.pixels.size() >= (size_t)w * h * bpp)
+            if (unpacked.size() >= (size_t)w * h * bpp)
                 c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
-                                        tx.pixels.data(), (size_t)w * bpp);
+                                        unpacked.data(), (size_t)w * bpp);
         } else if (format == 0x80E1 && type == 0x1401) {
-            // BGRA → RGBA (đảo R/B). tx.pixels đang giữ BGRA raw; dựng RGBA tight.
+            // BGRA → RGBA (đảo R/B). `unpacked` đang giữ BGRA raw; dựng RGBA tight.
             std::vector<uint8_t> rgba((size_t)w * h * 4);
             for (GLsizei r = 0; r < h; ++r)
                 for (GLsizei x = 0; x < w; ++x) {
-                    const uint8_t* s = tx.pixels.data() + ((size_t)r * w + x) * 4;
+                    const uint8_t* s = unpacked.data() + ((size_t)r * w + x) * 4;
                     uint8_t* d = rgba.data() + ((size_t)r * w + x) * 4;
                     d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
                 }
@@ -666,7 +746,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
             std::vector<uint8_t> raw((size_t)w * h * 4);
             for (GLsizei r = 0; r < h; ++r)
                 memcpy(raw.data() + (size_t)r * w * 4,
-                       tx.pixels.data() + (size_t)r * w * 4, (size_t)w * 4);
+                       unpacked.data() + (size_t)r * w * 4, (size_t)w * 4);
             if (format == 0x80E1)
                 for (size_t i = 0; i < (size_t)w * h; ++i) std::swap(raw[i * 4], raw[i * 4 + 2]);
             c.device->updateTexture(tx.gpu.get(), 0, 0, (uint32_t)w, (uint32_t)h,
@@ -682,9 +762,17 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
             c.LogDebug(0, 0, 0, 0, "glTexImage2D: format/type chưa upload GPU (giữ shadow)");
         }
     }
+    // P1: quyết định giữ/bỏ shadow base-level (xem chú thích ở khai báo `unpacked`).
+    if (c.device->isNull() || !tx.gpu || !gpuFmt) {
+        tx.pixels = std::move(unpacked);
+    } else {
+        std::vector<uint8_t>().swap(tx.pixels);
+    }
     // Chẩn đoán: shadow có data thật không (trả lời "atlas rỗng?").
-    // Bỏ qua upload NULL (glTexImage n=NULL = alloc rỗng, nz=0 — bình thường).
-    if (c.DiagOn() && pixels && (w >= 256 || h >= 256)) LogShadowNZ(c, tx, tp->id, "teximage");
+    // Bỏ qua upload NULL (glTexImage n=NULL = alloc rỗng, nz=0 — bình thường)
+    // và bỏ qua khi shadow đã được drop chủ đích (P1) — log EMPTY là nhiễu.
+    if (c.DiagOn() && pixels && (w >= 256 || h >= 256) && !tx.pixels.empty())
+        LogShadowNZ(c, tx, tp->id, "teximage");
     (void)border; (void)level;
 }
 void glTexImage1D(GLenum t, GLint l, GLint inf, GLsizei w, GLint b, GLenum f, GLenum ty, const void* p) {
@@ -767,10 +855,19 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     const uint8_t* pixBase = UnpackBase(c, pixels, total, okBase);
     if (!okBase) { c.errors.Record(0x0501); return; }
     const uint8_t* src = pixBase + skip;
-    if (dstPix->size() < (size_t)t.w * t.h * bpp) dstPix->resize((size_t)t.w * t.h * bpp, 0);
-    for (GLsizei r = 0; r < h; ++r) {
-        uint8_t* dst = dstPix->data() + ((size_t)(yoff + r) * t.w + (size_t)xoff) * bpp;
-        memcpy(dst, src + r * rowLen, (size_t)w * bpp);
+    // P1: payload tight đi theo region → flush không cần shadow CPU. Shadow (nếu
+    // còn) vẫn cập nhật cho readback/diag; shadow rỗng → KHÔNG hồi sinh (đó chính
+    // là bản sao CPU mà P1 bỏ để chống jetsam).
+    std::vector<uint8_t> payload((size_t)w * h * bpp);
+    for (GLsizei r = 0; r < h; ++r)
+        memcpy(payload.data() + (size_t)r * w * bpp, src + r * rowLen, (size_t)w * bpp);
+    if (!dstPix->empty()) {
+        if (dstPix->size() < (size_t)t.w * t.h * bpp)
+            dstPix->resize((size_t)t.w * t.h * bpp, 0);
+        for (GLsizei r = 0; r < h; ++r) {
+            uint8_t* dst = dstPix->data() + ((size_t)(yoff + r) * t.w + (size_t)xoff) * bpp;
+            memcpy(dst, payload.data() + (size_t)r * w * bpp, (size_t)w * bpp);
+        }
     }
     if (dstPix != &t.pixels && !t.faces[0].empty()) t.pixels = t.faces[0]; // mirror face 0
     // IR deferred: cubemap face giữ sync ngay (hiếm, panorama init, không phải hot path).
@@ -788,7 +885,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
         }
     } else {
         StageTexRegion(c, tp->id, (uint32_t)xoff, (uint32_t)yoff, (uint32_t)w, (uint32_t)h,
-                       format, type);
+                       format, type, payload.data());
     }
     // Diag: sub-upload vùng lớn → shadow có data thật không (atlas streaming).
     if (c.DiagOn() && pixels && (w >= 256 || h >= 256)) LogShadowNZ(c, t, tp->id, "texsub");
@@ -976,14 +1073,29 @@ static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
         if (!gpuOk) {
             c.LogDebug(0, 0, 0, 0, "glCopyTexSubImage: FBO→tex khác format/fail, CPU shadow");
             size_t bpp = 4;
-            if (src.pixels.size() >= (size_t)src.w * src.h * bpp &&
-                dst.pixels.size() >= (size_t)dst.w * dst.h * bpp) {
-                for (GLsizei r = 0; r < h; ++r)
-                    memcpy(dst.pixels.data() + ((size_t)(yoff + r) * dst.w + xoff) * bpp,
-                           src.pixels.data() + ((size_t)(y + r) * src.w + x) * bpp,
+            // P1: nguồn đọc từ GPU (shadow có thể rỗng trên Apple), không hồi sinh.
+            std::vector<uint8_t> srcOwn;
+            const std::vector<uint8_t>* sPx = nullptr;
+            if (c.ReadTextureGPU(src, srcOwn)) sPx = &srcOwn;
+            else if (src.pixels.size() >= (size_t)src.w * src.h * bpp) sPx = &src.pixels;
+            if (sPx) {
+                std::vector<uint8_t> own;
+                std::vector<uint8_t>* dPx = &dst.pixels;
+                if (dPx->size() < (size_t)dst.w * dst.h * bpp) {
+                    own.assign((size_t)dst.w * dst.h * bpp, 0);
+                    if (!dPx->empty()) memcpy(own.data(), dPx->data(), dPx->size());
+                    dPx = &own;
+                }
+                for (GLsizei r = 0; r < h; ++r) {
+                    if ((size_t)(y + r) >= src.h || (size_t)(yoff + r) >= dst.h) break;
+                    memcpy(dPx->data() + ((size_t)(yoff + r) * dst.w + xoff) * bpp,
+                           sPx->data() + ((size_t)(y + r) * src.w + x) * bpp,
                            (size_t)w * bpp);
-                c.device->updateTexture(dst.gpu.get(), 0, 0, dst.w, dst.h,
-                                        dst.pixels.data(), (size_t)dst.w * bpp);
+                }
+                if (dPx->size() >= (size_t)dst.w * dst.h * bpp)
+                    c.device->updateTexture(dst.gpu.get(), 0, 0, dst.w, dst.h,
+                                            dPx->data(), (size_t)dst.w * bpp);
+                if (dPx == &own && !TexReadableFromGPU(dst)) dst.pixels = std::move(own);
                 gpuOk = true;
             }
         }
@@ -1069,15 +1181,30 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
         return;
     }
     c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: khác format/fail, CPU shadow");
-    if (src.pixels.size() >= (size_t)src.w * src.h * 4 &&
-        dst.pixels.size() >= (size_t)dst.w * dst.h * 4) {
-        for (GLsizei r = 0; r < h; ++r)
-            memcpy(dst.pixels.data() + ((size_t)(dstY + r) * dst.w + dstX) * 4,
-                   src.pixels.data() + ((size_t)(srcY + r) * src.w + srcX) * 4,
-                   (size_t)w * 4);
-        c.device->updateTexture(dst.gpu.get(), 0, 0, dst.w, dst.h,
-                                dst.pixels.data(), (size_t)dst.w * 4);
+    // P1: nguồn đọc từ GPU (shadow base-level có thể rỗng trên Apple); bản ghi
+    // chỉ quay lại tx.pixels khi format không đọc được từ GPU (không hồi sinh).
+    std::vector<uint8_t> srcOwn;
+    const std::vector<uint8_t>* sPx = nullptr;
+    if (c.ReadTextureGPU(src, srcOwn)) sPx = &srcOwn;
+    else if (src.pixels.size() >= (size_t)src.w * src.h * 4) sPx = &src.pixels;
+    if (!sPx) return;
+    std::vector<uint8_t> own;
+    std::vector<uint8_t>* dPx = &dst.pixels;
+    if (dPx->size() < (size_t)dst.w * dst.h * 4) {
+        own.assign((size_t)dst.w * dst.h * 4, 0);
+        if (!dPx->empty()) memcpy(own.data(), dPx->data(), dPx->size());
+        dPx = &own;
     }
+    for (GLsizei r = 0; r < h; ++r) {
+        if ((size_t)(srcY + r) >= src.h || (size_t)(dstY + r) >= dst.h) break;
+        memcpy(dPx->data() + ((size_t)(dstY + r) * dst.w + dstX) * 4,
+               sPx->data() + ((size_t)(srcY + r) * src.w + srcX) * 4,
+               (size_t)w * 4);
+    }
+    if (dPx->size() >= (size_t)dst.w * dst.h * 4)
+        c.device->updateTexture(dst.gpu.get(), 0, 0, dst.w, dst.h,
+                                dPx->data(), (size_t)dst.w * 4);
+    if (dPx == &own && !TexReadableFromGPU(dst)) dst.pixels = std::move(own);
 }
 void glCompressedTexImage1D(GLenum a, GLint b, GLenum d, GLsizei e, GLint f, GLsizei g, const void* h) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h; }
 void glCompressedTexImage2D(GLenum a, GLint b, GLenum d, GLsizei e, GLsizei f, GLint g, GLsizei h, const void* i) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
@@ -1097,14 +1224,19 @@ void glTextureStorage1D(GLuint t, GLsizei l, GLenum inf, GLsizei w) {
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
     it->second.w = w; it->second.h = 1; it->second.internalFormat = inf; it->second.levels = l;
-    it->second.pixels.assign((size_t)w * 4, 0);
+    // P1: immutable storage chỉ CẤP chỗ (không có dữ liệu) → shadow toàn số 0,
+    // không có thông tin. Giữ lại đúng như glTexImage2D: Null / không có gpu /
+    // format không đọc được từ GPU.
+    if (c.device->isNull() || !it->second.gpu || !TexReadableFromGPU(it->second))
+        it->second.pixels.assign((size_t)w * 4, 0);
+    else
+        std::vector<uint8_t>().swap(it->second.pixels);
 }
 void glTextureStorage2D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h) {
     Context& c = Context::Current();
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
     it->second.w = w; it->second.h = h; it->second.internalFormat = inf; it->second.levels = l;
-    it->second.pixels.assign((size_t)w * h * 4, 0);
     bool wasRTD = it->second.wasRT;
     bool wasCurRTD = (c.pendingEncoder && c.pendingColorTex == t);
     if (wasCurRTD) c.FlushPendingEncoder();
@@ -1117,6 +1249,13 @@ void glTextureStorage2D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h) {
     it->second.wasRT = false;
     c.pendingTexRegions.erase(t);
     it->second.gpu = c.device->newTexture(w, h, ToMetalFormat(it->second.internalFormat));
+    // P1: storage chỉ cấp chỗ → shadow toàn số 0, không thông tin. Cùng luật với
+    // glTexImage2D: giữ shadow chỉ khi Null / không có gpu / format không đọc
+    // được từ GPU. (Atlas màu 2048² = 16MB shadow ×N — đây là một phần jetsam.)
+    if (c.device->isNull() || !it->second.gpu || !TexReadableFromGPU(it->second))
+        it->second.pixels.assign((size_t)w * h * 4, 0);
+    else
+        std::vector<uint8_t>().swap(it->second.pixels);
 }
 void glTextureStorage3D(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g; }
 void glTextureStorage2DMultisample(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLboolean g) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g; }
@@ -1157,7 +1296,6 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
         return;
     }
     size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
-    if (tx.pixels.size() < (size_t)tx.w * tx.h * bpp) tx.pixels.resize((size_t)tx.w * tx.h * bpp, 0);
     size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
                   (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
     size_t total = skip + (h > 0 ? ((size_t)(h - 1) * rowLen + (size_t)w * bpp) : 0);
@@ -1165,13 +1303,21 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
     const uint8_t* pixBase = UnpackBase(c, p, total, okBase);
     if (!okBase) { c.errors.Record(0x0501); return; }
     const uint8_t* src = pixBase + skip;
-    for (GLsizei r = 0; r < h; ++r) {
-        uint8_t* dst = tx.pixels.data() + ((size_t)(y + r) * tx.w + (size_t)x) * bpp;
-        memcpy(dst, src + r * rowLen, (size_t)w * bpp);
+    std::vector<uint8_t> payload((size_t)w * h * bpp);
+    for (GLsizei r = 0; r < h; ++r)
+        memcpy(payload.data() + (size_t)r * w * bpp, src + r * rowLen, (size_t)w * bpp);
+    if (!tx.pixels.empty()) {
+        if (tx.pixels.size() < (size_t)tx.w * tx.h * bpp)
+            tx.pixels.resize((size_t)tx.w * tx.h * bpp, 0);
+        for (GLsizei r = 0; r < h; ++r) {
+            uint8_t* dst = tx.pixels.data() + ((size_t)(y + r) * tx.w + (size_t)x) * bpp;
+            memcpy(dst, payload.data() + (size_t)r * w * bpp, (size_t)w * bpp);
+        }
     }
     // IR deferred: stage thay vì sync GPU ngay (DSA path của game 26.x).
     (void)src; (void)rowLen;
-    StageTexRegion(c, t, (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h, f, ty);
+    StageTexRegion(c, t, (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h, f, ty,
+                   payload.data());
 }
 void glTextureSubImage3D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLenum j, const void* k) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; }
 } // namespace tglmt::gl

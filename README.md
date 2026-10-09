@@ -1,73 +1,96 @@
-# TGLMT — OpenGL 4.6 Core to Metal (iOS)
+# TGLMT
 
-[Vietnamese version](README.vi.md) | License: MIT | Target: iPhone A11 and newer
+[Vietnamese version](README.vi.md)
 
-TGLMT lets you write rendering code once in **OpenGL 4.6 Core** and run it on
-**Metal** (iOS/macOS). No MoltenVK, no ANGLE. Built for the vanilla boot path
-of Minecraft Java launchers on iOS.
+TGLMT is a translation layer that runs **OpenGL 4.6 Core** rendering on **Metal**.
+Application code keeps issuing OpenGL calls; TGLMT validates them, tracks GL state on
+the CPU, translates GLSL to Metal Shading Language when a program links, and batches
+the resulting work into Metal command buffers.
 
-## What you get
+There is no Vulkan driver in the path: no MoltenVK, no ANGLE, no SPIR-V in the runtime.
 
-- Full OpenGL 4.6 Core API surface: 698 functions + plain-C exports, so
-  existing loaders (`dlsym("glDrawElements")`) work unchanged.
-- Real GPU draws: VAO/VBO/EBO, indexed + `baseVertex`, instancing, indirect
-  from `DRAW_INDIRECT_BUFFER`, `TRIANGLE_FAN`/`LINE_LOOP` expansion.
-- GLSL to MSL converter with honest failures (no guessed code): uniforms,
-  uniform arrays, MRT up to 8 targets, read-only UBO blocks, multi-sampler.
-- Framebuffer + `BlitFramebuffer`, mipmap generation, depth/blend/cull,
-  `ReadPixels` with correct orientation.
-- C window API (`TGLMT_CreateWindow` / `SwapBuffers` / `GetProcAddress`) for
-  embedding in a launcher; `CAMetalLayer` present included.
+| | |
+|---|---|
+| API surface | OpenGL 4.6 Core — 698 declared functions in `include/tglmt/gl46.h`, 701 exported C symbols |
+| Shader input | GLSL vertex + fragment, converted directly to MSL at `glCompileShader` |
+| Platforms | iOS arm64 device (designed against an A11 baseline), macOS host |
+| Backends | `apple` (Metal, real GPU) and `null` (CPU trace/shadow, no GPU needed) |
+| Outputs | `libtglmt.a` (static) and `libtglmt.dylib` (shared, for `dlopen`/`dlsym`) |
+| License | MIT |
 
-## Build
+The primary use case is the vanilla boot path of a Minecraft Java launcher on iOS:
+LWJGL/GLFW resolve `gl*` symbols at runtime and the renderer issues ordinary
+OpenGL calls.
+
+## Architecture
+
+```
+  OpenGL 4.6 application (LWJGL / GLFW / Blaze3D / any GL caller)
+        |
+        |  698 gl* entry points + TGLMT_* window API
+        v
+  +------------------------------------------------------------------+
+  | Dispatch layer      src/gl/*.cpp                                   |
+  |   validates arguments, records GL state, shadows glGet*            |
+  +------------------------------------------------------------------+
+        |
+        +--> StateTracker / ObjectRegistry / ErrorTracker   (include/tglmt)
+        |
+        +--> GLSL -> MSL converter  src/gl/glsl_to_msl.cpp
+        |        (vertex + fragment only; other stages rejected honestly)
+        v
+  Deferred draw path   src/gl/gl_apple_draw.cpp
+        |  state shadowing, redundant-state suppression
+        |  encoder reuse across draws, pipeline-key cache
+        |  buffer/texture staging with coalescing, ring-buffer uploads
+        v
+  Metal abstraction    include/tglmt/MetalInterface.h
+        |
+        +--> Apple backend   src/metal/AppleMetalBridge.mm  (real GPU)
+        +--> Null backend    src/metal/NullMetalBackend.cpp (trace/shadow)
+        v
+  CAMetalLayer present   or   headless readback from the shadow buffer
+```
+
+A full description of every stage is in [Architecture](docs/en/architecture.md).
+
+## What to read next
+
+| Document | Contents |
+|---|---|
+| [Getting Started](docs/en/getting-started.md) | Build matrix, tests, first frame, verifying the GPU backend is live |
+| [Architecture](docs/en/architecture.md) | Draw-call lifecycle, deferred execution, coordinate conversion |
+| [API Reference](docs/en/api.md) | `Renderer`, `tglmt::gl`, the C exports, the GLFW shim |
+| [Integration](docs/en/integration.md) | Embedding the dylib, `CAMetalLayer`, threading, black-screen diagnosis |
+| [Compatibility & Performance](docs/en/compatibility.md) | What is implemented, partial, trace-only or unsupported; counters; reproducible tests |
+
+## Build and test
 
 ```sh
-# Logic + tests, no GPU needed
-cmake -S . -B build && cmake --build build -j8
-ctest --test-dir build
-
-# Real Metal on macOS
-cmake -S . -B build-apple -DTGLMT_APPLE_METAL=ON && cmake --build build-apple -j8
-
-# iOS device dylib (arm64)
-cmake -S . -B build-ios -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=$(xcrun --sdk iphoneos --show-sdk-path) \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 -DTGLMT_APPLE_METAL=ON -DTGLMT_BUILD_TESTS=OFF
-cmake --build build-ios
+cmake -S . -B build              # Null backend, builds on any host
+cmake --build build -j8
+ctest --test-dir build --output-on-failure
 ```
 
-## Minimal example
-
-```cpp
-#include "tglmt/Renderer.h"
-#include "tglmt/gl46.h"
-
-tglmt::Renderer r;
-r.Init("apple", 960, 600, true, tglmt::metal::PixelFormat::RGBA8Unorm);
-r.BeginFrame();
-tglmt::gl::glViewport(0, 0, 960, 600);
-tglmt::gl::glClearColor(0, 0, 0, 1);
-tglmt::gl::glClear(0x00004000);
-// ... compile shaders, bind VAO, glDrawArrays ...
-r.EndFrame(metalLayer); // CAMetalLayer*; nullptr = headless
+```sh
+cmake -S . -B build-apple -DTGLMT_APPLE_METAL=ON   # macOS, real Metal
+cmake --build build-apple -j8
+ctest --test-dir build-apple --output-on-failure
 ```
 
-Rules that matter: call `gl::` only after `BeginFrame`; the layer pixel
-format must equal the `fmt` passed to `Init`; see `docs/en/` for details.
+Tests that need a GPU print `SKIP` and exit 0 when no GPU is present, so both
+configurations are safe to run in CI. See
+[Getting Started](docs/en/getting-started.md) for the iOS cross-compile and the
+full build matrix.
 
-## Docs
+## Documentation site
 
-Open `docs/index.html` in a browser for the searchable bilingual site
-(dark/light, VI/EN toggle), generated from the markdown below via
-`python3 tools/gen_docs_site.py`:
+`docs/index.html` is the bilingual documentation site (English/Vietnamese, dark/light,
+search). It is generated from the Markdown in this repository:
 
-- `docs/en/getting-started.md` — build, test, first frame
-- `docs/en/api.md` — C++ and C API reference
-- `docs/en/architecture.md` — pipeline, draw flow, coordinate mapping
-- `docs/en/launcher.md` — embedding in an iOS launcher
-- `docs/en/limits.md` — what is stubbed and why
+```sh
+python3 tools/gen_docs_site.py
+```
 
-## Status
-
-Vanilla scene rendering works (verified by GPU pixel tests). Tessellation,
-geometry shaders and compute encode are honestly stubbed and planned for the
-Sodium/Iris stage. See `docs/en/limits.md`.
+The generator owns the page manifest; `docs/index.html` is only the site template.
+See [Getting Started](docs/en/getting-started.md) for the regeneration workflow.

@@ -363,8 +363,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             const uint8_t* src = nullptr;
             std::vector<uint8_t> tmp;
             auto bit = c.buffers.find(eboId);
-            if (bit != c.buffers.end() && indexByteOff + (size_t)count * elem <= bit->second.data.size())
-                src = bit->second.data.data() + indexByteOff;
+            if (bit != c.buffers.end() && indexByteOff + (size_t)count * elem <= BufferLen(bit->second) &&
+                BufferBytes(bit->second))
+                src = BufferBytes(bit->second) + indexByteOff;
             else if (indexData && eboId == 0) src = (const uint8_t*)indexData;
             if (!src) return false;
             size_t triCount = (size_t)(count - 2) * 3;
@@ -397,8 +398,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             size_t elem = (indexType == 0x1403) ? 2 : 4;
             const uint8_t* src = nullptr;
             auto bit = c.buffers.find(eboId);
-            if (bit != c.buffers.end() && indexByteOff + (size_t)count * elem <= bit->second.data.size())
-                src = bit->second.data.data() + indexByteOff;
+            if (bit != c.buffers.end() && indexByteOff + (size_t)count * elem <= BufferLen(bit->second) &&
+                BufferBytes(bit->second))
+                src = BufferBytes(bit->second) + indexByteOff;
             else if (indexData && eboId == 0) src = (const uint8_t*)indexData;
             if (!src) return false;
             fanLoopExpand.resize(((size_t)count + 1) * elem);
@@ -1047,7 +1049,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 return r;
             }
             auto t = c.buffers.find(bit->second.buffer);
-            if (t == c.buffers.end() || t->second.data.empty()) {
+            if (t == c.buffers.end() || !BufferBytes(t->second)) {
                 if (c.DiagOn()) {
                     static std::set<uint64_t> loggedNodata;
                     uint64_t nk = ((uint64_t)prog << 32) ^ std::hash<std::string>{}(nm);
@@ -1066,13 +1068,14 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             // đụng buffer này thì phải split, còn không thì giữ batching).
             c.NoteBufferUsed(bit->second.buffer);
             size_t off = (size_t)bit->second.offset;
-            if (off >= t->second.data.size()) {
+            const size_t bLen = BufferLen(t->second);
+            if (off >= bLen) {
                 c.LogDebug(0, 0, 0, 0, "AppleDrawGL: UBO " + nm + " offset vuot, zero fallback");
                 return r;
             }
             size_t len = bit->second.size ? (size_t)bit->second.size
-                                          : t->second.data.size() - off;
-            len = std::min(len, t->second.data.size() - off);
+                                          : bLen - off;
+            len = std::min(len, bLen - off);
             if (!len) return r;
             // Buffer thiếu hơn HẾT struct shader đọc (trueSize: misbound, vd
             // Globals đọc nhầm buffer SamplerInfo 16B trong khi struct 52B) →
@@ -1136,7 +1139,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     ++c.appleStats.uboFromMap;
                 }
             }
-            if (!srcPtr) srcPtr = t->second.data.data() + off;
+            if (!srcPtr) {
+                const uint8_t* bp = BufferBytes(t->second);
+                if (!bp || off >= bLen) return r;
+                srcPtr = bp + off;
+            }
             const void* upPtr = srcPtr;
             std::vector<uint8_t> padBuf;
             size_t upLen = len;
@@ -1495,8 +1502,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         size_t elem = (indexType == 0x1403) ? 2 : 4;
         auto bit = c.buffers.find(eboId);
         const uint8_t* srcBytes = nullptr;
-        if (bit != c.buffers.end() && indexByteOff + (size_t)count * elem <= bit->second.data.size()) {
-            srcBytes = bit->second.data.data() + indexByteOff; // shadow luôn có (BufferData giữ)
+        const uint8_t* bBytes = (bit != c.buffers.end()) ? BufferBytes(bit->second) : nullptr;
+        if (bBytes && indexByteOff + (size_t)count * elem <= BufferLen(bit->second)) {
+            srcBytes = bBytes + indexByteOff; // shadow hoặc GPU memory chung (P1)
         } else if (indexData && eboId == 0) {
             srcBytes = (const uint8_t*)indexData; // client pointer
         }
@@ -1824,14 +1832,15 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     if (bit == c.uniformBindPoints.end() || !bit->second.buffer) continue;
                     auto bt = c.buffers.find(bit->second.buffer);
                     if (bt == c.buffers.end()) continue;
-                    const auto& d = bt->second.data;
+                    Context::BufferView bv = c.SyncBuffer(bit->second.buffer);
+                    if (!bv.p) continue;
                     size_t off = (size_t)bit->second.offset;
-                    size_t avail = (off < d.size()) ? d.size() - off : 0;
+                    size_t avail = (off < bv.size) ? bv.size - off : 0;
                     size_t len = std::min<size_t>(avail, std::min<size_t>(96, ub.minSize));
                     if (!len) continue;
                     fprintf(stderr, "[TGLMT] dubo#%u %s point=%u buf=%u off=%zu len=%zu: %s\n",
                             prog, ub.name.c_str(), ub.binding, bit->second.buffer,
-                            off, len, hexdump(d.data() + off, len).c_str());
+                            off, len, hexdump(bv.p + off, len).c_str());
                 }
                 // VAO: layout attrib + 32 byte đầu (Position/Color/UV0/UV2).
                 auto vit = c.vaos.find(vao);
@@ -1844,13 +1853,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                                 prog, a, (int)at.enabled, at.buffer, at.size, at.type,
                                 (int)at.normalized, at.stride, at.offset, at.relativeOffset);
                         if (!at.enabled || !at.buffer) continue;
-                        auto bt = c.buffers.find(at.buffer);
-                        if (bt == c.buffers.end()) continue;
-                        const auto& d = bt->second.data;
-                        if (at.offset >= d.size()) continue;
-                        size_t take = std::min<size_t>(32, d.size() - at.offset);
+                        Context::BufferView bv = c.SyncBuffer(at.buffer);
+                        if (!bv.p || at.offset >= bv.size) continue;
+                        size_t take = std::min<size_t>(32, bv.size - at.offset);
                         fprintf(stderr, "[TGLMT] dvdat#%u attr%d: %s\n",
-                                prog, a, hexdump(d.data() + at.offset, take).c_str());
+                                prog, a, hexdump(bv.p + at.offset, take).c_str());
                     }
                 }
                 fflush(stderr);
@@ -2175,14 +2182,14 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 auto t = c.buffers.find(bit->second.buffer);
                 size_t off = (bit->second.offset > 0) ? (size_t)bit->second.offset : 0;
                 size_t have =
-                    (t == c.buffers.end() || off >= t->second.data.size())
+                    (t == c.buffers.end() || off >= BufferLen(t->second))
                         ? 0
-                        : t->second.data.size() - off;
+                        : BufferLen(t->second) - off;
                 if (!have) {
                     fprintf(stderr, "[TGLMT]   ubo %s: NODATA (have 0B)\n", b.name.c_str());
                     continue;
                 }
-                const float* m = (const float*)(t->second.data.data() + off);
+                const float* m = (const float*)(BufferBytes(t->second) + off);
                 size_t nf = have / 4;
                 auto F = [&](size_t k) { return k < nf ? m[k] : 0.0f; };
                 // Full vec4 đầu (11 vec4 = 176B: ModelViewMat + ColorModulator +

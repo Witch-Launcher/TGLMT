@@ -70,12 +70,10 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
                                full.data() + ((size_t)srcRow * tw + (size_t)x) * 4, copyW * 4);
                 }
                 if (packBuf) {
-                    auto bit = c.buffers.find(packBuf);
-                    if (bit == c.buffers.end()) { c.errors.Record(0x0502); return; }
                     size_t pboOff = (size_t)p;
-                    if (pboOff + need > bit->second.data.size())
-                        bit->second.data.resize(pboOff + need, 0);
-                    memcpy(bit->second.data.data() + pboOff, out.data(), need);
+                    std::vector<uint8_t>* pbo = c.MutablePbo(packBuf, pboOff + need);
+                    if (!pbo) { c.errors.Record(0x0502); return; }
+                    memcpy(pbo->data() + pboOff, out.data(), need);
                     c.StageBufferRange(packBuf, pboOff, need);
                 } else {
                     memcpy(p, out.data(), need);
@@ -90,20 +88,25 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
     // PBO bound → ghi vào PBO shadow + stage (spec §18: p là offset).
     auto writeOut = [&](const uint8_t* srcBytes, size_t n) {
         if (packBuf) {
-            auto bit = c.buffers.find(packBuf);
-            if (bit == c.buffers.end()) { c.errors.Record(0x0502); return; }
             size_t pboOff = (size_t)p;
-            if (pboOff + n > bit->second.data.size())
-                bit->second.data.resize(pboOff + n, 0);
-            memcpy(bit->second.data.data() + pboOff, srcBytes, n);
+            std::vector<uint8_t>* pbo = c.MutablePbo(packBuf, pboOff + n);
+            if (!pbo) { c.errors.Record(0x0502); return; }
+            memcpy(pbo->data() + pboOff, srcBytes, n);
             c.StageBufferRange(packBuf, pboOff, n);
         } else {
             memcpy(p, srcBytes, n);
         }
     };
     if (tex) {
-        size_t k = std::min(tex->pixels.size(), (size_t)w * h * 4);
-        writeOut(tex->pixels.data(), k);
+        // P1: shadow có thể rỗng (Apple) → thử đọc GPU trước; thiếu bao nhiêu
+        // thì bù 0 (đừng để rác trong pixel của game).
+        std::vector<uint8_t> gpuPx;
+        const std::vector<uint8_t>* sp = &tex->pixels;
+        if (sp->size() < (size_t)w * h * 4 && c.ReadTextureGPU(*tex, gpuPx)) sp = &gpuPx;
+        std::vector<uint8_t> need((size_t)w * h * 4, 0);
+        size_t k = std::min(sp->size(), need.size());
+        if (k) memcpy(need.data(), sp->data(), k);
+        writeOut(need.data(), need.size());
         return;
     }
     // default framebuffer trên Null: trả clear color
@@ -152,7 +155,8 @@ static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {
     if (itt == c.textures.end()) { c.errors.Record(0x0502); return; }
     itt->second.internalFormat = inf;
     if (itb == c.buffers.end()) return;
-    itt->second.pixels = itb->second.data; // view CPU
+    Context::BufferView bv = c.SyncBuffer(buf); // shadow có thể rỗng (P1)
+    if (!bv.p) { c.errors.Record(0x0502); return; }
     // GPU: buffer texture → texture Nx1 để shader .read(index).
     // Bảng format thật (MC 26.1 dùng cả R8I — bug "sampdeny#... ifmt=0x8231"):
     //   0x8235 R32I(4B)  0x8236 R32UI(4B)  0x822E R32F(4B)
@@ -176,7 +180,7 @@ static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {
     if (pick) {
         size_t elem = pick->elem;
         metal::PixelFormat pf = pick->pf;
-        size_t n = itb->second.data.size() / elem;
+        size_t n = bv.size / elem;
         if (n == 0) n = 1;
         // Metal giới hạn width 16384 (A11 validate → abort). n=710178 từng crash:
         // `MTLTextureDescriptor has width (710178) greater than ... 16384`.
@@ -188,13 +192,17 @@ static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {
         itt->second.w = W;
         itt->second.h = H;
         std::vector<uint8_t> tmp((size_t)W * H * elem, 0);
-        memcpy(tmp.data(), itb->second.data.data(),
-               std::min(tmp.size(), itb->second.data.size()));
-        itt->second.pixels = tmp;
+        memcpy(tmp.data(), bv.p, std::min(tmp.size(), bv.size));
         itt->second.gpu = c.device->newTextureWithBytes(
             W, H, pf, tmp.data(), (size_t)W * elem);
         if (!itt->second.gpu)
             c.LogDebug(0, 0, 0, 0, "glTexBuffer: GPU int texture fail, shadow only");
+        // P1: bảng buffer texture lớn (n=710178 ≈ 2.8MB) từng nhân đôi CPU+GPU.
+        // GPU texture là nguồn cho shader; shadow chỉ giữ khi Null / gpu tạo lỗi.
+        if (c.device->isNull() || !itt->second.gpu)
+            itt->second.pixels = std::move(tmp);
+        else
+            std::vector<uint8_t>().swap(itt->second.pixels);
         if (c.DiagOn()) {
             static std::set<uint64_t> seenBB;
             uint64_t key = ((uint64_t)tex << 20) ^ ((uint64_t)inf << 4) ^
@@ -203,17 +211,21 @@ static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {
                 static int nBB = 0;
                 fprintf(stderr,
                         "[TGLMT] bufbind#%d tex#%u ifmt=0x%04x bytes=%zu n=%zu %ux%u gpu=%d\n",
-                        ++nBB, tex, inf, itb->second.data.size(), n, W, H,
+                        ++nBB, tex, inf, bv.size, n, W, H,
                         (int)(itt->second.gpu != nullptr));
                 fflush(stderr);
             }
         }
-    } else if (c.DiagOn()) {
-        static int nBN = 0;
-        if (++nBN <= 8)
-            fprintf(stderr, "[TGLMT] bufnop#%d ifmt=0x%04x (buffer texture format chưa hỗ trợ, shadow only)\n",
-                    nBN, inf);
-        fflush(stderr);
+    } else {
+        // Format chưa có đường upload GPU → shadow LÀ nguồn duy nhất: phải giữ.
+        itt->second.pixels.assign(bv.p, bv.p + bv.size);
+        if (c.DiagOn()) {
+            static int nBN = 0;
+            if (++nBN <= 8)
+                fprintf(stderr, "[TGLMT] bufnop#%d ifmt=0x%04x (buffer texture format chưa hỗ trợ, shadow only)\n",
+                        nBN, inf);
+            fflush(stderr);
+        }
     }
 }
 void glTexBuffer(GLenum t, GLenum inf, GLuint b) {
@@ -226,16 +238,16 @@ void glTexBufferRange(GLenum t, GLenum inf, GLuint b, GLintptr o, GLsizeiptr s) 
     Context& c = Context::Current();
     if (o < 0 || s < 0) { c.errors.Record(0x0501); return; }
     if ((o != 0 || s != 0)) {
-        auto itb = c.buffers.find(b);
-        if (itb == c.buffers.end()) { c.errors.Record(0x0502); return; }
-        if ((size_t)o > itb->second.data.size()) { c.errors.Record(0x0501); return; }
-        size_t len = s ? std::min((size_t)s, itb->second.data.size() - (size_t)o)
-                       : itb->second.data.size() - (size_t)o;
+        Context::BufferView bv = c.SyncBuffer(b); // shadow có thể rỗng (P1)
+        if (!bv.p) { c.errors.Record(0x0502); return; }
+        if ((size_t)o > bv.size) { c.errors.Record(0x0501); return; }
+        size_t len = s ? std::min((size_t)s, bv.size - (size_t)o)
+                       : bv.size - (size_t)o;
         // bind bản slice qua buffer tạm nội bộ để tái dùng BindBufTex
         GLuint tmp = 0;
         c.registry.Create(ObjectKind::Buffer, 1, &tmp);
-        c.buffers[tmp].data.assign(itb->second.data.begin() + o,
-                                   itb->second.data.begin() + o + len);
+        c.buffers[tmp].data.assign(bv.p + o, bv.p + o + len);
+        c.buffers[tmp].size = len;
         c.buffers[tmp].gpu = c.device->newBufferWithBytes(c.buffers[tmp].data.data(), len,
                                                           metal::StorageMode::Shared);
         glTexBuffer(t, inf, tmp);

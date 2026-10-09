@@ -41,11 +41,11 @@ static bool ReadIndex(Context& c, GLuint ebo, const void* cli, GLenum type,
         else { uint32_t v; memcpy(&v, p, 4); out = v; }
         return true;
     }
-    auto it = c.buffers.find(ebo);
-    if (it == c.buffers.end()) return false;
+    Context::BufferView bv = c.SyncBuffer(ebo);
+    if (!bv.p) return false;
     size_t at = byteOff + (size_t)k * elem;
-    if (at + elem > it->second.data.size()) return false;
-    const uint8_t* p = it->second.data.data() + at;
+    if (at + elem > bv.size) return false;
+    const uint8_t* p = bv.p + at;
     if (elem == 1) out = *p;
     else if (elem == 2) out = (uint32_t)(p[0] | (p[1] << 8));
     else out = (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
@@ -119,9 +119,10 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
             } else if (ebo && itA != c.buffers.end()) {
                 size_t elem = IndexElemSize(type);
                 size_t at = (size_t)idx;
-                if (at + (size_t)count * elem > itA->second.data.size()) { c.errors.Record(0x0501); return; }
+                Context::BufferView bv = c.SyncBuffer(ebo); // shadow có thể rỗng (P1)
+                if (!bv.p || at + (size_t)count * elem > bv.size) { c.errors.Record(0x0501); return; }
                 if (type == 0x1401) {
-                    ubExpand = ExpandUByteIndices(itA->second.data.data() + at, count);
+                    ubExpand = ExpandUByteIndices(bv.p + at, count);
                     effCliPtr = ubExpand.data();
                     off = 0; shadowUpload = true; origOff = at;
                 } else {
@@ -143,14 +144,15 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
             // EBO có shadow nhưng chưa có gpu buffer: upload shadow vùng cần vẽ
             size_t elem = IndexElemSize(type);
             size_t at = (size_t)idx;
-            if (at + (size_t)count * elem > it->second.data.size()) { c.errors.Record(0x0501); return; }
+            Context::BufferView bv = c.SyncBuffer(ebo);
+            if (!bv.p || at + (size_t)count * elem > bv.size) { c.errors.Record(0x0501); return; }
             if (type == 0x1401) {
-                ubExpand = ExpandUByteIndices(it->second.data.data() + at, count);
+                ubExpand = ExpandUByteIndices(bv.p + at, count);
                 ib = c.device->newBufferWithBytes(ubExpand.data(), ubExpand.size(), metal::StorageMode::Shared);
                 off = 0; shadowUpload = true; origOff = at;
                 // cliPtr giữ null để restart đọc từ shadow gốc qua ReadIndex
             } else {
-                ib = c.device->newBufferWithBytes(it->second.data.data() + at,
+                ib = c.device->newBufferWithBytes(bv.p + at,
                                                   (size_t)count * elem, metal::StorageMode::Shared);
                 off = 0;
                 shadowUpload = true;
@@ -261,11 +263,11 @@ static bool ReadArraysCmd(const void* ind, GLuint* count, GLuint* inst, GLuint* 
     GLuint dib = c.state.BoundBuffer(0x8F3F); // DRAW_INDIRECT_BUFFER
     struct Cmd { GLuint count, instanceCount, first, baseInstance; };
     if (dib) {
-        auto it = c.buffers.find(dib);
-        if (it == c.buffers.end()) { c.errors.Record(0x0502); return false; }
+        Context::BufferView bv = c.SyncBuffer(dib);
+        if (!bv.p) { c.errors.Record(0x0502); return false; }
         size_t at = (size_t)ind;
-        if (at + sizeof(Cmd) > it->second.data.size()) { c.errors.Record(0x0501); return false; }
-        Cmd k; memcpy(&k, it->second.data.data() + at, sizeof(k));
+        if (at + sizeof(Cmd) > bv.size) { c.errors.Record(0x0501); return false; }
+        Cmd k; memcpy(&k, bv.p + at, sizeof(k));
         *count = k.count; *inst = k.instanceCount; *first = k.first; *baseInst = k.baseInstance;
         return true;
     }
@@ -280,11 +282,11 @@ static bool ReadElementsCmd(const void* ind, GLuint* count, GLuint* inst, GLuint
     GLuint dib = c.state.BoundBuffer(0x8F3F);
     struct Cmd { GLuint count, instanceCount, firstIndex, baseVertex, baseInstance; };
     if (dib) {
-        auto it = c.buffers.find(dib);
-        if (it == c.buffers.end()) { c.errors.Record(0x0502); return false; }
+        Context::BufferView bv = c.SyncBuffer(dib);
+        if (!bv.p) { c.errors.Record(0x0502); return false; }
         size_t at = (size_t)ind;
-        if (at + sizeof(Cmd) > it->second.data.size()) { c.errors.Record(0x0501); return false; }
-        Cmd k; memcpy(&k, it->second.data.data() + at, sizeof(k));
+        if (at + sizeof(Cmd) > bv.size) { c.errors.Record(0x0501); return false; }
+        Cmd k; memcpy(&k, bv.p + at, sizeof(k));
         *count = k.count; *inst = k.instanceCount; *firstIdx = k.firstIndex;
         *baseVtx = (GLint)k.baseVertex; *baseInst = k.baseInstance;
         return true;
@@ -356,9 +358,8 @@ void glMultiDrawArraysIndirectCount(GLenum m, const void* ind, GLintptr doff, GL
     if (s != 0 && stride < 16) { c.errors.Record(0x0501); return; }
     GLuint pb = c.state.BoundBuffer(0x80EE); // PARAMETER_BUFFER
     GLsizei dc = md;
-    auto it = c.buffers.find(pb);
-    if (it != c.buffers.end() && (size_t)doff + 4 <= it->second.data.size())
-        memcpy(&dc, it->second.data.data() + doff, 4);
+    Context::BufferView pv = c.SyncBuffer(pb);
+    if (pv.p && (size_t)doff + 4 <= pv.size) memcpy(&dc, pv.p + doff, 4);
     else if (pb) { c.errors.Record(0x0502); return; }
     if (dc < 0) dc = 0;
     if (dc > md) dc = md;
@@ -378,9 +379,8 @@ void glMultiDrawElementsIndirectCount(GLenum m, GLenum t, const void* ind, GLint
     if (s != 0 && stride < 20) { c.errors.Record(0x0501); return; }
     GLuint pb = c.state.BoundBuffer(0x80EE);
     GLsizei dc = md;
-    auto it = c.buffers.find(pb);
-    if (it != c.buffers.end() && (size_t)doff + 4 <= it->second.data.size())
-        memcpy(&dc, it->second.data.data() + doff, 4);
+    Context::BufferView pv = c.SyncBuffer(pb);
+    if (pv.p && (size_t)doff + 4 <= pv.size) memcpy(&dc, pv.p + doff, 4);
     else if (pb) { c.errors.Record(0x0502); return; }
     if (dc < 0) dc = 0;
     if (dc > md) dc = md;

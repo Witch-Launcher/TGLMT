@@ -196,6 +196,24 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.cbCommittedNow, (unsigned long long)a.cbCompletedNow,
                     (unsigned long long)a.clearRegionFails,
                     (unsigned long long)a.presentPasses);
+            // P0 memory accounting: shadow CPU (cắt được ở P1) vs GPU resource.
+            // Quét toàn bộ textures/buffers — chỉ chạy 1 lần / 600 frame.
+            cx.RefreshMemStats();
+            fprintf(stderr,
+                    "[TGLMT] mem frame=%llu shadowMB=%llu (tex=%llu mip=%llu face=%llu buf=%llu) "
+                    "gpuMB=%llu (tex=%llu buf=%llu) nTex=%llu nBuf=%llu staged=%llu\n",
+                    (unsigned long long)nSwap,
+                    (unsigned long long)((a.memTexBase + a.memTexMip + a.memTexFace +
+                                          a.memBufShadow) >>(20)),
+                    (unsigned long long)(a.memTexBase >> 20),
+                    (unsigned long long)(a.memTexMip >> 20),
+                    (unsigned long long)(a.memTexFace >> 20),
+                    (unsigned long long)(a.memBufShadow >> 20),
+                    (unsigned long long)((a.memGpuTex + a.memGpuBuf) >> 20),
+                    (unsigned long long)(a.memGpuTex >> 20),
+                    (unsigned long long)(a.memGpuBuf >> 20),
+                    (unsigned long long)a.nTextures, (unsigned long long)a.nBuffers,
+                    (unsigned long long)a.nBufferStaged);
             fflush(stderr);
             pAtt = a.drawsAttempted;
             pEnc = a.drawsEncoded;

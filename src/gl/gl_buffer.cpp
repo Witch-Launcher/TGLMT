@@ -25,16 +25,27 @@ namespace tglmt {
 // Mỗi SubData deferred đều đếm bufferCoalesced (bằng chứng 10 updates → staging).
 // Thứ tự GL: chỉ flush encoder đang mở khi buffer này ĐÃ dùng trong pass
 // (conditional-flush, deferred full). Stage "lạ" giữ nguyên batching.
-void Context::StageBufferRange(GLuint bufId, size_t off, size_t len) {
+// src != nullptr → payload được carry theo range (shadow CPU rỗng — P1 Apple).
+// Khi carry chỉ merge được range LIỀN SÁT ĐÚNG (không gap): byte của phần gap
+// không tồn tại ở stage time, để flush resolve từ GPU/shadow cũ (đã đúng).
+void Context::StageBufferRange(GLuint bufId, size_t off, size_t len, const uint8_t* src) {
     if (!len) return;
     if (pendingEncoder && MustFlushForBufferStage(bufId)) FlushPendingEncoder();
     auto& vec = pendingBufRanges[bufId];
+    const bool carry = (src != nullptr);
     if (!vec.empty()) {
         auto& last = vec.back();
         size_t lastEnd = last.off + last.len;
         size_t wantEnd = off + len;
-        // Merge khi chồng lấn hoặc kề nhau (gap <= 64B thì lấp luôn cho đỡ fragment).
-        if (off <= lastEnd + 64) {
+        if (carry) {
+            if (off == lastEnd && last.bytes.size() == last.len) {
+                last.bytes.insert(last.bytes.end(), src, src + len);
+                last.len = wantEnd - last.off;
+                ++appleStats.bufferCoalesced;
+                return;
+            }
+        } else if (off <= lastEnd + 64) {
+            // Merge khi chồng lấn hoặc kề nhau (gap <= 64B thì lấp luôn cho đỡ fragment).
             size_t newEnd = std::max(lastEnd, wantEnd);
             size_t newOff = std::min(last.off, off);
             last.off = newOff;
@@ -43,14 +54,44 @@ void Context::StageBufferRange(GLuint bufId, size_t off, size_t len) {
             return;
         }
     }
-    vec.push_back(BufRange{off, len});
+    BufRange r{off, len, {}};
+    if (carry) r.bytes.assign(src, src + len);
+    vec.push_back(std::move(r));
     ++appleStats.bufferCoalesced;
+}
+
+std::vector<uint8_t>* Context::MutablePbo(GLuint buf, size_t end) {
+    auto it = buffers.find(buf);
+    if (it == buffers.end()) return nullptr;
+    BufferObject& b = it->second;
+    if (b.data.empty()) {
+        FlushBufferStaging(buf); // staged ranges chưa lên GPU
+        if (b.gpu && b.gpu->contents()) {
+            const uint8_t* g = (const uint8_t*)b.gpu->contents();
+            size_t have = std::min(BufferLen(b), b.gpu->length());
+            b.data.assign(g, g + have);
+        }
+    }
+    if (end > b.data.size()) b.data.resize(end, 0);
+    if (end > b.size) b.size = end;
+    return &b.data;
+}
+
+Context::BufferView Context::SyncBuffer(GLuint buf) {
+    auto it = buffers.find(buf);
+    if (it == buffers.end()) return {};
+    BufferObject& b = it->second;
+    // Shadow rỗng (Apple backend đã bỏ nhân bản CPU) → nội dung nằm ở GPU,
+    // phải xả staged ranges trước khi đọc.
+    if (b.data.empty()) FlushBufferStaging(buf);
+    return {BufferBytes(b), BufferLen(b)};
 }
 } // namespace tglmt
 
 // Wrapper nội bộ giữ nguyên mọi call-site trong file.
-static void StageBufRange(Context& c, GLuint bufId, size_t off, size_t len) {
-    c.StageBufferRange(bufId, off, len);
+static void StageBufRange(Context& c, GLuint bufId, size_t off, size_t len,
+                          const uint8_t* src = nullptr) {
+    c.StageBufferRange(bufId, off, len, src);
 }
 
 namespace tglmt {
@@ -94,10 +135,13 @@ void Context::FlushBufferStaging(GLuint buf) {
         const bool inFlight = device && !bo.mapped && GpuBusy();
         std::shared_ptr<metal::IBuffer> target = bo.gpu;
         bool rotated = false;
+        const size_t need = BufferLen(bo) ? BufferLen(bo) : (size_t)1;
         if (inFlight) {
-            constexpr size_t kPool = 3; // đủ cho 2 frame đang bay
-            if (bo.pool.size() < kPool) bo.pool.resize(kPool);
-            const size_t need = bo.data.size() ? bo.data.size() : (size_t)1;
+            // Số slot = opt.bufPoolSlots (TGLMT_BUF_POOL, launcher tab Đồ hoạ →
+            // mục TGLMT). Mặc định 3 = đủ cho 2 frame đang bay. Giảm → tiết kiệm
+            // RAM pool nhưng dễ chạm nhánh chờ (bufWaitStall) khi GPU tụt hậu.
+            const size_t kPool = opt.bufPoolSlots ? opt.bufPoolSlots : 1;
+            if (bo.pool.size() != kPool) bo.pool.resize(kPool); // hạ setting → trả slot
             const uint64_t done = cbCompleted.load(std::memory_order_relaxed);
             for (size_t i = 0; i < kPool; ++i) {
                 BufferObject::GpuSlot& sl = bo.pool[(bo.poolNext + i) % kPool];
@@ -123,19 +167,59 @@ void Context::FlushBufferStaging(GLuint buf) {
                 ++appleStats.bufRotated;
             }
         }
-        size_t gpuLen = target->length();
-        for (auto& m : merged) {
-            if (m.off >= bo.data.size() || m.off >= gpuLen) continue;
-            size_t n = std::min({m.len, bo.data.size() - m.off, gpuLen - m.off});
-            if (!n) continue;
-            memcpy((uint8_t*)target->contents() + m.off, bo.data.data() + m.off, n);
-            target->didModifyRange(m.off, n);
+        // Nguồn dữ liệu đã flush trước: shadow CPU (Null/PBO) hoặc chính GPU
+        // buffer cũ (Shared → đọc được). Khi shadow rỗng, `src` là bản CHƯA có
+        // staged bytes → phải overlay payload sau.
+        const uint8_t* src = nullptr;
+        size_t srcLen = 0;
+        if (!bo.data.empty()) {
+            src = bo.data.data();
+            srcLen = bo.data.size();
+        } else if (bo.gpu && bo.gpu->contents()) {
+            src = (const uint8_t*)bo.gpu->contents();
+            srcLen = bo.gpu->length();
         }
-        if (rotated)
-            for (auto& sl : bo.pool)
-                if (sl.buf == target)
-                    sl.usedGen = cbCommitted.load(std::memory_order_relaxed);
-        bo.gpu = target; // draw sau dùng đúng buffer vừa ghi
+        uint8_t* tgt = target ? (uint8_t*)target->contents() : nullptr;
+        size_t gpuLen = target ? target->length() : 0;
+        if (tgt) {
+            const bool tgtIsSrc = (tgt == src);
+            // Sửa bug slot xoay: slot mới (hoặc slot pool cũ) chứa RÁC ở phần không
+            // staged → seed đúng phần gap từ buffer cũ TRƯỚC khi ghi payload.
+            if (rotated && src && !tgtIsSrc) {
+                size_t cap = std::min({need, srcLen, gpuLen});
+                size_t pos = 0;
+                for (auto& m : merged) {
+                    if (m.off > pos) {
+                        size_t g = std::min((size_t)m.off, cap);
+                        if (g > pos) memcpy(tgt + pos, src + pos, g - pos);
+                    }
+                    size_t e = std::min({m.off + m.len, cap});
+                    if (e > pos) pos = e;
+                }
+                if (pos < cap) memcpy(tgt + pos, src + pos, cap - pos);
+            }
+            for (auto& m : merged) {
+                if (m.off >= srcLen || m.off >= gpuLen) continue;
+                size_t n = std::min({m.len, srcLen - m.off, gpuLen - m.off});
+                if (!n) continue;
+                if (!tgtIsSrc) memcpy(tgt + m.off, src + m.off, n);
+                target->didModifyRange(m.off, n);
+            }
+            // Overlay payload carry (shadow rỗng): staged bytes mới nhất đè lên GPU.
+            for (auto& r : vec) {
+                if (r.bytes.empty()) continue;
+                if (r.off >= gpuLen) continue;
+                size_t n = std::min(r.bytes.size(), gpuLen - r.off);
+                if (!n) continue;
+                memcpy(tgt + r.off, r.bytes.data(), n);
+                target->didModifyRange(r.off, n);
+            }
+            if (rotated)
+                for (auto& sl : bo.pool)
+                    if (sl.buf == target)
+                        sl.usedGen = cbCommitted.load(std::memory_order_relaxed);
+            bo.gpu = target; // draw sau dùng đúng buffer vừa ghi
+        }
     }
     ++appleStats.bufferFlushes;
     pendingBufRanges.erase(it);
@@ -203,7 +287,7 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
         if (c.DiagOn() && buffer && UboBindLogNew(index, buffer, 0, 0)) {
             static int nUB = 0;
             auto it = c.buffers.find(buffer);
-            size_t sz = (it == c.buffers.end()) ? 0 : it->second.data.size();
+            size_t sz = (it == c.buffers.end()) ? 0 : BufferLen(it->second);
             fprintf(stderr, "[TGLMT] ubobind#%d point %u -> buf %u (%zuB)\n",
                     ++nUB, index, buffer, sz);
             fflush(stderr);
@@ -242,11 +326,21 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return;
-    bo->data.assign((const uint8_t*)(data ? data : nullptr), (const uint8_t*)(data ? data : nullptr) + (data ? size : 0));
-    if (!data) bo->data.assign((size_t)size, 0);
+    bo->size = (size_t)size;
     bo->usage = usage;
     bo->gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                    : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
+    // P1 (bỏ nhân bản CPU): GPU buffer là Shared memory → bản của GPU đã là bản
+    // đúng, không giữ thêm shadow. Giữ shadow khi: device Null (shadow LÀ tài
+    // nguyên) hoặc upload thất bại (gpu==nullptr).
+    // data==nullptr: spec undefined, trang mới của vm_allocate vốn đã zeros →
+    // drop luôn. Đây chính là chỗ rò 418MB (MC allocate glBufferData(n, NULL)).
+    if (bo->gpu && !c.device->isNull()) {
+        std::vector<uint8_t>().swap(bo->data);
+    } else {
+        bo->data.assign((size_t)size, 0);
+        if (data && size) memcpy(bo->data.data(), data, (size_t)size);
+    }
     c.pendingBufRanges.erase(bid); // realloc → staging cũ vô nghĩa
 }
 void glNamedBufferData(GLuint b, GLsizeiptr size, const void* data, GLenum usage) {
@@ -256,11 +350,16 @@ void glNamedBufferData(GLuint b, GLsizeiptr size, const void* data, GLenum usage
     GLuint saved = c.state.BoundBuffer(it->second.target ? it->second.target : 0x8892);
     c.state.BindBuffer(0x8892, b); // ARRAY_BUFFER scratch
     // trực tiếp không qua target
-    it->second.data.assign(size ? (size_t)size : 0, 0);
-    if (data && size) memcpy(it->second.data.data(), data, (size_t)size);
+    it->second.size = (size_t)size;
     it->second.usage = usage;
     it->second.gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                           : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
+    if (it->second.gpu && !c.device->isNull()) {
+        std::vector<uint8_t>().swap(it->second.data);
+    } else {
+        it->second.data.assign(size ? (size_t)size : 0, 0);
+        if (data && size) memcpy(it->second.data.data(), data, (size_t)size);
+    }
     c.pendingBufRanges.erase(b);
     c.state.BindBuffer(0x8892, saved);
 }
@@ -269,22 +368,32 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return;
-    bo->data.assign((size_t)size, 0);
-    if (data) memcpy(bo->data.data(), data, (size_t)size);
+    bo->size = (size_t)size;
     bo->storageFlags = flags;
     bo->gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                    : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
+    if (bo->gpu && !c.device->isNull()) {
+        std::vector<uint8_t>().swap(bo->data);
+    } else {
+        bo->data.assign((size_t)size, 0);
+        if (data && size) memcpy(bo->data.data(), data, (size_t)size);
+    }
     c.pendingBufRanges.erase(bid);
 }
 void glNamedBufferStorage(GLuint b, GLsizeiptr size, const void* data, GLbitfield flags) {
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
-    it->second.data.assign((size_t)size, 0);
-    if (data) memcpy(it->second.data.data(), data, (size_t)size);
+    it->second.size = (size_t)size;
     it->second.storageFlags = flags;
     it->second.gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                           : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
+    if (it->second.gpu && !c.device->isNull()) {
+        std::vector<uint8_t>().swap(it->second.data);
+    } else {
+        it->second.data.assign((size_t)size, 0);
+        if (data && size) memcpy(it->second.data.data(), data, (size_t)size);
+    }
     c.pendingBufRanges.erase(b);
 }
 void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
@@ -292,35 +401,54 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void
     GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo || !data) { if(!data) c.errors.Record(0x0501); return; }
-    if (offset < 0 || size < 0 || (size_t)(offset + size) > bo->data.size()) { c.errors.Record(0x0501); return; }
-    memcpy(bo->data.data() + offset, data, (size_t)size);
+    if (offset < 0 || size < 0 || (size_t)(offset + size) > BufferLen(*bo)) { c.errors.Record(0x0501); return; }
+    // Shadow còn → ghi vào shadow như cũ. Shadow rỗng (Apple backend — P1) →
+    // payload carry theo range, ghi GPU ở FlushBufferStaging.
+    const uint8_t* carry = nullptr;
+    if (!bo->data.empty()) {
+        if ((size_t)(offset + size) > bo->data.size()) bo->data.resize((size_t)(offset + size), 0);
+        memcpy(bo->data.data() + offset, data, (size_t)size);
+    } else {
+        carry = (const uint8_t*)data;
+    }
     // IR deferred: chỉ stage range, GPU copy dồn đến flush (trước draw/readback).
     // Trước đây: memcpy GPU + didModify ngay mỗi call (10 calls → 10 Metal ops).
-    StageBufRange(c, bid, (size_t)offset, (size_t)size);
+    StageBufRange(c, bid, (size_t)offset, (size_t)size, carry);
 }
 void glNamedBufferSubData(GLuint b, GLintptr off, GLsizeiptr size, const void* data) {
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
-    if (off < 0 || size < 0 || (size_t)(off + size) > it->second.data.size()) { c.errors.Record(0x0501); return; }
-    memcpy(it->second.data.data() + off, data, (size_t)size);
+    if (off < 0 || size < 0 || (size_t)(off + size) > BufferLen(it->second)) { c.errors.Record(0x0501); return; }
+    const uint8_t* carry = nullptr;
+    if (!it->second.data.empty()) {
+        if ((size_t)(off + size) > it->second.data.size())
+            it->second.data.resize((size_t)(off + size), 0);
+        memcpy(it->second.data.data() + off, data, (size_t)size);
+    } else {
+        carry = (const uint8_t*)data;
+    }
     // Game 26.x update buffer per-frame qua writeToBuffer → glNamedBufferSubData.
     // IR: stage thay vì sync GPU ngay (tránh stale đã fix trước đây bằng flush đúng chỗ).
-    StageBufRange(c, b, (size_t)off, (size_t)size);
+    StageBufRange(c, b, (size_t)off, (size_t)size, carry);
 }
 void glGetBufferSubData(GLenum target, GLintptr off, GLsizeiptr size, void* data) {
     Context& c = Context::Current();
     BufferObject* bo = BoundBuf(target);
     if (!bo) return;
-    if (off < 0 || size < 0 || (size_t)(off + size) > bo->data.size()) { c.errors.Record(0x0501); return; }
-    memcpy(data, bo->data.data() + off, (size_t)size);
+    if (off < 0 || size < 0 || (size_t)(off + size) > BufferLen(*bo)) { c.errors.Record(0x0501); return; }
+    Context::BufferView v = c.SyncBuffer(c.state.BoundBuffer(target)); // xả staged ranges trước
+    if (!v.p) { c.errors.Record(0x0502); return; }
+    memcpy(data, v.p + off, (size_t)size);
 }
 void glGetNamedBufferSubData(GLuint b, GLintptr off, GLsizeiptr size, void* data) {
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
-    if (off < 0 || size < 0 || (size_t)(off + size) > it->second.data.size()) { c.errors.Record(0x0501); return; }
-    memcpy(data, it->second.data.data() + off, (size_t)size);
+    if (off < 0 || size < 0 || (size_t)(off + size) > BufferLen(it->second)) { c.errors.Record(0x0501); return; }
+    Context::BufferView v = c.SyncBuffer(b);
+    if (!v.p) { c.errors.Record(0x0502); return; }
+    memcpy(data, v.p + off, (size_t)size);
 }
 void glCopyBufferSubData(GLenum rt, GLenum wt, GLintptr ro, GLintptr wo, GLsizeiptr size) {
     Context& c = Context::Current();
@@ -329,20 +457,32 @@ void glCopyBufferSubData(GLenum rt, GLenum wt, GLintptr ro, GLintptr wo, GLsizei
     if (itR == c.buffers.end() || itW == c.buffers.end()) { c.errors.Record(0x0502); return; }
     if (ro < 0 || wo < 0 || size < 0) { c.errors.Record(0x0501); return; }
     // Metal: blit copyFromBuffer — ở Null backend copy CPU
-    if ((size_t)(ro + size) > itR->second.data.size() || (size_t)(wo + size) > itW->second.data.size()) { c.errors.Record(0x0501); return; }
-    // Đọc nguồn phải flush staging nguồn trước (shadow nguồn mới nhất sau flush).
-    c.FlushBufferStaging(r);
-    memmove(itW->second.data.data() + wo, itR->second.data.data() + ro, (size_t)size);
-    StageBufRange(c, w, (size_t)wo, (size_t)size);
+    if ((size_t)(ro + size) > BufferLen(itR->second) || (size_t)(wo + size) > BufferLen(itW->second)) { c.errors.Record(0x0501); return; }
+    // Nguồn phải sync staging trước (SyncBuffer xả range chưa ghi).
+    Context::BufferView src = c.SyncBuffer(r);
+    if (!src.p) { c.errors.Record(0x0502); return; }
+    if (!itW->second.data.empty()) {
+        memmove(itW->second.data.data() + wo, src.p + ro, (size_t)size);
+        StageBufRange(c, w, (size_t)wo, (size_t)size); // shadow đích đã có payload
+    } else {
+        std::vector<uint8_t> tmp(src.p + ro, src.p + ro + size);
+        StageBufRange(c, w, (size_t)wo, (size_t)size, tmp.data());
+    }
 }
 void glCopyNamedBufferSubData(GLuint r, GLuint w, GLintptr ro, GLintptr wo, GLsizeiptr size) {
     Context& c = Context::Current();
     auto itR = c.buffers.find(r), itW = c.buffers.find(w);
     if (itR == c.buffers.end() || itW == c.buffers.end()) { c.errors.Record(0x0502); return; }
-    if ((size_t)(ro + size) > itR->second.data.size() || (size_t)(wo + size) > itW->second.data.size()) { c.errors.Record(0x0501); return; }
-    c.FlushBufferStaging(r);
-    memmove(itW->second.data.data() + wo, itR->second.data.data() + ro, (size_t)size);
-    StageBufRange(c, w, (size_t)wo, (size_t)size);
+    if ((size_t)(ro + size) > BufferLen(itR->second) || (size_t)(wo + size) > BufferLen(itW->second)) { c.errors.Record(0x0501); return; }
+    Context::BufferView src = c.SyncBuffer(r);
+    if (!src.p) { c.errors.Record(0x0502); return; }
+    if (!itW->second.data.empty()) {
+        memmove(itW->second.data.data() + wo, src.p + ro, (size_t)size);
+        StageBufRange(c, w, (size_t)wo, (size_t)size);
+    } else {
+        std::vector<uint8_t> tmp(src.p + ro, src.p + ro + size);
+        StageBufRange(c, w, (size_t)wo, (size_t)size, tmp.data());
+    }
 }
 void* glMapBuffer(GLenum target, GLenum access) {
     Context& c = Context::Current();
@@ -352,7 +492,7 @@ void* glMapBuffer(GLenum target, GLenum access) {
     (void)access;
     // IR: flush staging trước để GPU có dữ liệu mới nhất trước khi app ghi trực tiếp.
     c.FlushBufferStaging(bid);
-    bo->mapped = true; bo->mapOffset = 0; bo->mapLength = bo->data.size();
+    bo->mapped = true; bo->mapOffset = 0; bo->mapLength = BufferLen(*bo);
     if (bo->gpu) return bo->gpu->contents();
     return bo->data.data();
 }
@@ -361,7 +501,7 @@ void* glMapBufferRange(GLenum target, GLintptr off, GLsizeiptr len, GLbitfield a
     GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return nullptr;
-    if (off < 0 || len < 0 || (size_t)(off + len) > bo->data.size()) { c.errors.Record(0x0501); return nullptr; }
+    if (off < 0 || len < 0 || (size_t)(off + len) > BufferLen(*bo)) { c.errors.Record(0x0501); return nullptr; }
     c.FlushBufferStaging(bid);
     bo->mapped = true; bo->mapOffset = (size_t)off; bo->mapLength = (size_t)len; bo->mapAccess = access;
     if (bo->gpu) return (uint8_t*)bo->gpu->contents() + off;
@@ -375,7 +515,7 @@ void* glMapNamedBuffer(GLuint b, GLenum access) {
     c.FlushBufferStaging(b);
     it->second.mapped = true;
     it->second.mapOffset = 0;
-    it->second.mapLength = it->second.data.size();
+    it->second.mapLength = BufferLen(it->second);
     // Trả con trỏ GPU khi có (như bản bound) để write thấy ngay trên GPU;
     // Unmap sẽ didModify + chép ngược shadow.
     if (it->second.gpu) return it->second.gpu->contents();
@@ -386,7 +526,7 @@ void* glMapNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len, GLbitfield a
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return nullptr; }
     (void)access;
-    if (off < 0 || len < 0 || (size_t)(off + len) > it->second.data.size()) { c.errors.Record(0x0501); return nullptr; }
+    if (off < 0 || len < 0 || (size_t)(off + len) > BufferLen(it->second)) { c.errors.Record(0x0501); return nullptr; }
     c.FlushBufferStaging(b);
     it->second.mapped = true;
     it->second.mapOffset = (size_t)off;
@@ -452,14 +592,19 @@ void glFlushMappedNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len) {
 void glClearBufferData(GLenum t, GLenum inf, GLenum f, GLenum ty, const void* d) {
     (void)inf; (void)f; (void)ty;
     Context& c = Context::Current();
+    GLuint bid = c.state.BoundBuffer(t);
     BufferObject* bo = BoundBuf(t);
     if (!bo) return;
     // Metal RenderPass clear tương đương; ở buffer: fill 0 hoặc pattern byte đầu
     uint8_t fill = d ? *(const uint8_t*)d : 0;
+    const size_t n = std::min(BufferLen(*bo), bo->gpu ? bo->gpu->length() : (size_t)-1);
     std::fill(bo->data.begin(), bo->data.end(), fill);
-    if (bo->gpu) {
-        memset(bo->gpu->contents(), fill, std::min(bo->data.size(), bo->gpu->length()));
-        bo->gpu->didModifyRange(0, std::min(bo->data.size(), bo->gpu->length()));
+    // Clear quyết định TOÀN BỘ nội dung → staged ranges cũ trở nên lỗi thời
+    // (payload carry sẽ ghi đè clear). Xóa staging trước.
+    c.pendingBufRanges.erase(bid);
+    if (bo->gpu && n) {
+        memset(bo->gpu->contents(), fill, n);
+        bo->gpu->didModifyRange(0, n);
     }
 }
 void glClearBufferSubData(GLenum t, GLenum inf, GLintptr off, GLsizeiptr size, GLenum f, GLenum ty, const void* d) {
@@ -469,9 +614,17 @@ void glClearBufferSubData(GLenum t, GLenum inf, GLintptr off, GLsizeiptr size, G
     BufferObject* bo = BoundBuf(t);
     if (!bo) return;
     uint8_t fill = d ? *(const uint8_t*)d : 0;
-    if (off < 0 || size < 0 || (size_t)(off + size) > bo->data.size()) { c.errors.Record(0x0501); return; }
-    std::fill(bo->data.begin() + off, bo->data.begin() + off + size, fill);
-    StageBufRange(c, bid, (size_t)off, (size_t)size);
+    if (off < 0 || size < 0 || (size_t)(off + size) > BufferLen(*bo)) { c.errors.Record(0x0501); return; }
+    const uint8_t* carry = nullptr;
+    std::vector<uint8_t> tmp;
+    if (!bo->data.empty()) {
+        if ((size_t)(off + size) > bo->data.size()) bo->data.resize((size_t)(off + size), 0);
+        std::fill(bo->data.begin() + off, bo->data.begin() + off + size, fill);
+    } else {
+        tmp.assign((size_t)size, fill);
+        carry = tmp.data();
+    }
+    StageBufRange(c, bid, (size_t)off, (size_t)size, carry);
 }
 void glClearNamedBufferData(GLuint b, GLenum inf, GLenum f, GLenum ty, const void* d) {
     (void)inf; (void)f; (void)ty;
@@ -479,10 +632,13 @@ void glClearNamedBufferData(GLuint b, GLenum inf, GLenum f, GLenum ty, const voi
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     uint8_t fill = d ? *(const uint8_t*)d : 0;
+    const size_t n = std::min(BufferLen(it->second),
+                              it->second.gpu ? it->second.gpu->length() : (size_t)-1);
     std::fill(it->second.data.begin(), it->second.data.end(), fill);
-    if (it->second.gpu) {
-        memset(it->second.gpu->contents(), fill, std::min(it->second.data.size(), it->second.gpu->length()));
-        it->second.gpu->didModifyRange(0, std::min(it->second.data.size(), it->second.gpu->length()));
+    c.pendingBufRanges.erase(b); // clear quyết định toàn bộ nội dung
+    if (it->second.gpu && n) {
+        memset(it->second.gpu->contents(), fill, n);
+        it->second.gpu->didModifyRange(0, n);
     }
 }
 void glClearNamedBufferSubData(GLuint b, GLenum inf, GLintptr off, GLsizeiptr size, GLenum f, GLenum ty, const void* d) {
@@ -491,9 +647,18 @@ void glClearNamedBufferSubData(GLuint b, GLenum inf, GLintptr off, GLsizeiptr si
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     uint8_t fill = d ? *(const uint8_t*)d : 0;
-    if (off < 0 || size < 0 || (size_t)(off + size) > it->second.data.size()) { c.errors.Record(0x0501); return; }
-    std::fill(it->second.data.begin() + off, it->second.data.begin() + off + size, fill);
-    StageBufRange(c, b, (size_t)off, (size_t)size);
+    if (off < 0 || size < 0 || (size_t)(off + size) > BufferLen(it->second)) { c.errors.Record(0x0501); return; }
+    const uint8_t* carry = nullptr;
+    std::vector<uint8_t> tmp;
+    if (!it->second.data.empty()) {
+        if ((size_t)(off + size) > it->second.data.size())
+            it->second.data.resize((size_t)(off + size), 0);
+        std::fill(it->second.data.begin() + off, it->second.data.begin() + off + size, fill);
+    } else {
+        tmp.assign((size_t)size, fill);
+        carry = tmp.data();
+    }
+    StageBufRange(c, b, (size_t)off, (size_t)size, carry);
 }
 void glInvalidateBufferData(GLuint b) {
     Context& c = Context::Current();

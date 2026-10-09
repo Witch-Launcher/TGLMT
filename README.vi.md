@@ -1,73 +1,96 @@
-# TGLMT — OpenGL 4.6 Core sang Metal (iOS)
+# TGLMT
 
-[English version](README.md) | Giấy phép: MIT | Mục tiêu: iPhone A11 trở lên
+[English version](README.md)
 
-TGLMT cho bạn viết code render một lần bằng **OpenGL 4.6 Core** và chạy trên
-**Metal** (iOS/macOS). Không MoltenVK, không ANGLE. Làm cho đường boot vanilla
-của launcher Minecraft Java trên iOS.
+TGLMT là lớp dịch cho phép render **OpenGL 4.6 Core** chạy trên **Metal**. Ứng dụng
+vẫn gọi lệnh OpenGL; TGLMT kiểm tra tham số, ghi trạng thái GL trên CPU, dịch GLSL sang
+Metal Shading Language khi link program, và gom các lệnh kết quả thành command buffer
+của Metal.
 
-## Có gì
+Không có driver Vulkan nào trong đường đi: không MoltenVK, không ANGLE, không SPIR-V ở
+runtime.
 
-- Đủ mặt API OpenGL 4.6 Core: 698 hàm + exports C trần, loader có sẵn
-  (`dlsym("glDrawElements")`) chạy không cần sửa.
-- Vẽ GPU thật: VAO/VBO/EBO, indexed + `baseVertex`, instancing, indirect từ
-  `DRAW_INDIRECT_BUFFER`, bung `TRIANGLE_FAN`/`LINE_LOOP`.
-- Converter GLSL sang MSL, fail trung thực (không đoán code): uniform, mảng
-  uniform, MRT tới 8 target, UBO read-only, nhiều sampler.
-- Framebuffer + `BlitFramebuffer`, sinh mipmap, depth/blend/cull,
-  `ReadPixels` đúng chiều.
-- C API cửa sổ (`TGLMT_CreateWindow` / `SwapBuffers` / `GetProcAddress`) để
-  nhúng vào launcher; có present lên `CAMetalLayer`.
+| | |
+|---|---|
+| Mặt API | OpenGL 4.6 Core — 698 hàm khai báo trong `include/tglmt/gl46.h`, 701 ký hiệu C xuất ra |
+| Đầu vào shader | GLSL vertex + fragment, chuyển thẳng sang MSL tại `glCompileShader` |
+| Nền tảng | iOS arm64 (thiết kế theo chuẩn A11), macOS host |
+| Backend | `apple` (Metal, GPU thật) và `null` (trace/shadow trên CPU, không cần GPU) |
+| Sản phẩm | `libtglmt.a` (static) và `libtglmt.dylib` (shared, dùng `dlopen`/`dlsym`) |
+| Giấy phép | MIT |
 
-## Build
+Trường hợp sử dụng chính là đường boot vanilla của launcher Minecraft Java trên iOS:
+LWJGL/GLFW phân giải ký hiệu `gl*` lúc runtime và renderer phát ra các lệnh OpenGL
+thông thường.
+
+## Kiến trúc
+
+```
+  Ứng dụng OpenGL 4.6 (LWJGL / GLFW / Blaze3D / bất kỳ ai gọi GL)
+        |
+        |  698 điểm vào gl* + window API TGLMT_*
+        v
+  +------------------------------------------------------------------+
+  | Lớp dispatch        src/gl/*.cpp                                   |
+  |   kiểm tra tham số, ghi trạng thái GL, shadow các glGet*           |
+  +------------------------------------------------------------------+
+        |
+        +--> StateTracker / ObjectRegistry / ErrorTracker   (include/tglmt)
+        |
+        +--> Bộ chuyển GLSL -> MSL  src/gl/glsl_to_msl.cpp
+        |        (chỉ vertex + fragment; các stage khác bị từ chối trung thực)
+        v
+  Đường vẽ hoãn        src/gl/gl_apple_draw.cpp
+        |  shadow trạng thái, bỏ qua trạng thái trùng lặp
+        |  dùng lại encoder giữa các draw, cache pipeline-key
+        |  staging buffer/texture có gộp vùng, upload qua ring-buffer
+        v
+  Trừu tượng Metal     include/tglmt/MetalInterface.h
+        |
+        +--> Backend Apple   src/metal/AppleMetalBridge.mm  (GPU thật)
+        +--> Backend Null    src/metal/NullMetalBackend.cpp (trace/shadow)
+        v
+  Present lên CAMetalLayer   hoặc   đọc lại headless từ buffer shadow
+```
+
+Mô tả đầy đủ từng stage nằm trong [Kiến trúc](docs/vi/architecture.md).
+
+## Nên đọc tiếp
+
+| Tài liệu | Nội dung |
+|---|---|
+| [Bắt đầu](docs/vi/getting-started.md) | Ma trận build, test, frame đầu tiên, cách xác nhận backend GPU đang chạy |
+| [Kiến trúc](docs/vi/architecture.md) | Vòng đời draw-call, thực thi hoãn, đổi tọa độ |
+| [Tham khảo API](docs/vi/api.md) | `Renderer`, `tglmt::gl`, các export C, GLFW shim |
+| [Tích hợp](docs/vi/integration.md) | Nhúng dylib, `CAMetalLayer`, luồng, chẩn đoán màn đen |
+| [Tương thích & Hiệu năng](docs/vi/compatibility.md) | Cái gì đã làm, làm một phần, chỉ trace hay không hỗ trợ; counter; test chạy lại được |
+
+## Build và test
 
 ```sh
-# Logic + test, không cần GPU
-cmake -S . -B build && cmake --build build -j8
-ctest --test-dir build
-
-# Metal thật trên macOS
-cmake -S . -B build-apple -DTGLMT_APPLE_METAL=ON && cmake --build build-apple -j8
-
-# Dylib cho máy iOS (arm64)
-cmake -S . -B build-ios -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=$(xcrun --sdk iphoneos --show-sdk-path) \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 -DTGLMT_APPLE_METAL=ON -DTGLMT_BUILD_TESTS=OFF
-cmake --build build-ios
+cmake -S . -B build              # backend Null, build được trên mọi host
+cmake --build build -j8
+ctest --test-dir build --output-on-failure
 ```
 
-## Ví dụ tối thiểu
-
-```cpp
-#include "tglmt/Renderer.h"
-#include "tglmt/gl46.h"
-
-tglmt::Renderer r;
-r.Init("apple", 960, 600, true, tglmt::metal::PixelFormat::RGBA8Unorm);
-r.BeginFrame();
-tglmt::gl::glViewport(0, 0, 960, 600);
-tglmt::gl::glClearColor(0, 0, 0, 1);
-tglmt::gl::glClear(0x00004000);
-// ... compile shader, bind VAO, glDrawArrays ...
-r.EndFrame(metalLayer); // CAMetalLayer*; nullptr = headless
+```sh
+cmake -S . -B build-apple -DTGLMT_APPLE_METAL=ON   # macOS, Metal thật
+cmake --build build-apple -j8
+ctest --test-dir build-apple --output-on-failure
 ```
 
-Quy tắc quan trọng: chỉ gọi `gl::` sau `BeginFrame`; pixel format của layer
-phải bằng `fmt` truyền vào `Init`; chi tiết xem `docs/vi/`.
+Test cần GPU sẽ in `SKIP` và thoát 0 khi không có GPU, nên cả hai cấu hình đều chạy
+an toàn trong CI. Xem [Bắt đầu](docs/vi/getting-started.md) để biết cách cross-compile
+cho iOS và ma trận build đầy đủ.
 
-## Tài liệu
+## Trang tài liệu
 
-Mở `docs/index.html` trên trình duyệt để xem site tra cứu song ngữ
-(tối/sáng, chuyển VI/EN), sinh từ các file dưới qua
-`python3 tools/gen_docs_site.py`:
+`docs/index.html` là trang tài liệu song ngữ (Anh/Việt, sáng/tối, tìm kiếm). Trang này
+được sinh từ Markdown trong repository:
 
-- `docs/vi/getting-started.md` — build, test, frame đầu tiên
-- `docs/vi/api.md` — tham chiếu API C++ và C
-- `docs/vi/architecture.md` — pipeline, luồng draw, ánh xạ tọa độ
-- `docs/vi/launcher.md` — nhúng vào launcher iOS
-- `docs/vi/limits.md` — phần stub và lý do
+```sh
+python3 tools/gen_docs_site.py
+```
 
-## Trạng thái
-
-Render scene vanilla chạy được (kiểm chứng bằng pixel test GPU).
-Tessellation, geometry shader và compute encode đang stub trung thực, để dành
-cho giai đoạn Sodium/Iris. Xem `docs/vi/limits.md`.
+Trình sinh là nơi duy nhất định nghĩa danh sách trang; `docs/index.html` chỉ là mẫu
+giao diện. Xem [Bắt đầu](docs/vi/getting-started.md) để biết quy trình tái sinh.

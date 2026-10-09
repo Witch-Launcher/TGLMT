@@ -1,60 +1,253 @@
-# API reference
+# API Reference
 
-Two surfaces. C++ for apps linked against the static lib, C for loaders
-that `dlsym` by plain name (LWJGL) and for the launcher bridge.
+TGLMT exposes four surfaces. Pick the highest level that your application can use.
 
-## C++ API (`tglmt::gl`, `tglmt::Renderer`)
+| Surface | Header | Use when |
+|---|---|---|
+| C++ `Renderer` | `tglmt/Renderer.h` | you own the app and can link statically or `dlopen` |
+| C++ `tglmt::gl` | `tglmt/gl46.h` | you issue OpenGL calls from C++ |
+| Plain C `gl*` | exported symbols in `libtglmt.dylib` | an existing loader resolves `gl*` by name |
+| Window shim | `tglmt/GLFWShim.h` | you need `CreateWindow` / `MakeContextCurrent` / `SwapBuffers` / `GetProcAddress` |
 
-Headers: `include/tglmt/gl46.h` (698 decls, generated from `gl.xml`),
-`include/tglmt/Renderer.h`.
+## C++ `Renderer`
 
 ```cpp
-tglmt::Renderer r;
-bool ok = r.Init(backend, w, h, depth, fmt);
-// backend: "apple" (real GPU) or "null" (CPU trace). depth: attach depth
-// buffer. fmt MUST equal the CAMetalLayer pixelFormat.
-bool frame = r.BeginFrame();   // MakeCurrent + default target (FBO 0)
-bool shown = r.EndFrame(layer); // CAMetalLayer*; nullptr = headless
-void r.Resize(w, h);           // rebuild target on next BeginFrame
-bool px = r.ReadPixels(x, y, w, h, out); // RGBA8, bottom-left origin
-bool gpu = r.hasRealGPU();
+#include "tglmt/Renderer.h"
+
+class Renderer {
+public:
+    Renderer();
+    ~Renderer();
+
+    bool Init(const std::string& backend, uint32_t w, uint32_t h,
+              bool depth = true, metal::PixelFormat fmt = metal::PixelFormat::RGBA8Unorm);
+    void Resize(uint32_t w, uint32_t h);
+
+    bool BeginFrame(bool newFrame = true);
+    bool EndFrame(void* metalLayer);   // nullptr = headless
+
+    bool ReadPixels(int x, int y, int w, int h, void* out);
+
+    Context& context();
+    bool hasRealGPU() const;
+    RendererStats stats() const;
+    std::string backendName() const;
+    uint32_t width() const;
+    uint32_t height() const;
+    metal::PixelFormat colorFormat() const;
+};
 ```
 
-Call every `gl::` function only after `BeginFrame` on the calling thread.
-Each thread needs its own `MakeCurrent`; phase 1 shares one `Context`
-serially (see `launcher.md`).
-
-### Context and state (headers under `include/tglmt/`)
-
-| Header | Owns |
+| Member | Contract |
 |---|---|
-| `Context.h` | Per-thread GL state: buffers, VAOs, textures, shaders, programs, FBOs, UBO bindings, clear values, stats |
-| `StateTracker.h` | Capability/blend/depth/stencil/cull/viewport/scissor/clip-control shadow used to bake Metal state |
-| `MetalInterface.h` | `IDevice`/`IBuffer`/`ITexture`/`IRenderPipeline`/`IRenderEncoder` + `CustomAttrib` (VAO descriptor) + `DrawTrace` |
-| `GLSLConverter.h` | `ConvertGLSLtoMSL(src, stage)` result: MSL + varyings/uniforms/samplers/UBO blocks |
-| `GLFWShim.h` | C++ `GLFWShim` singleton behind the C API below |
+| `Init` | `backend` must be `"apple"` or `"null"`; anything else returns `false`. Returns `false` on the Apple backend if the render target cannot be created. `fmt` must match the `CAMetalLayer.pixelFormat` used at present time. |
+| `Resize` | records the new size, invalidates the render target and forces a full clear on the next frame. Zero dimensions are ignored. |
+| `BeginFrame(newFrame)` | makes this Renderer's Context current. `newFrame = true` also rotates the upload ring. `newFrame = false` only re-binds the Context, for callers that interleave `MakeCurrent` inside a frame. Returns `false` before `Init`, or when the Apple backend has no target. |
+| `EndFrame(layer)` | flushes the open encoder and all staging, then presents when `layer` is non-null. A null layer is a valid headless end-of-frame. |
+| `ReadPixels` | issues `glReadPixels` on the current Context, GL-order rows (origin bottom-left), and returns `false` on a GL or parameter error. |
+| `hasRealGPU` | `true` only when the device is a Metal device. On `false` every draw is trace-only and `ReadPixels` reads the CPU shadow. |
+| `stats` | `RendererStats` mirror of the draw outcome counters. |
 
-## C API (stable for `dlsym`)
+`RendererStats`:
 
-Plain OpenGL entry points: every `gl*` from `gl46.h` is exported unmangled
-from `libtglmt.dylib` (`src/gl/gl_c_exports.cpp`, generated — do not edit).
-They forward 1:1 to `tglmt::gl::*`.
+| Field | Meaning |
+|---|---|
+| `drawsAttempted` | draws that reached the draw path |
+| `drawsEncoded` | draws that produced Metal encoding |
+| `noProgram` | dropped: program missing, not linked, or has no MSL libraries |
+| `noTarget` | dropped: no default render target, or wrapping it failed |
+| `noPipeline` | dropped: the pipeline could not be created for this attribute layout |
+| `miscFail` | dropped: everything else (VAO, buffer, encoder, commit) |
 
-Window API (`include/tglmt/GLFWShim.h`, `extern "C"`):
+## OpenGL C++ surface
+
+All OpenGL entry points live in namespace `tglmt::gl` and take the same parameters as
+desktop OpenGL 4.6:
+
+```cpp
+#include "tglmt/gl46.h"
+
+tglmt::gl::glGenVertexArrays(1, &vao);
+tglmt::gl::glBindVertexArray(vao);
+tglmt::gl::glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+```
+
+`include/tglmt/gl46.h` declares **698** functions, generated from `docs/khronos/gl.xml`
+by `tools/gen_gl_headers.py`. It is paired with `include/tglmt/gl46_types.h`, which carries
+the GL types, enums and bitfields.
+
+### Headers in `include/tglmt/`
+
+| Header | Contents |
+|---|---|
+| `gl46.h` | 698 OpenGL 4.6 Core declarations in `tglmt::gl` |
+| `gl46_types.h` | GL types, constants, bitfields |
+| `Renderer.h` | `Renderer`, `RendererStats` |
+| `GLFWShim.h` | `GLFWShim`, `TGLMT_Window`, the `TGLMT_*` C API |
+| `Context.h` | `Context`, `AppleStats`, object and staging tables |
+| `StateTracker.h` | `StateTracker`, state group types |
+| `ObjectRegistry.h` | `ObjectRegistry`, `ObjectKind` |
+| `ErrorTracker.h` | `ErrorTracker` |
+| `GLSLConverter.h` | `GLSLConvertResult`, `GLSLVar`, `GLSLBlock`, `ConvertGLSLtoMSL` |
+| `GLConvert.h` | viewport, scissor and NDC conversion helpers |
+| `GLAppleDraw.h` | internal draw-path helpers |
+| `MetalInterface.h` | the `metal::` backend interface (`IDevice`, `IRenderTarget`, `ITexture`, `IBuffer`, `IRenderPipeline`, …) |
+
+## Exported C API
+
+`libtglmt.dylib` exports every `tglmt::gl` symbol as a plain C `gl*` function through
+`src/gl/gl_c_exports.cpp`, generated by `tools/gen_c_exports.py`. That is **701** symbols:
+the 698 core functions plus `glGetPointerv`, `glLineStipple` and `glDepthRangeArrayfvNV`.
+
+The library is built with default symbol visibility precisely so that an existing loader
+can resolve them:
 
 ```c
-TGLMT_Window* TGLMT_CreateWindow(uint32_t w, uint32_t h, const char* backend, int depth);
-int  TGLMT_MakeCurrent(TGLMT_Window* w);
-void TGLMT_ClearCurrent(void);
-int  TGLMT_SwapBuffers(TGLMT_Window* w, void* metalLayer); // CAMetalLayer*
-void TGLMT_SwapInterval(int interval);
-void TGLMT_ResizeWindow(TGLMT_Window* w, uint32_t width, uint32_t height);
-void* TGLMT_GetProcAddress(const char* name); // "glDrawElements", NULL if unknown
-int  TGLMT_HasRealGPU(void);
-void TGLMT_DestroyWindow(TGLMT_Window* w);
+void* p = dlsym(handle, "glDrawElements");
 ```
 
-Behavior notes: `SwapBuffers` flushes pending draws, presents to the layer,
-and starts the next frame. `GetProcAddress` covers the vanilla set (draw,
-buffer, VAO, texture, shader, program, FBO, sync); anything else returns
-NULL — link the dylib directly if you need all 701 symbols.
+`GLFWShim::GetProcAddress(name)` performs the same lookup in-process and returns `NULL`
+for an unknown name.
+
+## Window shim
+
+`tglmt/GLFWShim.h` is the minimal surface a GLFW/LWJGL-style application needs.
+
+### C++ class
+
+```cpp
+class GLFWShim {
+public:
+    static GLFWShim& Instance();
+
+    TGLMT_Window* CreateWindow(uint32_t w, uint32_t h,
+                               const char* backend = "apple", bool depth = true);
+    void DestroyWindow(TGLMT_Window* w);
+    bool MakeCurrent(TGLMT_Window* w);
+    static void ClearCurrent();
+    bool SwapBuffers(TGLMT_Window* w, void* metalLayer);
+    void SwapInterval(int interval);
+    void* GetProcAddress(const char* name);
+    bool HasRealGPU() const;
+    uint64_t DrawsEncoded() const;
+    const char* BackendName() const;
+    void Resize(TGLMT_Window* w, uint32_t width, uint32_t height);
+};
+```
+
+`TGLMT_Window` carries `w`, `h`, `swapInterval` and an opaque `userPtr`.
+
+### C ABI
+
+Ten `extern "C"` functions, so JNI and Objective-C callers avoid name mangling:
+
+| Function | Returns |
+|---|---|
+| `TGLMT_CreateWindow(w, h, backend, depth)` | `TGLMT_Window*`, or `NULL` |
+| `TGLMT_DestroyWindow(w)` | — |
+| `TGLMT_MakeCurrent(w)` | `1` on success, `0` on failure |
+| `TGLMT_ClearCurrent()` | — |
+| `TGLMT_SwapBuffers(w, metalLayer)` | `1` on success, `0` on failure |
+| `TGLMT_SwapInterval(interval)` | — |
+| `TGLMT_GetProcAddress(name)` | function pointer, or `NULL` |
+| `TGLMT_HasRealGPU()` | `1` for a Metal device, `0` otherwise |
+| `TGLMT_ResizeWindow(w, width, height)` | — |
+| `TGLMT_BackendName()` | diagnostic string, valid for the process lifetime |
+
+`TGLMT_BackendName()` returns one of `"apple"`, `"null"`, or
+`"apple(null-fallback,no-MTL-device)"`. The third value means the Apple backend was
+requested but no Metal device was created.
+
+## Lifecycle
+
+A complete windowed frame looks like this:
+
+```c
+TGLMT_Window* w = TGLMT_CreateWindow(960, 600, "apple", 1);
+TGLMT_MakeCurrent(w);
+
+/* every frame */
+drawScene();                       /* any gl* calls */
+TGLMT_SwapBuffers(w, metalLayer);  /* flush + present */
+
+/* on rotation or size change */
+TGLMT_ResizeWindow(w, newW, newH); /* takes effect at the next BeginFrame */
+
+TGLMT_DestroyWindow(w);
+```
+
+`CreateWindow` makes the Context current before it returns, so the first `gl*` call is
+already valid.
+
+## Context and current-thread behaviour
+
+- The current Context is `thread_local`. Each thread must call `MakeCurrent` itself.
+- One Context may be used by one thread at a time. An application that runs a chunk-upload
+  thread alongside the render thread must serialise the two externally and call
+  `MakeCurrent` on each thread around its work.
+- `CreateWindow` and `SwapBuffers` take an internal lock; the rest of the GL surface does
+  not.
+- There is no share-list. Objects created on one Context are not visible to another.
+
+## Shader and program lifecycle
+
+```text
+glCreateShader(type)
+  -> glShaderSource
+  -> glCompileShader      vertex/fragment: GLSL -> MSL, ok or explicit error
+                          other stages:    COMPILE_STATUS = false, explicit log
+  -> glGetShaderiv(GL_COMPILE_STATUS / GL_INFO_LOG)
+  -> glCreateProgram, glAttachShader
+  -> glLinkProgram        varying checks, uniform block sizes, binding assignment
+                          on a real device: MSL -> MTLLibrary per stage
+  -> glGetProgramiv(GL_LINK_STATUS / GL_INFO_LOG)
+  -> glUseProgram, glUniform*, glBindBufferBase
+  -> glDraw*
+  -> glDeleteProgram / glDeleteShader
+```
+
+Uniform blocks are reported through `GL_ACTIVE_UNIFORM_BLOCKS`,
+`GL_UNIFORM_BLOCK_DATA_SIZE`, `GL_UNIFORM_BLOCK_NAME_LENGTH`,
+`GLGetActiveUniformBlockName`, `GLGetActiveUniformBlockiv` and
+`GL_UNIFORM_BLOCK_REFERENCED_BY_*`. `GL_UNIFORM_BLOCK_DATA_SIZE` is the std140 size
+rounded to a multiple of 16.
+
+## Important object and state invariants
+
+1. **GL calls act on the current Context.** Issue them after `Init`/`BeginFrame` or after
+   your own `MakeCurrent`.
+2. **Uniform block binds must be at least `trueSize` bytes.** A buffer bound with the
+   struct's natural size is uploaded with zero padding to the std140 size; a buffer smaller
+   than the natural struct size is a genuine mis-bind and is replaced by zeros so that a
+   stray buffer cannot drive shader behaviour.
+3. **A texture re-specified while it is the current render target flushes first.** Staged
+   regions from the previous specification are discarded.
+4. **`glGetTexImage` / `glReadPixels` return GL-order data** (row 0 is the bottom row).
+5. **Sampler bindings are per texture unit** and are resolved at draw time from the
+   program's declared sampler uniforms.
+6. **Object ids are never reused inside a Context.** The registry allocates monotonically;
+   a stale id simply does not resolve.
+7. **Deleting a bound object unbinds it** across every target slot that referenced it.
+
+## Diagnostic counters
+
+`Context::AppleStats` carries the per-frame instrumentation. The most useful fields when
+reading a log are grouped as follows:
+
+| Group | Fields |
+|---|---|
+| Draw outcome | `drawsAttempted`, `drawsEncoded`, `noProgram`, `noTarget`, `noPipeline`, `miscFail` |
+| Batching | `encodersCreated`, `encoderReused`, `pipelineReused`, `pipelineLookups`, `pipelineLookupSkipped`, `uniformReused`, `depthReused`, `stateSkipped` |
+| Staging | `bufferCoalesced`, `bufferFlushes`, `texCoalesced`, `texFlushes`, `flushAvoided`, `bufRotated`, `bufWaitStall`, `texWaitStall`, `texWasRTFlush` |
+| Ring / allocations | `ringAllocs`, `ringWraps`, `tempAllocs` |
+| Synchronisation | `framesThrottled`, `cbCommittedNow`, `cbCompletedNow`, `hazardSplits` |
+| Safety | `rangeWarn`, `hazardWarn`, `uboSmall`, `uboPad`, `mipBase`, `mipLevelSkipped`, `mipStaged`, `clearRegionFails` |
+| Present | `presentPasses`, `glClears`, `blits`, `copyTex` |
+
+See [Compatibility & Performance](compatibility.md) for how to read them.
+
+## Further reference
+
+- `docs/mapping/GL46_to_Metal.md` — per-function strategy table, technical reference only.
+- `docs/khronos/gl.xml` — the OpenGL registry the headers are generated from.
+- `shaders/*.metal` — hand-written Metal shaders used by native paths and tests.

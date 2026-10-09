@@ -193,23 +193,14 @@ void glNamedFramebufferReadBuffer(GLuint f, GLenum b) { (void)f; glReadBuffer(b)
 // row 0 = đáy GL, cả shadow lẫn GPU — do viewport GL-correct h<0; present
 // mới là chỗ lật hàng sang drawable) nên GPU copy thô là đúng hướng — CPU
 // fallback cũng copy thô để nhất quán với đường FBO→FBO.
-// Làm tươi shadow CPU từ GPU trước khi CPU fallback đọc pixels.
-// Draws Apple đi thẳng vào texture GPU (wrapAsTarget) mà không cập nhật
-// tx.pixels → shadow cũ toàn 0 → fallback CPU copy đen (blur downsample
-// scaled/LINEAR, menu composite...). Readback thô (không flip) đúng quy ước.
-static void RefreshShadowFromGPU(Context& c, TextureObject& tx) {
-    if (!tx.gpu || !tx.w || !tx.h) return;
-    if (c.device->isNull()) return;
-    // Chỉ sync khi shadow đã có đủ chỗ RGBA8 4B (R8/RG8 font không phải đích blit).
-    if (tx.pixels.size() < (size_t)tx.w * tx.h * 4) return;
-    if (!(tx.internalFormat == 0x8058 || tx.internalFormat == 0x8C43 ||
-          tx.internalFormat == 0))
-        return;
-    auto wrapped = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
-    if (!wrapped) return;
-    std::vector<uint8_t> full((size_t)tx.w * tx.h * 4, 0);
-    if (wrapped->readback(full.data(), (size_t)tx.w * 4))
-        tx.pixels = std::move(full);
+// Nguồn cho CPU fallback blit: Context::ReadTextureGPU trả BẢN TẠM (P1: shadow
+// base-level trên Apple có thể rỗng, và đọc ngược vào tx.pixels sẽ hồi sinh bản
+// sao CPU mà P1 đã bỏ). Null backend: ReadTextureGPU trả false → dùng shadow
+// (với Null shadow LÀ resource).
+static const std::vector<uint8_t>* ShadowOrGPU(Context& c, const TextureObject& tx,
+                                               std::vector<uint8_t>& own) {
+    if (c.ReadTextureGPU(tx, own)) return &own;
+    return tx.pixels.size() >= (size_t)tx.w * tx.h * 4 ? &tx.pixels : nullptr;
 }
 static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d1, GLint d2, GLint d3,
@@ -304,13 +295,10 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         auto& tx = tit->second;
         c.FlushPendingEncoder(); // IR: commit batch trước khi readback shadow
         c.CommitAndWait();
-        RefreshShadowFromGPU(c, tx);
-        if (tx.pixels.empty() || !tx.w || !tx.h) {
+        std::vector<uint8_t> srcOwn;
+        const std::vector<uint8_t>* srcPx = ShadowOrGPU(c, tx, srcOwn);
+        if (!srcPx || !tx.w || !tx.h) {
             c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: blit ra màn hình thiếu shadow, bỏ qua");
-            return;
-        }
-        if (tx.pixels.size() < (size_t)tx.w * tx.h * 4) {
-            c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: shadow nguồn ngắn, bỏ qua");
             return;
         }
         std::vector<uint8_t> tmp((size_t)dw * (size_t)dh * 4, 0);
@@ -320,7 +308,7 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
                 uint32_t syp = (uint32_t)s1 + (uint32_t)y * (uint32_t)sh / (uint32_t)dh;
                 if (sxp >= tx.w || syp >= tx.h) continue;
                 memcpy(tmp.data() + ((size_t)y * dw + x) * 4,
-                       tx.pixels.data() + ((size_t)syp * tx.w + sxp) * 4, 4);
+                       srcPx->data() + ((size_t)syp * tx.w + sxp) * 4, 4);
             }
         auto ttmp = c.device->newTextureWithBytes((uint32_t)dw, (uint32_t)dh,
                                                   def->pixelFormat(), tmp.data(),
@@ -350,11 +338,15 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         if (!cw || !ch) { c.errors.Record(0x0501); return; }
         if (!scaled && !linear &&
             c.device->blitFromTarget(def.get(), tx.gpu.get(), sx, sy, cw, ch, dx, dy)) {
-            // sync shadow thô từ GPU (đúng GL cho GetTexImage/ReadPixels sau blit)
-            std::vector<uint8_t> full((size_t)tx.w * tx.h * 4, 0);
-            auto wrapped = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
-            if (wrapped && wrapped->readback(full.data(), (size_t)tx.w * 4))
-                tx.pixels = std::move(full);
+            // GetTexImage/ReadPixels sau blit đọc thẳng GPU (GetTexSubImpl level-0
+            // refresh) → KHÔNG giữ bản CPU. Chỉ giữ khi format này không đọc lại
+            // được từ GPU (P1: không hồi sinh shadow base-level).
+            if (!TexReadableFromGPU(tx)) {
+                std::vector<uint8_t> full((size_t)tx.w * tx.h * 4, 0);
+                auto wrapped = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
+                if (wrapped && wrapped->readback(full.data(), (size_t)tx.w * 4))
+                    tx.pixels = std::move(full);
+            }
             return;
         }
         c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: blit màn hình→FBO scaled/LINEAR/fail, CPU shadow");
@@ -363,19 +355,29 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
             c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: readback màn hình fail");
             return;
         }
-        if (tx.pixels.size() < (size_t)tx.w * tx.h * 4) tx.pixels.resize((size_t)tx.w * tx.h * 4, 0);
+        // P1: làm việc trên bản tạm — KHÔNG resize tx.pixels (resize = hồi sinh
+        // đúng bản sao CPU đã bỏ). Shadow chỉ được giữ lại khi format không đọc
+        // lại được từ GPU.
+        std::vector<uint8_t> own;
+        std::vector<uint8_t>* dstPx = &tx.pixels;
+        if (dstPx->size() < (size_t)tx.w * tx.h * 4) {
+            own.assign((size_t)tx.w * tx.h * 4, 0);
+            if (!dstPx->empty()) memcpy(own.data(), dstPx->data(), dstPx->size());
+            dstPx = &own;
+        }
         uint32_t scrW = def->width(), scrH = def->height();
         for (int y = 0; y < dh && (uint32_t)(d1 + y) < tx.h; ++y)
             for (int x = 0; x < dw && (uint32_t)(d0 + x) < tx.w; ++x) {
-                uint32_t sxp = (uint32_t)s0 + (uint32_t)x * (uint32_t)sw / (uint32_t)dw;
-                uint32_t syp = (uint32_t)s1 + (uint32_t)y * (uint32_t)sh / (uint32_t)dh;
+                uint32_t sxp = (uint32_t)s0 + x * (uint32_t)sw / (uint32_t)dw;
+                uint32_t syp = (uint32_t)s1 + y * (uint32_t)sh / (uint32_t)dh;
                 if (sxp >= scrW || syp >= scrH) continue;
-                memcpy(tx.pixels.data() + (((size_t)(d1 + y) * tx.w + (d0 + x)) * 4),
+                memcpy(dstPx->data() + (((size_t)(d1 + y) * tx.w + (d0 + x)) * 4),
                        scr.data() + ((size_t)syp * scrW + sxp) * 4, 4);
             }
-        if (!tx.pixels.empty())
-            c.device->updateTexture(tx.gpu.get(), 0, 0, tx.w, tx.h, tx.pixels.data(),
+        if (dstPx->size() >= (size_t)tx.w * tx.h * 4)
+            c.device->updateTexture(tx.gpu.get(), 0, 0, tx.w, tx.h, dstPx->data(),
                                     (size_t)tx.w * 4);
+        if (dstPx == &own && !TexReadableFromGPU(tx)) tx.pixels = std::move(own);
         return;
     }
 }
@@ -414,6 +416,10 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
     bool scaled = (sw != dw || sh != dh);
     // LINEAR filter với scale cần sampled-quad (M5c); NEAREST scale nguyên có thể blit lặp — hiện fallback CPU.
     if ((m & 0x00004000u) && rit->second.colorTex.count(0) && wit->second.colorTex.count(0)) {
+        // Nguồn CPU cho fallback blit FBO→FBO. P1: đọc GPU vào BẢN TẠM (shadow
+        // base-level trên Apple có thể rỗng) — không ghi ngược vào tx.pixels.
+        std::vector<uint8_t> srcOwn;
+        const std::vector<uint8_t>* srcPx = nullptr;
         auto rs = c.textures.find(rit->second.colorTex[0]);
         auto ws = c.textures.find(wit->second.colorTex[0]);
         if (rs != c.textures.end() && ws != c.textures.end() && rs->second.gpu && ws->second.gpu) {
@@ -427,44 +433,56 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
                     return;
                 }
                 c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: GPU blit fail, fallback CPU shadow");
-                // Rơi xuống CPU: cần shadow tươi.
+                // Rơi xuống CPU: cần nguồn tươi (đọc thẳng GPU).
                 c.CommitAndWait();
-                RefreshShadowFromGPU(c, rs->second);
+                srcPx = ShadowOrGPU(c, rs->second, srcOwn);
             } else {
                 c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: scaled/LINEAR fallback CPU shadow (M5c sampled-quad)");
-                // Downsample blur/post: shadow cũ toàn 0 → đen. Làm tươi từ GPU.
+                // Downsample blur/post: shadow cũ toàn 0 → đen. Đọc thẳng từ GPU.
                 c.CommitAndWait();
-                RefreshShadowFromGPU(c, rs->second);
+                srcPx = ShadowOrGPU(c, rs->second, srcOwn);
             }
         }
         // CPU shadow copy (đúng khi cùng format RGBA8; khác size thì nearest đơn giản)
         auto rs2 = c.textures.find(rit->second.colorTex[0]);
         auto ws2 = c.textures.find(wit->second.colorTex[0]);
-        if (rs2 != c.textures.end() && ws2 != c.textures.end() && !rs2->second.pixels.empty()) {
-            // đảm bảo dst đủ chỗ
-            if (ws2->second.pixels.size() < rs2->second.pixels.size())
-                ws2->second.pixels.resize(rs2->second.pixels.size(), 0);
-            if (!scaled) ws2->second.pixels = rs2->second.pixels;
-            else {
-                // nearest scale CPU (đủ cho vanilla framebuffer copy khác res khi xoay)
-                uint32_t rw = rs2->second.w, rh = rs2->second.h;
-                uint32_t ww = ws2->second.w, wh = ws2->second.h;
-                if (rw && rh && ww && wh && rs2->second.pixels.size() >= (size_t)rw * rh * 4 &&
-                    ws2->second.pixels.size() >= (size_t)ww * wh * 4) {
+        if (rs2 != c.textures.end() && ws2 != c.textures.end() &&
+            rs2->second.gpu && ws2->second.gpu) {
+            if (!srcPx) srcPx = ShadowOrGPU(c, rs2->second, srcOwn);
+            uint32_t rw = rs2->second.w, rh = rs2->second.h;
+            uint32_t ww = ws2->second.w, wh = ws2->second.h;
+            if (srcPx && rw && rh && ww && wh) {
+                // Shadow đích còn → ghi thẳng (đường cũ). Rỗng (P1) → bản tạm,
+                // chỉ giữ lại khi format này không đọc lại được từ GPU.
+                std::vector<uint8_t> own;
+                std::vector<uint8_t>* dstPx = &ws2->second.pixels;
+                if (dstPx->size() < (size_t)ww * wh * 4) {
+                    own.assign((size_t)ww * wh * 4, 0);
+                    if (!dstPx->empty()) memcpy(own.data(), dstPx->data(), dstPx->size());
+                    dstPx = &own;
+                }
+                if (!scaled) {
+                    memcpy(dstPx->data(), srcPx->data(),
+                           std::min(srcPx->size(), dstPx->size()));
+                } else {
+                    // nearest scale CPU (đủ cho vanilla framebuffer copy khác res khi xoay)
                     for (uint32_t y = 0; y < (uint32_t)dh && (uint32_t)(d1 + y) < wh; ++y)
                         for (uint32_t x = 0; x < (uint32_t)dw && (uint32_t)(d0 + x) < ww; ++x) {
                             uint32_t sxp = (uint32_t)s0 + x * (uint32_t)sw / (uint32_t)dw;
                             uint32_t syp = (uint32_t)s1 + y * (uint32_t)sh / (uint32_t)dh;
                             if (sxp >= rw || syp >= rh) continue;
-                            memcpy(ws2->second.pixels.data() + (((size_t)(d1 + y) * ww + (d0 + x)) * 4),
-                                   rs2->second.pixels.data() + ((size_t)syp * rw + sxp) * 4, 4);
+                            if ((size_t)syp * rw + sxp > srcPx->size() / 4) continue;
+                            memcpy(dstPx->data() + (((size_t)(d1 + y) * ww + (d0 + x)) * 4),
+                                   srcPx->data() + ((size_t)syp * rw + sxp) * 4, 4);
                         }
                 }
+                // sync GPU dst từ nguồn (đúng pixels cho draw tiếp theo)
+                if (dstPx->size() >= (size_t)ww * wh * 4)
+                    c.device->updateTexture(ws2->second.gpu.get(), 0, 0, ww, wh,
+                                            dstPx->data(), (size_t)ww * 4);
+                if (dstPx == &own && !TexReadableFromGPU(ws2->second))
+                    ws2->second.pixels = std::move(own);
             }
-            // sync GPU dst từ shadow (đúng pixels cho draw tiếp theo)
-            if (ws2->second.gpu && !ws2->second.pixels.empty())
-                c.device->updateTexture(ws2->second.gpu.get(), 0, 0, ws2->second.w, ws2->second.h,
-                                        ws2->second.pixels.data(), (size_t)ws2->second.w * 4);
         }
     }
     if (m & 0x00000100u) { // DEPTH_BUFFER_BIT

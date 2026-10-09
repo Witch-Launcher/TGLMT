@@ -160,16 +160,15 @@ int main() {
     printf("texture flush: flushes=%llu (want 1)\n", (unsigned long long)tfNew);
     if (tfNew != 1) { printf("FAIL tex flushes (4 adjacents must merge to 1)\n"); return 1; }
     if (glGetError() != 0) { printf("FAIL gl error after tex flush\n"); return 1; }
-    // Shadow phải đúng (hàng đầu đỏ): hàng 0 byte đầu = (255,0,0,255).
+    // P1: shadow base-level bị bỏ trên Apple → kiểm tra nội dung THẬT đọc được
+    // (hàng đầu đỏ: byte đầu = (255,0,0,255)) qua glGetTextureSubImage.
     {
-        auto it = ctx.textures.find(tex);
-        if (it == ctx.textures.end() || it->second.pixels.size() < 4) {
-            printf("FAIL tex shadow\n");
-            return 1;
-        }
-        auto& px = it->second.pixels;
+        std::vector<uint8_t> px(8 * 8 * 4, 0);
+        glGetTextureSubImage(tex, 0, 0, 0, 0, 8, 8, 1, 0x1908, 0x1401,
+                             (tglmt::GLsizei)px.size(), px.data());
+        if (glGetError() != 0) { printf("FAIL tex readback after flush\n"); return 1; }
         if (!(px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255)) {
-            printf("FAIL tex shadow pixels (%u,%u,%u,%u)\n", px[0], px[1], px[2], px[3]);
+            printf("FAIL tex pixels (%u,%u,%u,%u)\n", px[0], px[1], px[2], px[3]);
             return 1;
         }
     }

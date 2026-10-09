@@ -107,7 +107,7 @@ void glGetBufferParameteriv(GLenum t, GLenum p, GLint* v) {
     GLuint id = c.state.BoundBuffer(t);
     auto it = c.buffers.find(id);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
-    if (p == 0x8764) *v = (GLint)it->second.data.size();      // BUFFER_SIZE
+    if (p == 0x8764) *v = (GLint)BufferLen(it->second);       // BUFFER_SIZE
     else if (p == 0x8765) *v = it->second.usage;              // BUFFER_USAGE
     else if (p == 0x88BB) *v = it->second.mapped ? 1 : 0;     // BUFFER_MAPPED
     else *v = 0;
@@ -118,13 +118,13 @@ void glGetBufferPointerv(GLenum t, GLenum p, void** v) {
     (void)p;
     GLuint id = c.state.BoundBuffer(t);
     auto it = c.buffers.find(id);
-    *v = (it == c.buffers.end()) ? nullptr : (void*)it->second.data.data();
+    *v = (it == c.buffers.end()) ? nullptr : (void*)BufferBytes(it->second);
 }
 void glGetNamedBufferParameteriv(GLuint b, GLenum p, GLint* v) {
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
-    if (p == 0x8764) *v = (GLint)it->second.data.size();
+    if (p == 0x8764) *v = (GLint)BufferLen(it->second);
     else if (p == 0x8765) *v = it->second.usage;
     else *v = 0;
 }
@@ -133,7 +133,7 @@ void glGetNamedBufferPointerv(GLuint b, GLenum p, void** v) {
     (void)p;
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
-    *v = (it == c.buffers.end()) ? nullptr : (void*)it->second.data.data();
+    *v = (it == c.buffers.end()) ? nullptr : (void*)BufferBytes(it->second);
 }
 void glGetShaderiv(GLuint s, GLenum p, GLint* v) {
     Context& c = Context::Current();

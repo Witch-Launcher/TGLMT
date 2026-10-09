@@ -11,6 +11,17 @@
 static int sFail = 0;
 #define CHECK(c, msg) do { if (!(c)) { printf("FAIL %s\n", msg); sFail = 1; } } while (0)
 
+// P1: shadow CPU base-level bị bỏ trên Apple backend (bản Shared memory của
+// Metal buffer là bản đúng duy nhất). Test kiểm tra NỘI DUNG THẬT đọc được
+// qua glGetTextureSubImage (Null: shadow; Apple: đọc GPU) thay vì bóng nội bộ.
+static bool ReadRegion(tglmt::GLuint tex, int x, int y, int w, int h,
+                       std::vector<uint8_t>& out) {
+    out.assign((size_t)w * h * 4, 0);
+    tglmt::gl::glGetTextureSubImage(tex, 0, x, y, 0, w, h, 1, 0x1908, 0x1401,
+                                    (tglmt::GLsizei)out.size(), out.data());
+    return tglmt::gl::glGetError() == 0;
+}
+
 int main() {
     for (int backend = 0; backend < 2; ++backend) {
         const char* name = backend ? "apple" : "null";
@@ -52,9 +63,10 @@ int main() {
         {
             auto it = ctx.textures.find(tex);
             CHECK(it != ctx.textures.end(), "tex exists");
-            CHECK(it->second.pixels.size() == red.size(), "shadow size");
-            CHECK(it->second.pixels[0] == 255 && it->second.pixels[1] == 0,
-                  "shadow red via pbo offset0");
+            std::vector<uint8_t> px;
+            CHECK(ReadRegion(tex, 0, 0, W, H, px), "teximage pbo offset0 readback");
+            CHECK(px.size() == red.size(), "readback size");
+            CHECK(px[0] == 255 && px[1] == 0, "red via pbo offset0");
         }
 
         // 2) TexImage nonzero offset (skip 64B padding).
@@ -65,9 +77,9 @@ int main() {
         glTexImage2D(0x0DE1, 0, 0x8058, W, H, 0, 0x1908, 0x1401, (void*)64);
         CHECK(glGetError() == 0, "teximage pbo offset64 no error");
         {
-            auto it = ctx.textures.find(tex2);
-            CHECK(it->second.pixels[0] == 255 && it->second.pixels[3] == 255,
-                  "shadow red via pbo offset64");
+            std::vector<uint8_t> px;
+            CHECK(ReadRegion(tex2, 0, 0, W, H, px), "teximage pbo offset64 readback");
+            CHECK(px[0] == 255 && px[3] == 255, "red via pbo offset64");
         }
 
         // 3) TexSubImage qua PBO (offset 0) lên texture đã có.
@@ -80,8 +92,10 @@ int main() {
         glTexSubImage2D(0x0DE1, 0, 0, 0, 8, 8, 0x1908, 0x1401, (void*)0);
         CHECK(glGetError() == 0, "texsubimage pbo offset0 no error");
         {
-            auto it = ctx.textures.find(tex2);
-            CHECK(it->second.pixels[2] == 255, "shadow blue corner via staged subimage");
+            std::vector<uint8_t> px;
+            CHECK(ReadRegion(tex2, 0, 0, 8, 8, px),
+                  "texsubimage pbo readback (flush staging)");
+            CHECK(px[2] == 255 && px[3] == 255, "blue corner via staged subimage");
         }
         ctx.FlushTextureStaging(tex2); // phải flush được, không crash
 

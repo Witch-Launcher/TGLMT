@@ -1,6 +1,7 @@
 #include "tglmt/Context.h"
 #include <cstdio>
 #include <cstdlib>
+#include <unordered_set>
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <cstring>
@@ -39,6 +40,7 @@ static void LogSelfSlide() {
 
 Context::Context(const std::string& backend) : backendName(backend) {
     LogSelfSlide();
+    opt = LoadOptions();
     device = metal::CreateDevice(backend, CtxLog);
     if (!device) { // vd apple backend nhưng máy không có MTLDevice → fallback Null, ghi rõ
         backendName = backend + "(fallback:null,no-MTL-device)";
@@ -52,6 +54,26 @@ Context::Context(const std::string& backend) : backendName(backend) {
     // Đếm command buffer để biết GPU còn frame nào đang bay (thay cho
     // commitAndWait mỗi frame — xem Context::ThrottleGpu).
     if (device) device->setCommandBufferCounters(&cbCommitted, &cbCompleted);
+}
+// Đọc cấu hình runtime từ env (launcher setenv trước khi tạo Context).
+// Không hợp lệ/để trống → giữ mặc định compile-time; luôn kẹp [1..8] để không
+// bao giờ biến thành vòng lặp throttle hoặc pool vô hạn.
+Context::Options Context::LoadOptions() {
+    Options o;
+    if (const char* e = std::getenv("TGLMT_FRAMES_IN_FLIGHT")) {
+        int v = std::atoi(e);
+        if (v >= 1 && v <= 8) o.framesInFlight = (uint32_t)v;
+    }
+    if (const char* e = std::getenv("TGLMT_BUF_POOL")) {
+        int v = std::atoi(e);
+        if (v >= 1 && v <= 8) o.bufPoolSlots = (size_t)v;
+    }
+#if !defined(TGLMT_FORCE_DIAG)
+    if (const char* e = std::getenv("TGLMT_DIAG"))
+        o.diag = (e[0] == '1' || e[0] == 'y' || e[0] == 'Y' || e[0] == 't' ||
+                  e[0] == 'T');
+#endif
+    return o;
 }
 Context& Context::Current() {
     if (tCurrent_) return *tCurrent_;
@@ -120,12 +142,8 @@ bool Context::DiagOn() {
 #if defined(TGLMT_FORCE_DIAG)
     return true;
 #else
-    static int cached = -1;
-    if (cached < 0) {
-        const char* e = std::getenv("TGLMT_DIAG");
-        cached = (e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y')) ? 1 : 0;
-    }
-    return cached == 1;
+    // Đã nạp trong LoadOptions() lúc tạo Context — không getenv lại mỗi draw.
+    return opt.diag;
 #endif
 }
 void Context::NoteBufferUsed(GLuint buf) {
@@ -151,12 +169,101 @@ void Context::ThrottleGpu() {
     // (đã commit 1 lần rồi vẫn phải thoát).
     for (int guard = 0; guard < 8; ++guard) {
         if ((cbCommitted.load(std::memory_order_relaxed) -
-             cbCompleted.load(std::memory_order_relaxed)) < kMaxFramesInFlight)
+             cbCompleted.load(std::memory_order_relaxed)) < opt.framesInFlight)
             return;
         CommitAndWait();
         ++appleStats.framesThrottled;
     }
 }
+
+// P0 memory accounting: tách rõ "TGLMT tự giữ thêm bao nhiêu RAM" (shadow CPU)
+// khỏi tài nguyên Metal thật. Quy tắc P1: nơi nào ITexture/IBuffer là Shared
+// (CPU đọc được) thì shadow là dư — đây là bằng chứng đo trước khi cắt.
+static uint64_t TexelBytes(metal::PixelFormat f) {
+    using PF = metal::PixelFormat;
+    // Lưu ý: enum va chạm giá trị (R32Uint == Stencil8 == 53, xem MetalInterface.h)
+    // nên Stencil8 không tách case được — quy ước 53 = 4B (R32Uint). Sai lệch chỉ
+    // 3B/px trên attachment stencil hiếm, vô nghĩa với mục tiêu đo shadow.
+    switch (f) {
+        case PF::RGBA8Unorm:
+        case PF::RGBA8Unorm_sRGB:
+        case PF::RGBA8Uint:
+        case PF::BGRA8Unorm:
+        case PF::BGRA8Unorm_sRGB:
+        case PF::R32Float:
+        case PF::R32Sint:
+        case PF::R32Uint:
+        case PF::Depth24Stencil8:
+        case PF::Depth32Float: return 4;
+        case PF::RGBA16Float:
+        case PF::R16Sint:
+        case PF::R16Uint:
+        case PF::R16Float:
+        case PF::RG8Unorm: return 2;
+        case PF::RGBA32Float: return 16;
+        case PF::R8Unorm:
+        case PF::R8Sint:
+        case PF::R8Uint: return 1;
+        case PF::Invalid:
+        default: return 4; // bao gồm Stencil8 (giá trị trùng R32Uint)
+    }
+}
+
+// P1: đọc nguyên level-0 từ GPU (bản tạm). Xem chú thích khai báo trong Context.h.
+bool Context::ReadTextureGPU(const TextureObject& tx, std::vector<uint8_t>& out) {
+    out.clear();
+    if (!tx.gpu || !tx.w || !tx.h) return false;
+    if (!device || device->isNull()) return false;
+    if (!TexReadableFromGPU(tx)) return false;
+    FlushPendingEncoder(); // IR: commit batch trước khi readback
+    FlushAllBufferStaging();
+    FlushAllTextureStaging();
+    CommitAndWait(); // xả draws NoWait (không stale TBDR)
+    auto wrapped = device->wrapAsTarget(tx.gpu.get(), nullptr);
+    if (!wrapped) return false;
+    out.assign((size_t)tx.w * tx.h * 4, 0);
+    if (!wrapped->readback(out.data(), (size_t)tx.w * 4)) { out.clear(); return false; }
+    return true;
+}
+
+void Context::RefreshMemStats() {
+    uint64_t tb = 0, mb = 0, fb = 0, gt = 0, nt = 0;
+    for (auto& kv : textures) {
+        const TextureObject& t = kv.second;
+        tb += t.pixels.size();
+        for (auto& m : t.mipData) mb += m.second.pixels.size();
+        for (auto& f : t.faces) fb += f.size();
+        if (t.gpu)
+            gt += (uint64_t)t.gpu->width() * (uint64_t)t.gpu->height() *
+                  TexelBytes(t.gpu->pixelFormat());
+        ++nt;
+    }
+    uint64_t bsh = 0, gb = 0, nb = 0;
+    // ĐẾM UNIQUE: sau lần xoay đầu, bo.gpu trỏ vào chính 1 slot của bo.pool
+    // (gl_buffer.cpp: `bo.gpu = target`) → cộng cả hai là đếm đôi, số
+    // gpuMB buf= trong log sẽ phóng đại ~33%.
+    std::unordered_set<const metal::IBuffer*> seen;
+    for (auto& kv : buffers) {
+        const BufferObject& b = kv.second;
+        bsh += b.data.size();
+        auto add = [&](const std::shared_ptr<metal::IBuffer>& p) {
+            if (p && seen.insert(p.get()).second) gb += p->length();
+        };
+        add(b.gpu);
+        for (auto& s : b.pool) add(s.buf);
+        ++nb;
+    }
+    appleStats.memTexBase = tb;
+    appleStats.memTexMip = mb;
+    appleStats.memTexFace = fb;
+    appleStats.memBufShadow = bsh;
+    appleStats.memGpuTex = gt;
+    appleStats.memGpuBuf = gb;
+    appleStats.nTextures = nt;
+    appleStats.nBuffers = nb;
+    appleStats.nBufferStaged = (uint64_t)pendingBufRanges.size();
+}
+
 // Dump texring: 96 call bind gần nhất, chron order (cũ → mới) để thấy chuỗi
 // bind dẫn đến divergence (đổ tại bindheal#/shadowmis#).
 void Context::DumpTexBindRing(const char* tag) {

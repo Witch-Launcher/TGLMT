@@ -23,7 +23,11 @@ namespace tglmt {
 struct BufferObject {
     GLuint id = 0;
     GLenum target = 0;
-    std::vector<uint8_t> data;      // shadow CPU (Null backend + GetBufferSubData)
+    // Shadow CPU. Apple backend: chỉ giữ khi device Null / BufferData chưa upload
+    // / buffer dùng làm PBO — mọi thứ khác đọc thẳng GPU memory chung (Shared).
+    // Null backend: shadow LÀ tài nguyên duy nhất (giữ nguyên như cũ).
+    std::vector<uint8_t> data;
+    size_t size = 0;                // kích thước logích — đúng cả khi data rỗng
     GLenum usage = 0x88E4;          // STATIC_DRAW
     GLbitfield storageFlags = 0;
     bool mapped = false;
@@ -44,6 +48,21 @@ struct BufferObject {
     size_t poolNext = 0;
     uint64_t lastReadGen = 0; // giữ cho log/diag
 };
+
+// ---- Truy xuất buffer (P1: bỏ nhân bản CPU) ----
+// Mọi gl* đọc buffer PHẢI qua 2 helper này. Đọc `.data` trực tiếp sẽ vỡ khi
+// shadow rỗng (Apple backend đã bỏ bản sao CPU vì GPU buffer là Shared memory).
+inline size_t BufferLen(const BufferObject& b) {
+    size_t n = b.size;
+    if (b.data.size() > n) n = b.data.size();     // PBO pack có thể grow data
+    if (!n && b.gpu) n = b.gpu->length();
+    return n;
+}
+inline const uint8_t* BufferBytes(const BufferObject& b) {
+    if (!b.data.empty()) return b.data.data();           // shadow còn → nguồn chuẩn
+    if (b.gpu && b.gpu->contents()) return (const uint8_t*)b.gpu->contents();
+    return nullptr;
+}
 
 struct VertexAttrib {
     bool enabled = false;
@@ -114,6 +133,15 @@ struct TextureObject {
     // mà draw cũ đang sample (in-flight write).
     uint64_t lastReadGen = 0;
 };
+
+// P1: pixel có đọc lại được từ GPU (buffer Shared) không? Nếu KHÔNG → shadow CPU
+// LÀ nguồn duy nhất và phải giữ. Nếu CÓ → shadow là bản sao vô ích (nguyên nhân
+// jetsam 2043MB) nên TGLMT bỏ và đọc GPU theo yêu cầu (Context::ReadTextureGPU).
+// Điều kiện phải khớp với danh sách refresh của GetTexSubImpl.
+inline bool TexReadableFromGPU(const TextureObject& t) {
+    return t.internalFormat == 0x8058 || t.internalFormat == 0x8C43 ||
+           t.internalFormat == 0x1908 || t.internalFormat == 0;
+}
 
 struct SamplerObject {
     GLuint id = 0;
@@ -329,6 +357,16 @@ public:
         uint64_t multidrawBatched = 0;// số sub-draws trong MultiDraw* đã batch
         uint64_t psoPrewarmed = 0;    // số pipeline đã prewarm trước frame đầu
         std::map<GLuint, uint64_t> progEncoded; // program id -> số draw đã encode
+        // P0 memory accounting (điều tra jetsam): tách shadow CPU (TGLMT tự giữ,
+        // dùng được trên cả Null backend) khỏi tài nguyên GPU thật (Shared → cũng
+        // là RAM nhưng do Metal quản lý). Shadow = ứng cử viên bị cắt ở P1.
+        uint64_t memTexBase = 0;      // sum TextureObject::pixels
+        uint64_t memTexMip = 0;       // sum mipData[*].pixels (level >0)
+        uint64_t memTexFace = 0;      // sum faces[*] (cubemap)
+        uint64_t memBufShadow = 0;    // sum BufferObject::data
+        uint64_t memGpuTex = 0;       // sum GPU texture bytes
+        uint64_t memGpuBuf = 0;       // sum GPU buffer bytes (+ pool slots)
+        uint64_t nTextures = 0, nBuffers = 0, nBufferStaged = 0;
     };
     AppleStats appleStats;
 
@@ -421,15 +459,27 @@ public:
     // Buffer: glBufferSubData* chỉ memcpy vào shadow + ghi range vào staging;
     // GPU copy + didModifyRange dồn đến FlushBufferStaging() (trước draw dùng buffer,
     // ReadPixels/Blit/finish). Các range kề/chồng được merge → 1 memcpy+didModify.
-    struct BufRange { size_t off = 0, len = 0; };
+    // bytes != rỗng: payload đi theo range (dùng khi shadow CPU đã bỏ — P1). Flush
+    // ghi payload đè lên GPU buffer, phần ngoài range lấy từ GPU/shadow cũ.
+    struct BufRange { size_t off = 0, len = 0; std::vector<uint8_t> bytes; };
     std::unordered_map<GLuint, std::vector<BufRange>> pendingBufRanges;
-    void StageBufferRange(GLuint buf, size_t off, size_t len); // stage + merge (upload coalescing)
+    // stage + merge (upload coalescing). src != nullptr → carry payload (shadow rỗng).
+    void StageBufferRange(GLuint buf, size_t off, size_t len, const uint8_t* src = nullptr);
     void FlushBufferStaging(GLuint buf); // flush 1 buffer (merge ranges)
     void FlushAllBufferStaging();        // flush tất cả (finish/readback)
-    // Texture: glTexSubImage* chỉ update shadow + ghi region vào staging;
+    struct BufferView { const uint8_t* p = nullptr; size_t size = 0; };
+    // Đồng bộ + trả nội dung buffer hiện hành (xả staging trước nếu shadow rỗng).
+    BufferView SyncBuffer(GLuint buf);
+    // PBO pack: trả shadow CPU sẵn sàng ghi [0, end). Shadow có thể đã bị bỏ
+    // trên Apple backend (P1) → materialize từ GPU trước, rồi resize.
+    std::vector<uint8_t>* MutablePbo(GLuint buf, size_t end);
+    // Texture: glTexSubImage* ghi region vào staging (kèm payload bytes — P1);
     // replaceRegion dồn đến FlushTextureStaging() (trước draw sampling texture đó,
     // blit/readback). Merge khi cùng texture và regions kề nhau cùng row pitch.
-    struct TexRegion { uint32_t x = 0, y = 0, w = 0, h = 0; GLenum format = 0; GLenum type = 0; };
+    // bytes tight w*h*bpp: đi theo region nên flush KHÔNG cần shadow CPU — đó là
+    // thứ cho phép bỏ bản sao base-level (P1: mỗi texture từng giữ 2 bản).
+    struct TexRegion { uint32_t x = 0, y = 0, w = 0, h = 0; GLenum format = 0; GLenum type = 0;
+                       std::vector<uint8_t> bytes; };
     std::unordered_map<GLuint, std::vector<TexRegion>> pendingTexRegions;
     void FlushTextureStaging(GLuint tex); // flush 1 texture (gộp regions thành bbox)
     void FlushAllTextureStaging();
@@ -440,7 +490,8 @@ public:
     void FlushPendingEncoder(); // end+commitNoWait, xóa shadow (giữ pipeline cache)
     void InvalidatePendingOnTargetChange(); // helper khi FBO đổi (flush nếu target khác)
     // ---- Deferred full (Phase 1-3): diag gate + conditional flush + ring ----
-    // DiagOn: chỉ bật diagnostic nặng (fprintf/readback/scan) khi env TGLMT_DIAG=1.
+    // DiagOn: chỉ bật diagnostic nặng (fprintf/readback/scan). Đọc opt.diag —
+    // launcher bật qua TGLMT_DIAG=1 (mục TGLMT ở tab Đồ hoạ), không cần rebuild.
     // Release/Minecraft thật: tắt để giữ 60fps, vẫn giữ LogDebug callback.
     bool DiagOn();
     // ---- TexBind ring (Fix #6: chẩn đoán bind divergence từ xa) ----
@@ -524,10 +575,31 @@ public:
     }
     // Số frame trong flight tối đa trước khi buộc chờ (bảo vệ target/buffer pool).
     static constexpr uint32_t kMaxFramesInFlight = 2;
+    // Cấu hình runtime: launcher setenv TRƯỚC khi Context sinh ra (tab Đồ hoạ →
+    // mục TGLMT). Compile-time chỉ là mặc định → không phải build lại dylib để
+    // đổi. Mọi key đọc 1 lần trong LoadOptions(), tôn trọng khoảng [1..8].
+    //   TGLMT_FRAMES_IN_FLIGHT 1..8  (mặc định kMaxFramesInFlight)
+    //   TGLMT_BUF_POOL         1..8  (mặc định 3 — slot buffer xoay khi GPU bận)
+    //   TGLMT_DIAG             1     (xem DiagOn)
+    struct Options {
+        uint32_t framesInFlight = kMaxFramesInFlight;
+        size_t bufPoolSlots = 3;
+        bool diag = false;
+    };
+    Options opt;
+    static Options LoadOptions();
     // Chặn CPU chỉ khi vượt ngân sách frame đang bay. Trước đây SwapBuffers
     // commitAndWait() MỖI frame → CPU/GPU nối tiếp (mất pipeline, +2 frame
     // input latency → lia cam nhanh thấy model đứng lại). Giờ chỉ chặn khi cần.
     void ThrottleGpu();
+    // P0: đo lại shadow CPU vs GPU resource → appleStats.mem*. Chỉ để chẩn đoán
+    // (quét toàn bộ textures/buffers) — gọi trước khi log frame=, không gọi /frame.
+    void RefreshMemStats();
+    // P1: đọc level-0 texture từ GPU vào `out` (thoả w*h*4, row = w*4, không lật).
+    // Trả false nếu không đọc được (Null / không phải RGBA8-ish / fail) → caller
+    // dùng shadow. `out` sống đến hết frame và KHÔNG ghi ngược vào tx.pixels —
+    // nếu ghi, shadow sẽ hồi sinh và nuốt mất đúng phần bộ nhớ P1 tiết kiệm.
+    bool ReadTextureGPU(const TextureObject& tx, std::vector<uint8_t>& out);
     // PSO prewarm (Phase 4): dựng trước pipeline cho program đã link để frame
     // đầu không hitch giây. Trả true nếu đã đảm bảo pipeline tồn tại.
     bool PrewarmPipelineForProgram(GLuint prog);
