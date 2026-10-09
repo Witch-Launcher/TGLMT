@@ -2,8 +2,10 @@
 #include "tglmt/GLFWShim.h"
 #include "tglmt/Renderer.h"
 #include "tglmt/Context.h"
+#include "tglmt/GlProfile.h"
 #include "tglmt/gl46.h"
 
+#include <algorithm>
 #include <cstring>
 #include <chrono>
 #include <cstdio>
@@ -11,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace tglmt {
 
@@ -150,9 +153,9 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             // Tag build: force-diag nhận diện được ngay dòng frame=1 trong log
             // (phát hiện sai dylib trên máy — TGLMT_DIAG không set được từ launcher).
 #if defined(TGLMT_FORCE_DIAG)
-            static const char* kBuildTag = "p2-phase-time";
+            static const char* kBuildTag = "p3-gltop";
 #else
-            static const char* kBuildTag = "p2-phase-time";
+            static const char* kBuildTag = "p3-gltop";
 #endif
             fprintf(stderr,
                     "[TGLMT] build=%s frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
@@ -229,6 +232,46 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.nTextures, (unsigned long long)a.nBuffers,
                     (unsigned long long)a.nBufferStaged, (unsigned long long)a.nPool,
                     (unsigned long long)(a.maxBuf >> 20));
+            // Top hàm gl* nuốt thời gian CPU trong cửa sổ này (delta so với dump
+            // trước). cover = % dt mà các call extern "C" GL giải thích được;
+            // thấp ⇒ thời gian nằm ngoài GL entry (Java/MobileGlues) hoặc call
+            // không đi qua gl_c_exports. Phục vụ câu hỏi "GPU rảnh mà FPS thấp".
+            {
+                static uint64_t pn[kGlProfileMax] = {0};
+                static uint64_t pt[kGlProfileMax] = {0};
+                static bool pInit = false;
+                struct E { uint64_t ns; uint64_t n; int id; };
+                std::vector<E> hits;
+                hits.reserve((size_t)gGlProfileN);
+                uint64_t totNs = 0, totN = 0;
+                for (int i = 0; i < gGlProfileN && i < kGlProfileMax; ++i) {
+                    uint64_t dn = 0, ds = 0;
+                    if (pInit) {
+                        dn = gGlProfile[i].n - pn[i];
+                        ds = gGlProfile[i].ns - pt[i];
+                    }
+                    pn[i] = gGlProfile[i].n;
+                    pt[i] = gGlProfile[i].ns;
+                    if (dn) { hits.push_back({ds, dn, i}); totNs += ds; totN += dn; }
+                }
+                pInit = true;
+                std::sort(hits.begin(), hits.end(),
+                          [](const E& x, const E& y) { return x.ns > y.ns; });
+                double cover = 0.0;
+                if (dt > 0 && pInit)
+                    cover = 100.0 * (double)totNs / (double)((long long)dt * 1000000LL);
+                fprintf(stderr,
+                        "[TGLMT] gltop frame=%llu dt=%ldms glMs=%ld cover=%.0f%% "
+                        "calls=%llu hit=%zu\n",
+                        (unsigned long long)nSwap, dt, (long)(totNs / 1000000), cover,
+                        (unsigned long long)totN, hits.size());
+                for (size_t k = 0; k < hits.size() && k < 10; ++k) {
+                    const E& e = hits[k];
+                    fprintf(stderr, "[TGLMT] gltop#%zu %s ms=%.1f calls=%llu\n", k + 1,
+                            gGlProfileName[e.id] ? gGlProfileName[e.id] : "?",
+                            (double)e.ns / 1e6, (unsigned long long)e.n);
+                }
+            }
             fflush(stderr);
             pAtt = a.drawsAttempted;
             pEnc = a.drawsEncoded;

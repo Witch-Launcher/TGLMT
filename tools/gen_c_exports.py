@@ -73,7 +73,10 @@ def param_names(params):
 with open(OUT, "w") as f:
     f.write("// AUTO-GENERATED bởi tools/gen_c_exports.py — KHÔNG SỬA TAY.\n")
     f.write("// extern \"C\" forward 1:1 sang tglmt::gl:: để LWJGL dlsym(\"glXxx\") thấy.\n")
+    f.write("// Mỗi wrapper đo thời gian gọi (tglmt::GlProfileScope) để log gltop#\n")
+    f.write("// chỉ ra hàm gl* nào nuốt frame time.\n")
     f.write('#include "tglmt/gl46.h"\n')
+    f.write('#include "tglmt/GlProfile.h"\n')
     f.write("using namespace tglmt;\n")
     f.write("namespace tglmt { namespace gl {\n")
     f.write("void glGetPointerv(GLenum p, void** v);\n")
@@ -81,14 +84,26 @@ with open(OUT, "w") as f:
     f.write("void glDepthRangeArrayfvNV(GLuint a, GLsizei b, const GLfloat* c);\n")
     f.write("} }\n")
     f.write("\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
-    for ret, name, params in decls:
+    for i, (ret, name, params) in enumerate(decls):
         plist = params if params else "void"
         args = ", ".join(param_names(params))
         f.write(f"{ret} {name}({plist}) {{\n")
+        f.write(f"    GlProfileScope _gp({i});\n")
         if ret.strip() == "void":
             f.write(f"    gl::{name}({args});\n")
         else:
             f.write(f"    return gl::{name}({args});\n")
         f.write("}\n")
     f.write("\n#ifdef __cplusplus\n} // extern \"C\"\n#endif\n")
-print(f"[c_exports] wrote {OUT}")
+    # Bảng slot: định nghĩa ở đây vì chỉ file này biết danh sách + thứ tự tên.
+    f.write("\nnamespace tglmt {\n")
+    f.write("GlCallStat gGlProfile[kGlProfileMax];\n")
+    f.write("const char* const gGlProfileName[kGlProfileMax] = {\n")
+    for i, (_, name, _) in enumerate(decls):
+        f.write(f'    "{name}", // {i}\n')
+    f.write("};\n")
+    f.write(f"int gGlProfileN = {len(decls)};\n")
+    f.write("} // namespace tglmt\n")
+if len(decls) > 768:
+    raise SystemExit(f"[c_exports] FATAL: {len(decls)} > kGlProfileMax (768)")
+print(f"[c_exports] wrote {OUT} ({len(decls)} profiled slots)")
