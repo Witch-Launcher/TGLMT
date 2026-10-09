@@ -238,27 +238,36 @@ void Context::RefreshMemStats() {
                   TexelBytes(t.gpu->pixelFormat());
         ++nt;
     }
-    uint64_t bsh = 0, gb = 0, nb = 0;
+    uint64_t bsh = 0, gb = 0, gpool = 0, nb = 0;
     // ĐẾM UNIQUE: sau lần xoay đầu, bo.gpu trỏ vào chính 1 slot của bo.pool
-    // (gl_buffer.cpp: `bo.gpu = target`) → cộng cả hai là đếm đôi, số
-    // gpuMB buf= trong log sẽ phóng đại ~33%.
+    // (gl_buffer.cpp: `bo.gpu = target`) → cộng cả hai là đếm đôi.
+    // Tách pool ra riêng: pool là thứ TGLMT GIỮ THÊM để tránh chờ GPU, còn
+    // b.gpu là dữ liệu game thật — biết pool to bao nhiêu mới quyết định cắt.
     std::unordered_set<const metal::IBuffer*> seen;
     for (auto& kv : buffers) {
         const BufferObject& b = kv.second;
         bsh += b.data.size();
-        auto add = [&](const std::shared_ptr<metal::IBuffer>& p) {
+        auto addBase = [&](const std::shared_ptr<metal::IBuffer>& p) {
             if (p && seen.insert(p.get()).second) gb += p->length();
         };
-        add(b.gpu);
-        for (auto& s : b.pool) add(s.buf);
+        auto addPool = [&](const std::shared_ptr<metal::IBuffer>& p) {
+            if (p && seen.insert(p.get()).second) gpool += p->length();
+        };
+        addBase(b.gpu);
+        for (auto& s : b.pool) addPool(s.buf);
         ++nb;
     }
+    uint64_t ring = 0;
+    for (auto& r : ringBuf)
+        if (r) ring += r->length();
     appleStats.memTexBase = tb;
     appleStats.memTexMip = mb;
     appleStats.memTexFace = fb;
     appleStats.memBufShadow = bsh;
     appleStats.memGpuTex = gt;
     appleStats.memGpuBuf = gb;
+    appleStats.memGpuBufPool = gpool;
+    appleStats.memGpuRing = ring;
     appleStats.nTextures = nt;
     appleStats.nBuffers = nb;
     appleStats.nBufferStaged = (uint64_t)pendingBufRanges.size();

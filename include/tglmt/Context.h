@@ -321,6 +321,7 @@ public:
         // In-flight write: GPU còn đang đọc shared memory này khi app ghi lại →
         // phải xoay sang buffer pool slot khác (thay vì alloc MTLBuffer mới).
         uint64_t bufRotated = 0;     // số lần xoay pool slot
+        uint64_t bufCopyBytes = 0;   // tổng byte memcpy khi xoay (gap + range)
         uint64_t texRotated = 0;     // số lần texture phải chờ/giữ
         uint64_t framesThrottled = 0;// số lần buộc chờ vì vượt ngân sách frame
         uint64_t cbCommittedNow = 0, cbCompletedNow = 0; // mirror counter để log
@@ -365,7 +366,9 @@ public:
         uint64_t memTexFace = 0;      // sum faces[*] (cubemap)
         uint64_t memBufShadow = 0;    // sum BufferObject::data
         uint64_t memGpuTex = 0;       // sum GPU texture bytes
-        uint64_t memGpuBuf = 0;       // sum GPU buffer bytes (+ pool slots)
+        uint64_t memGpuBuf = 0;       // sum BufferObject::gpu (bản chính)
+        uint64_t memGpuBufPool = 0;   // sum BufferObject::pool slots (xoay in-flight)
+        uint64_t memGpuRing = 0;      // sum Context::ringBuf (temp upload 3x4MB)
         uint64_t nTextures = 0, nBuffers = 0, nBufferStaged = 0;
     };
     AppleStats appleStats;

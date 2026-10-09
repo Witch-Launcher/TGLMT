@@ -146,6 +146,17 @@ void Context::FlushBufferStaging(GLuint buf) {
             for (size_t i = 0; i < kPool; ++i) {
                 BufferObject::GpuSlot& sl = bo.pool[(bo.poolNext + i) % kPool];
                 if (sl.buf && sl.usedGen > done) continue; // GPU còn đang đọc slot này
+                // Slot rảnh nhưng to gấp đôi mức cần → thay bằng đúng cỡ. Minecraft
+                // hạ kích thước VBO theo chunk/world, slot cũ giữ peak mãi → pool
+                // ăn RAM (đo bằng mem frame= … pool=). Bỏ qua slot nhỏ (tránh churn).
+                if (sl.buf && sl.buf->length() >= need * 2 && sl.buf->length() >= (256 * 1024)) {
+                    std::shared_ptr<metal::IBuffer> smaller =
+                        device->newBuffer(need, metal::StorageMode::Shared);
+                    if (smaller) {
+                        sl.buf = std::move(smaller);
+                        sl.usedGen = 0;
+                    }
+                }
                 if (!sl.buf || sl.buf->length() < need) {
                     sl.buf = device->newBuffer(need, metal::StorageMode::Shared);
                     if (!sl.buf) break;
@@ -187,6 +198,10 @@ void Context::FlushBufferStaging(GLuint buf) {
             // staged → seed đúng phần gap từ buffer cũ TRƯỚC khi ghi payload.
             if (rotated && src && !tgtIsSrc) {
                 size_t cap = std::min({need, srcLen, gpuLen});
+                // Băng thông memcpy của lần xoay: mỗi lần xoay sao TOÀN BỘ buffer
+                // (gap lấy từ buffer cũ + range mới) → số này lớn = FPS thấp do
+                // memcpy chứ không do shader.
+                appleStats.bufCopyBytes += cap;
                 size_t pos = 0;
                 for (auto& m : merged) {
                     if (m.off > pos) {

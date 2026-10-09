@@ -178,7 +178,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     "[TGLMT] ir frame=%llu encNew=%llu encReuse=%llu pipeRe=%llu "
                     "pipeLk=%llu pipeSkip=%llu uniRe=%llu depthRe=%llu stSkip=%llu "
                     "bufCoal=%llu bufFl=%llu texCoal=%llu texFl=%llu "
-                    "bufRot=%llu bufWait=%llu uboMap=%llu texWasRT=%llu texWait=%llu "
+                    "bufRot=%llu bufCpyMB=%llu bufWait=%llu uboMap=%llu texWasRT=%llu texWait=%llu "
                     "ringAlloc=%llu ringWrap=%llu tempAlloc=%llu thr=%llu "
                     "cbC=%llu cbD=%llu clrFail=%llu pres=%llu\n",
                     (unsigned long long)nSwap, (unsigned long long)a.encodersCreated,
@@ -189,6 +189,7 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.stateSkipped, (unsigned long long)a.bufferCoalesced,
                     (unsigned long long)a.bufferFlushes, (unsigned long long)a.texCoalesced,
                     (unsigned long long)a.texFlushes, (unsigned long long)a.bufRotated,
+                    (unsigned long long)(a.bufCopyBytes >> 20),
                     (unsigned long long)a.bufWaitStall, (unsigned long long)a.uboFromMap,
                     (unsigned long long)a.texWasRTFlush, (unsigned long long)a.texWaitStall,
                     (unsigned long long)a.ringAllocs, (unsigned long long)a.ringWraps,
@@ -201,7 +202,8 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             cx.RefreshMemStats();
             fprintf(stderr,
                     "[TGLMT] mem frame=%llu shadowMB=%llu (tex=%llu mip=%llu face=%llu buf=%llu) "
-                    "gpuMB=%llu (tex=%llu buf=%llu) nTex=%llu nBuf=%llu staged=%llu\n",
+                    "gpuMB=%llu (tex=%llu buf=%llu pool=%llu ring=%llu) "
+                    "nTex=%llu nBuf=%llu staged=%llu\n",
                     (unsigned long long)nSwap,
                     (unsigned long long)((a.memTexBase + a.memTexMip + a.memTexFace +
                                           a.memBufShadow) >>(20)),
@@ -209,9 +211,12 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)(a.memTexMip >> 20),
                     (unsigned long long)(a.memTexFace >> 20),
                     (unsigned long long)(a.memBufShadow >> 20),
-                    (unsigned long long)((a.memGpuTex + a.memGpuBuf) >> 20),
+                    (unsigned long long)((a.memGpuTex + a.memGpuBuf + a.memGpuBufPool +
+                                          a.memGpuRing) >> 20),
                     (unsigned long long)(a.memGpuTex >> 20),
                     (unsigned long long)(a.memGpuBuf >> 20),
+                    (unsigned long long)(a.memGpuBufPool >> 20),
+                    (unsigned long long)(a.memGpuRing >> 20),
                     (unsigned long long)a.nTextures, (unsigned long long)a.nBuffers,
                     (unsigned long long)a.nBufferStaged);
             fflush(stderr);
