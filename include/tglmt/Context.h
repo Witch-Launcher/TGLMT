@@ -380,6 +380,14 @@ public:
         uint64_t nsStall = 0;        // trong Context::CommitAndWait (chờ GPU xong)
         uint64_t nPool = 0;          // số slot pool đang có buffer (mem frame=)
         uint64_t maxBuf = 0;         // buffer lớn nhất (bytes) — ai chiếm buf=420MB
+        // glBlitFramebuffer = hotspot #1 (gltop#1: 6.5–26ms mỗi frame, 1 call/frame).
+        // 5 counters này nói rõ nó rơi vào nhánh nào để biết đường fix.
+        uint64_t blitIdentical = 0;  // rect src == dst (không scale, không offset) → đủ điều kiện GPU
+        uint64_t blitScaled = 0;     // rect có scale
+        uint64_t blitLinear = 0;     // filter != NEAREST
+        uint64_t blitFast = 0;       // đi được GPU blit (không readback)
+        uint64_t blitFastFail = 0;   // thử GPU blit nhưng bridge từ chối (định dạng/...)
+        uint64_t blitCpu = 0;        // rơi CPU fallback: readback + vòng pixel/frame
     };
     AppleStats appleStats;
 

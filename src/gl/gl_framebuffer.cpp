@@ -210,6 +210,11 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) { c.errors.Record(0x0501); return; }
     bool scaled = (sw != dw || sh != dh);
     bool linear = (filter != 0x2600 /*NEAREST*/);
+    // Rect src == dst (cùng offset + cùng size): LINEAR và NEAREST cho ra CÙNG
+    // pixel (mẫu trùng tâm texel) → cứ dùng GPU blit. Trước đây điều kiện
+    // "!scaled && !linear" khiến mọi blit LINEAR cùng size rơi CPU fallback
+    // (readback 11MB + vòng 2.7M pixel + re-upload) ≈ 11–26ms mỗi frame.
+    bool identical = !scaled && s0 == d0 && s1 == d1;
     if (!c.device || c.device->isNull()) return; // Null backend: trace-only
     auto def = c.device->defaultRenderTarget();
     if (!def) { c.errors.Record(0x0502); return; }
@@ -228,6 +233,9 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
     // FBO→màn hình (composite cuối menu: game render offscreen rồi blit
     // read=N draw=0 mỗi frame — đường này từng bị return sớm = đen chắc).
     if (readFbo != 0 && drawFbo == 0) {
+        if (scaled) ++c.appleStats.blitScaled;
+        if (linear) ++c.appleStats.blitLinear;
+        if (identical) ++c.appleStats.blitIdentical;
         auto rit = c.fbos.find(readFbo);
         if (rit == c.fbos.end()) { c.errors.Record(0x0502); return; }
         auto cit = rit->second.colorTex.find(0);
@@ -281,10 +289,13 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         uint32_t ch = std::min({(uint32_t)sh, tit->second.h > sy ? tit->second.h - sy : 0,
                                 def->height() > dy ? def->height() - dy : 0});
         if (!cw || !ch) { c.errors.Record(0x0501); return; }
-        if (!scaled && !linear) {
+        if (identical) {
             if (c.device->blitToTarget(tit->second.gpu.get(), def.get(), sx, sy, cw, ch,
-                                       dx, dy))
-                return; // fast path (đúng case máy thật: full-size NEAREST)
+                                       dx, dy)) {
+                ++c.appleStats.blitFast;
+                return; // fast path (rect src==dst: LINEAR ≡ NEAREST, copy GPU thuần)
+            }
+            ++c.appleStats.blitFastFail;
             c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: GPU blitToTarget fail, fallback CPU");
         } else {
             c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: scaled/LINEAR blit ra màn hình, CPU nearest");
@@ -292,6 +303,7 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         // CPU fallback: nearest-scale shadow nguồn qua texture tạm (định dạng
         // của default target để blitToTarget chấp nhận) rồi GPU copy vào màn hình.
         // Shadow có thể cũ (draws đi GPU-only) → làm tươi từ GPU trước.
+        ++c.appleStats.blitCpu;
         auto& tx = tit->second;
         c.FlushPendingEncoder(); // IR: commit batch trước khi readback shadow
         c.CommitAndWait();
@@ -336,8 +348,9 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         uint32_t ch = std::min({(uint32_t)sh, def->height() > sy ? def->height() - sy : 0,
                                 tx.h > dy ? tx.h - dy : 0});
         if (!cw || !ch) { c.errors.Record(0x0501); return; }
-        if (!scaled && !linear &&
+        if (identical &&
             c.device->blitFromTarget(def.get(), tx.gpu.get(), sx, sy, cw, ch, dx, dy)) {
+            ++c.appleStats.blitFast;
             // GetTexImage/ReadPixels sau blit đọc thẳng GPU (GetTexSubImpl level-0
             // refresh) → KHÔNG giữ bản CPU. Chỉ giữ khi format này không đọc lại
             // được từ GPU (P1: không hồi sinh shadow base-level).
@@ -350,6 +363,7 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
             return;
         }
         c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: blit màn hình→FBO scaled/LINEAR/fail, CPU shadow");
+        ++c.appleStats.blitCpu;
         std::vector<uint8_t> scr((size_t)def->width() * def->height() * 4, 0);
         if (!def->readback(scr.data(), (size_t)def->width() * 4)) {
             c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: readback màn hình fail");
@@ -414,6 +428,11 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
     int sw = s2 - s0, sh = s3 - s1, dw = d2 - d0, dh = d3 - d1;
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) { c.errors.Record(0x0501); return; }
     bool scaled = (sw != dw || sh != dh);
+    // Rect src == dst → LINEAR ≡ NEAREST (mẫu trùng tâm texel): dùng GPU blit.
+    bool identical = !scaled && s0 == d0 && s1 == d1;
+    if (scaled) ++c.appleStats.blitScaled;
+    if (f != 0x2600 /*NEAREST*/) ++c.appleStats.blitLinear;
+    if (identical) ++c.appleStats.blitIdentical;
     // LINEAR filter với scale cần sampled-quad (M5c); NEAREST scale nguyên có thể blit lặp — hiện fallback CPU.
     if ((m & 0x00004000u) && rit->second.colorTex.count(0) && wit->second.colorTex.count(0)) {
         // Nguồn CPU cho fallback blit FBO→FBO. P1: đọc GPU vào BẢN TẠM (shadow
@@ -423,20 +442,24 @@ void glBlitFramebuffer(GLint s0, GLint s1, GLint s2, GLint s3, GLint d0, GLint d
         auto rs = c.textures.find(rit->second.colorTex[0]);
         auto ws = c.textures.find(wit->second.colorTex[0]);
         if (rs != c.textures.end() && ws != c.textures.end() && rs->second.gpu && ws->second.gpu) {
-            if (!scaled && f == 0x2600 /*NEAREST*/) {
-                // cùng size + NEAREST → blitCopy GPU thật (A11 TBDR copy, không resolve scale)
+            if (identical) {
+                // cùng rect → blitCopy GPU thật (A11 TBDR copy, không resolve scale)
                 // Fast path: pure GPU, không readback (giữ 60fps; sampling dùng GPU mới).
                 uint32_t sx = s0 < 0 ? 0 : (uint32_t)s0;
                 uint32_t sy = s1 < 0 ? 0 : (uint32_t)s1;
                 if (c.device->blitCopy(rs->second.gpu.get(), ws->second.gpu.get(),
                                        sx, sy, (uint32_t)sw, (uint32_t)sh, (uint32_t)d0, (uint32_t)d1)) {
+                    ++c.appleStats.blitFast;
                     return;
                 }
+                ++c.appleStats.blitFastFail;
+                ++c.appleStats.blitCpu;
                 c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: GPU blit fail, fallback CPU shadow");
                 // Rơi xuống CPU: cần nguồn tươi (đọc thẳng GPU).
                 c.CommitAndWait();
                 srcPx = ShadowOrGPU(c, rs->second, srcOwn);
             } else {
+                ++c.appleStats.blitCpu;
                 c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: scaled/LINEAR fallback CPU shadow (M5c sampled-quad)");
                 // Downsample blur/post: shadow cũ toàn 0 → đen. Đọc thẳng từ GPU.
                 c.CommitAndWait();

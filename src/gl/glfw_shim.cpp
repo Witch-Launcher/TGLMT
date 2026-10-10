@@ -153,9 +153,9 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             // Tag build: force-diag nhận diện được ngay dòng frame=1 trong log
             // (phát hiện sai dylib trên máy — TGLMT_DIAG không set được từ launcher).
 #if defined(TGLMT_FORCE_DIAG)
-            static const char* kBuildTag = "p3-gltop";
+            static const char* kBuildTag = "p4-blitfast";
 #else
-            static const char* kBuildTag = "p3-gltop";
+            static const char* kBuildTag = "p4-blitfast";
 #endif
             fprintf(stderr,
                     "[TGLMT] build=%s frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
@@ -163,7 +163,8 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     "misc=%llu clears=%llu blits=%llu copyTex=%llu mipBase=%llu "
                     "range=%llu hazard=%llu uboSmall=%llu uboPad=%llu mipSkip=%llu texWasRTFl=%llu target=%p %ux%u "
                     "vp=%.0fx%.0f@%.0f,%.0f center=(%u,%u,%u,%u) present=%d "
-                    "drawMs=%ld clrMs=%ld endMs=%ld stallMs=%ld\n",
+                    "drawMs=%ld clrMs=%ld endMs=%ld stallMs=%ld "
+                    "bId=%llu bScl=%llu bLin=%llu bFast=%llu bFail=%llu bCpu=%llu\n",
                     kBuildTag, (unsigned long long)nSwap, dt,
                     (unsigned long long)(a.drawsAttempted - pAtt),
                     (unsigned long long)(a.drawsEncoded - pEnc),
@@ -179,7 +180,10 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.mipLevelSkipped, (unsigned long long)a.texWasRTFlush,
                     (const void*)tgt.get(), tw, th, vp.x, vp.y, vp.w, vp.h, center[0],
                     center[1], center[2], center[3], (int)ok,
-                    msDraw, msClr, msEnd, msStall);
+                    msDraw, msClr, msEnd, msStall,
+                    (unsigned long long)a.blitIdentical, (unsigned long long)a.blitScaled,
+                    (unsigned long long)a.blitLinear, (unsigned long long)a.blitFast,
+                    (unsigned long long)a.blitFastFail, (unsigned long long)a.blitCpu);
             // IR batching counters (riêng 1 dòng để dễ grep trên latestlog):
             // encNew<<draws chứng minh 1 encoder cho N draws; skip/merge >0
             // chứng minh dirty-check + coalesce có chạy trên máy thật.
