@@ -157,6 +157,16 @@ static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {
     if (itb == c.buffers.end()) return;
     Context::BufferView bv = c.SyncBuffer(buf); // shadow có thể rỗng (P1)
     if (!bv.p) { c.errors.Record(0x0502); return; }
+    // CACHE: Minecraft gọi glTexBuffer MỖI FRAME. Trước đây mỗi lần đều
+    // alloc tmp (n=710178 ≈ 2.8MB) + newTextureWithBytes lại → đo được
+    // 2.1–6ms/call (gltop#2) + churn RAM/GPU texture (đóng góp jetsam).
+    // Chỉ upload lại khi buffer / ifmt / contentGen đổi.
+    {
+        auto bit = c.buffers.find(buf);
+        if (bit != c.buffers.end() && itt->second.gpu && !c.device->isNull() &&
+            itt->second.buftexBuf == buf && itt->second.buftexGen == bit->second.contentGen)
+            return;
+    }
     // GPU: buffer texture → texture Nx1 để shader .read(index).
     // Bảng format thật (MC 26.1 dùng cả R8I — bug "sampdeny#... ifmt=0x8231"):
     //   0x8235 R32I(4B)  0x8236 R32UI(4B)  0x822E R32F(4B)
@@ -203,6 +213,13 @@ static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {
             itt->second.pixels = std::move(tmp);
         else
             std::vector<uint8_t>().swap(itt->second.pixels);
+        {
+            auto bit = c.buffers.find(buf);
+            if (bit != c.buffers.end()) {
+                itt->second.buftexBuf = buf;
+                itt->second.buftexGen = bit->second.contentGen;
+            }
+        }
         if (c.DiagOn()) {
             static std::set<uint64_t> seenBB;
             uint64_t key = ((uint64_t)tex << 20) ^ ((uint64_t)inf << 4) ^

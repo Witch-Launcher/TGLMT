@@ -61,6 +61,25 @@ int main() {
     glBufferData(0x8C2A, sizeof(bufdata), bufdata, 0x88E4);
     glTexBuffer(0x8C2A, 0x822E /*R32F*/, vbo);
     assert(ctx.textures[t].pixels.size() == sizeof(bufdata));
+    // contentGen: gl*BufferData / flush staging phải tăng → cache glTexBuffer
+    // (MC gọi glTexBuffer MỖI FRAME, trước đây upload lại 2.8MB mỗi lần) chỉ
+    // re-upload khi THẬT SỰ đổi. glTexBuffer không đổi gì → gen giữ nguyên.
+    {
+        unsigned long long g0 = ctx.buffers[vbo].contentGen;
+        assert(g0 != 0); // id tạo là duy nhất trong context
+        glBufferData(0x8C2A, sizeof(bufdata), bufdata, 0x88E4);
+        assert(ctx.buffers[vbo].contentGen != g0);
+        unsigned long long g1 = ctx.buffers[vbo].contentGen;
+        glTexBuffer(0x8C2A, 0x822E /*R32F*/, vbo);
+        assert(ctx.buffers[vbo].contentGen == g1);
+        // gen do Context::bufGenNext cấp → luôn duy nhất, không bao giờ 0
+        tglmt::GLuint vb = 0;
+        glGenBuffers(1, &vb);
+        assert(vb != 0);
+        assert(ctx.buffers[vb].contentGen != 0);
+        assert(ctx.buffers[vb].contentGen != ctx.buffers[vbo].contentGen);
+        glDeleteBuffers(1, &vb);
+    }
     // --- GetTexImage roundtrip ---
     tglmt::GLuint t2;
     glGenTextures(1, &t2);

@@ -355,6 +355,10 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
             // refresh) → KHÔNG giữ bản CPU. Chỉ giữ khi format này không đọc lại
             // được từ GPU (P1: không hồi sinh shadow base-level).
             if (!TexReadableFromGPU(tx)) {
+                // blitTo/FromTarget giờ là NoWait (p5) → đọc CPU PHẢI barrier
+                // trước, nếu không getBytes trả dữ liệu cũ.
+                c.FlushPendingEncoder();
+                c.CommitAndWait();
                 std::vector<uint8_t> full((size_t)tx.w * tx.h * 4, 0);
                 auto wrapped = c.device->wrapAsTarget(tx.gpu.get(), nullptr);
                 if (wrapped && wrapped->readback(full.data(), (size_t)tx.w * 4))
@@ -364,6 +368,9 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         }
         c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: blit màn hình→FBO scaled/LINEAR/fail, CPU shadow");
         ++c.appleStats.blitCpu;
+        // blitNoWait (p5) + batch commit NoWait → barrier trước khi đọc màn hình.
+        c.FlushPendingEncoder();
+        c.CommitAndWait();
         std::vector<uint8_t> scr((size_t)def->width() * def->height() * 4, 0);
         if (!def->readback(scr.data(), (size_t)def->width() * 4)) {
             c.LogDebug(0, 0, 0, 0, "glBlitFramebuffer: readback màn hình fail");

@@ -34,6 +34,10 @@ struct BufferObject {
     bool mapped = false;
     size_t mapOffset = 0, mapLength = 0;
     GLbitfield mapAccess = 0;
+    // Số lần nội dung THẬT SỰ đổi (gl*BufferData/Storage hoặc flush staging).
+    // Id gán lúc tạo là duy nhất trong context (Context::bufGenNext) nên id buffer
+    // tái dùng không bao giờ trùng gen → cache glTexBuffer không bao giờ stale.
+    uint64_t contentGen = 0;
     std::shared_ptr<metal::IBuffer> gpu; // Apple backend
     // Pool buffer phụ cho in-flight write: khi GPU còn đang đọc `gpu` (đã commit,
     // chưa execute) mà app ghi lại buffer này, ta xoay sang 1 slot pool khác thay
@@ -133,6 +137,11 @@ struct TextureObject {
     // (lastReadGen == Context::waitGen) → ghi replaceRegion sẽ đổi nội dung
     // mà draw cũ đang sample (in-flight write).
     uint64_t lastReadGen = 0;
+    // glTexBuffer: cache (buffer, contentGen) đã upload. Trước đây MC gọi
+    // glTexBuffer MỖI FRAME → alloc tmp 2.8MB + newTextureWithBytes lại mỗi frame
+    // (~2–6ms + churn RAM). Bỏ qua khi buffer + ifmt + contentGen không đổi.
+    GLuint buftexBuf = 0;
+    uint64_t buftexGen = 0;
 };
 
 // P1: pixel có đọc lại được từ GPU (buffer Shared) không? Nếu KHÔNG → shadow CPU
@@ -276,6 +285,8 @@ public:
     std::string backendName = "null";
 
     std::unordered_map<GLuint, BufferObject> buffers;
+    // Id gen duy nhất cho BufferObject::contentGen (xem glTexBuffer cache).
+    uint64_t bufGenNext = 1;
     std::unordered_map<GLuint, VertexArrayObject> vaos;
     std::unordered_map<GLuint, TextureObject> textures;
     std::unordered_map<GLuint, SamplerObject> samplers;
@@ -616,10 +627,15 @@ public:
     // đổi. Mọi key đọc 1 lần trong LoadOptions(), tôn trọng khoảng [1..8].
     //   TGLMT_FRAMES_IN_FLIGHT 1..8  (mặc định kMaxFramesInFlight)
     //   TGLMT_BUF_POOL         1..8  (mặc định 3 — slot buffer xoay khi GPU bận)
+    //   TGLMT_POOL_MB          0..1024 (mặc định 192 — trần TỔNG slot pool).
     //   TGLMT_DIAG             1     (xem DiagOn)
     struct Options {
         uint32_t framesInFlight = kMaxFramesInFlight;
         size_t bufPoolSlots = 3;
+        // Trần pool (MB). Slot pool từng đo tới 320MB sau spike load chunk →
+        // góp phần chạm jetsam (limit 2148MB). Vượt trần → KHÔNG alloc slot mới,
+        // rớt vào nhánh chờ (CommitAndWait) thay vì giữ thêm RAM. 0 = không giới hạn.
+        size_t poolBudgetMB = 192;
         bool diag = false;
     };
     Options opt;

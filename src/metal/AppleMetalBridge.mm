@@ -1039,8 +1039,14 @@ public:
                 }];
             NoteCommit(cb);
             [cb commit];
-            [cb waitUntilCompleted];
-            return [cb status] == MTLCommandBufferStatusCompleted;
+            // p5: KHÔNG waitUntilCompleted. Trước đây mỗi frame blit cuối
+            // (glBlitFramebuffer → blitToTarget) đều drain toàn bộ pipeline
+            // (CB này xếp sau batch vừa commit) → đo gltop#1 = 10.4–22ms/call
+            // = CPU/GPU nối tiếp, ~½ frame time. blit là NoWait: thứ tự vẫn đúng
+            // vì cùng serial queue (presentTarget/next batch commit sau blit).
+            // Mọi đọc CPU sau blit đã có barrier CommitAndWait riêng
+            // (gl_framebuffer.cpp / Context::ReadTextureGPU).
+            return true;
         } @catch (NSException*) { return false; }
     }
     bool blitToTarget(ITexture* src, IRenderTarget* dst, uint32_t sx, uint32_t sy, uint32_t w,

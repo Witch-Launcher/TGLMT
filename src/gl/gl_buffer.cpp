@@ -95,6 +95,15 @@ static void StageBufRange(Context& c, GLuint bufId, size_t off, size_t len,
 }
 
 namespace tglmt {
+// Tổng byte các slot pool đang giữ. Chỉ gọi khi SẮP alloc slot mới (hiếm) nên
+// O(#buffer) mỗi lần là vô hại — avoids phải maintain counter dễ drift.
+static size_t PoolBytesOf(const std::unordered_map<GLuint, BufferObject>& bufs) {
+    size_t n = 0;
+    for (auto& kv : bufs)
+        for (auto& s : kv.second.pool)
+            if (s.buf) n += s.buf->length();
+    return n;
+}
 // Flush 1 buffer: merge toàn bộ ranges (sort + gộp), 1 memcpy+didModify mỗi đoạn.
 void Context::FlushBufferStaging(GLuint buf) {
     auto it = pendingBufRanges.find(buf);
@@ -158,6 +167,16 @@ void Context::FlushBufferStaging(GLuint buf) {
                     }
                 }
                 if (!sl.buf || sl.buf->length() < need) {
+                    // Trần pool (TGLMT_POOL_MB, mặc định 192MB). Pool từng đo tới
+                    // 320MB sau spike load chunk → góp phần chạm jetsam limit
+                    // 2148MB. Vượt trần → bỏ qua slot này (slot khác có thể vừa,
+                    // rốt cục rơi vào nhánh chờ) thay vì giữ thêm RAM.
+                    if (opt.poolBudgetMB) {
+                        const size_t budget = (size_t)opt.poolBudgetMB << 20;
+                        const size_t used = PoolBytesOf(buffers);
+                        const size_t cur = sl.buf ? sl.buf->length() : 0;
+                        if (used > 0 && used - cur + need > budget) continue;
+                    }
                     sl.buf = device->newBuffer(need, metal::StorageMode::Shared);
                     if (!sl.buf) break;
                     sl.usedGen = 0;
@@ -236,6 +255,7 @@ void Context::FlushBufferStaging(GLuint buf) {
             bo.gpu = target; // draw sau dùng đúng buffer vừa ghi
         }
     }
+    ++bo.contentGen; // nội dung đổi thật → cache glTexBuffer phải upload lại
     ++appleStats.bufferFlushes;
     pendingBufRanges.erase(it);
 }
@@ -254,12 +274,18 @@ void glGenBuffers(GLsizei n, GLuint* buffers) {
     Context& c = Context::Current();
     if (n < 0) { c.errors.Record(0x0501); return; }
     c.registry.Gen(ObjectKind::Buffer, n, buffers);
-    for (GLsizei i = 0; i < n; ++i) c.buffers[buffers[i]] = BufferObject{buffers[i]};
+    for (GLsizei i = 0; i < n; ++i) {
+        c.buffers[buffers[i]] = BufferObject{buffers[i]};
+        c.buffers[buffers[i]].contentGen = c.bufGenNext++; // id duy nhất
+    }
 }
 void glCreateBuffers(GLsizei n, GLuint* buffers) {
     Context& c = Context::Current();
     c.registry.Create(ObjectKind::Buffer, n, buffers);
-    for (GLsizei i = 0; i < n; ++i) c.buffers[buffers[i]] = BufferObject{buffers[i]};
+    for (GLsizei i = 0; i < n; ++i) {
+        c.buffers[buffers[i]] = BufferObject{buffers[i]};
+        c.buffers[buffers[i]].contentGen = c.bufGenNext++; // id duy nhất
+    }
 }
 void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     Context& c = Context::Current();
@@ -356,6 +382,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
         bo->data.assign((size_t)size, 0);
         if (data && size) memcpy(bo->data.data(), data, (size_t)size);
     }
+    ++bo->contentGen;
     c.pendingBufRanges.erase(bid); // realloc → staging cũ vô nghĩa
 }
 void glNamedBufferData(GLuint b, GLsizeiptr size, const void* data, GLenum usage) {
@@ -375,6 +402,7 @@ void glNamedBufferData(GLuint b, GLsizeiptr size, const void* data, GLenum usage
         it->second.data.assign(size ? (size_t)size : 0, 0);
         if (data && size) memcpy(it->second.data.data(), data, (size_t)size);
     }
+    ++it->second.contentGen;
     c.pendingBufRanges.erase(b);
     c.state.BindBuffer(0x8892, saved);
 }
@@ -393,6 +421,7 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
         bo->data.assign((size_t)size, 0);
         if (data && size) memcpy(bo->data.data(), data, (size_t)size);
     }
+    ++bo->contentGen;
     c.pendingBufRanges.erase(bid);
 }
 void glNamedBufferStorage(GLuint b, GLsizeiptr size, const void* data, GLbitfield flags) {
@@ -409,6 +438,7 @@ void glNamedBufferStorage(GLuint b, GLsizeiptr size, const void* data, GLbitfiel
         it->second.data.assign((size_t)size, 0);
         if (data && size) memcpy(it->second.data.data(), data, (size_t)size);
     }
+    ++it->second.contentGen;
     c.pendingBufRanges.erase(b);
 }
 void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {

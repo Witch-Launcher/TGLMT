@@ -68,6 +68,13 @@ Context::Options Context::LoadOptions() {
         int v = std::atoi(e);
         if (v >= 1 && v <= 8) o.bufPoolSlots = (size_t)v;
     }
+    // Trần pool MB (0 = không giới hạn). Dùng strtol + endptr vì atoi("abc") = 0
+    // sẽ hiểu nhầm chuỗi rác thành "không giới hạn".
+    if (const char* e = std::getenv("TGLMT_POOL_MB")) {
+        char* end = nullptr;
+        long v = std::strtol(e, &end, 10);
+        if (end && *end == '\0' && v >= 0 && v <= 1024) o.poolBudgetMB = (size_t)v;
+    }
 #if !defined(TGLMT_FORCE_DIAG)
     if (const char* e = std::getenv("TGLMT_DIAG"))
         o.diag = (e[0] == '1' || e[0] == 'y' || e[0] == 'Y' || e[0] == 't' ||
