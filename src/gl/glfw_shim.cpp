@@ -153,9 +153,9 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             // Tag build: force-diag nhận diện được ngay dòng frame=1 trong log
             // (phát hiện sai dylib trên máy — TGLMT_DIAG không set được từ launcher).
 #if defined(TGLMT_FORCE_DIAG)
-            static const char* kBuildTag = "p6-pipeline";
+            static const char* kBuildTag = "p7-clearbatch";
 #else
-            static const char* kBuildTag = "p6-pipeline";
+            static const char* kBuildTag = "p7-clearbatch";
 #endif
             fprintf(stderr,
                     "[TGLMT] build=%s frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
@@ -190,13 +190,14 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             Context& cx = st.renderer->context();
             a.cbCommittedNow = cx.cbCommitted.load();
             a.cbCompletedNow = cx.cbCompleted.load();
+            a.clearCBs = cx.device ? cx.device->clearBatchCommits() : 0; // p7
             fprintf(stderr,
                     "[TGLMT] ir frame=%llu encNew=%llu encReuse=%llu pipeRe=%llu "
                     "pipeLk=%llu pipeSkip=%llu uniRe=%llu depthRe=%llu stSkip=%llu "
                     "bufCoal=%llu bufFl=%llu texCoal=%llu texFl=%llu "
                     "bufRot=%llu bufCpyMB=%llu bufWait=%llu uboMap=%llu texWasRT=%llu texWait=%llu "
                     "ringAlloc=%llu ringWrap=%llu tempAlloc=%llu thr=%llu "
-                    "cbC=%llu cbD=%llu clrFail=%llu pres=%llu\n",
+                    "cbC=%llu cbD=%llu clrFail=%llu pres=%llu clr=%llu clrCB=%llu\n",
                     (unsigned long long)nSwap, (unsigned long long)a.encodersCreated,
                     (unsigned long long)a.encoderReused, (unsigned long long)a.pipelineReused,
                     (unsigned long long)a.pipelineLookups,
@@ -212,7 +213,8 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.tempAllocs, (unsigned long long)a.framesThrottled,
                     (unsigned long long)a.cbCommittedNow, (unsigned long long)a.cbCompletedNow,
                     (unsigned long long)a.clearRegionFails,
-                    (unsigned long long)a.presentPasses);
+                    (unsigned long long)a.presentPasses,
+                    (unsigned long long)a.clears, (unsigned long long)a.clearCBs);
             // P0 memory accounting: shadow CPU (cắt được ở P1) vs GPU resource.
             // Quét toàn bộ textures/buffers — chỉ chạy 1 lần / 600 frame.
             cx.RefreshMemStats();

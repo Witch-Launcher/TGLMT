@@ -313,6 +313,7 @@ bool AppleClearNow(GLbitfield m) {
         return false;
     }
     (void)enc->endAndCommitNoWait(); // clear-only: end ngay, KHÔNG để pending
+    ++c.appleStats.clears; // p7: đếm để log tỉ lệ dồn clear→CB (clears/clearCBs)
     // Clear đã xảy ra NGAY → bỏ deferred còn treo (Renderer wildcard / fallback
     // cũ) để draw kế tiếp không clear thêm lần nữa với mask/color cũ.
     ConsumeDeferredClear(c);

@@ -347,9 +347,11 @@ public:
                        id<MTLTexture> target, LogFn log = nullptr,
                        std::shared_ptr<SharedDiag> diag = nullptr,
                        std::atomic<uint64_t>* committed = nullptr,
-                       std::atomic<uint64_t>* completed = nullptr)
+                       std::atomic<uint64_t>* completed = nullptr,
+                       bool ownCB = true)
         : cb_(cb), enc_(enc), target_(target), log_(log), diag_(diag),
-          countCommitted_(committed), countCompleted_(completed), ok_(cb && enc) {}
+          countCommitted_(committed), countCompleted_(completed), ok_(cb && enc),
+          ownCB_(ownCB) {}
     void setViewport(const Viewport& vp) override {
         if (!ok_) return;
         MTLViewport m = {vp.x, vp.y, vp.w, vp.h, vp.n, vp.f};
@@ -466,6 +468,10 @@ public:
         if (!enc_ || !cb_) return false;
         [enc_ endEncoding];
         enc_ = nil;
+        // p7: encoder clear-ONLY dùng chung command buffer (ownCB_=false) —
+        // chỉ endEncoding, KHÔNG commit. Device commit 1 lần cho cả batch
+        // (flushClearBatch) → mỗi glClear không còn tốn 1 MTLCommandBuffer.
+        if (!ownCB_) return ok_;
         // Đếm command buffer để Context biết còn frame nào đang bay (xem
         // setCommandBufferCounters). Handler gắn cho MỌI commit: một queue Metal
         // thực thi in-order nên completed là "đã xong tới đây". Không handler
@@ -523,6 +529,9 @@ public:
         if (!enc_ || !cb_) return false;
         [enc_ endEncoding];
         enc_ = nil;
+        // p7: encoder clear-ONLY dùng chung CB (ownCB_=false) — CB chưa commit,
+        // không thể waitUntilCompleted ở đây. Device flushClearBatch sẽ commit.
+        if (!ownCB_) return ok_;
 #if TARGET_OS_OSX
         // macOS discrete GPU: bắt buộc synchronize trước khi CPU đọc Shared texture.
         // iOS/TVDR unified memory không có API này (không cần) → guard để biên dịch được cho iOS.
@@ -545,6 +554,7 @@ private:
     std::atomic<uint64_t>* countCommitted_ = nullptr;
     std::atomic<uint64_t>* countCompleted_ = nullptr;
     bool ok_;
+    bool ownCB_ = true; // p7: false = clear-ONLY encoder dùng chung CB batch
 };
 
 class AppleDevice : public IDevice {
@@ -617,6 +627,7 @@ public:
     // waitUntilCompleted — không tạo CB mới, không drain cả pipeline.
     size_t inflightCount() const override { return gInflightCB.size(); }
     bool waitOldestInflight() override {
+        flushClearBatch(); // p7: clear đang dồn phải commit (đi trước mọi CB khác)
         while (!gInflightCB.empty()) {
             id<MTLCommandBuffer> cb = gInflightCB.front();
             MTLCommandBufferStatus st = [cb status];
@@ -632,7 +643,25 @@ public:
         return false;
     }
     void clearInflight() override { gInflightCB.clear(); }
+    // p7: dồn nhiều clear-ONLY pass vào MỘT command buffer. glClear chạy
+    // ~4.8 lần/frame; trước đây mỗi lần = 1 MTLCommandBuffer + 1 render pass
+    // + 1 commit (đo 0.7ms/clear trên A11). Metal cho phép N render encoder
+    // nối tiếp trên cùng CB (endEncoding rồi renderCommandEncoderWithDescriptor
+    // lần nữa) → CPU chỉ tốn 1 alloc + 1 commit cho cả batch.
+    // THỨ TỰ VẪN ĐÚNG: mọi method khác tạo CB mới đều flushClearBatch() TRƯỚC,
+    // nên commit order = thứ tự gọi GL. Invariant: clrCB_ != nil ⟺ không có
+    // encoder draw nào đang mở (makeRenderEncoderActions/Load đều flush trước).
+    void flushClearBatch() override {
+        if (!clrCB_) return;
+        id<MTLCommandBuffer> cb = clrCB_;
+        clrCB_ = nil;
+        clrEncN_ = 0;
+        ++clrCBCommits_;
+        FinishCB(cb);
+    }
+    uint64_t clearBatchCommits() const override { return clrCBCommits_; }
     void commitAndWait() override {
+        flushClearBatch(); // p7: clear đang dồn phải commit trước barrier
         // Barrier thật: commit rỗng + đợi → xả hết draws NoWait trước đó (cho
         // glFinish/glReadPixels). Không ảnh hưởng throughput frame thường.
         if (!queue_) return;
@@ -827,6 +856,7 @@ public:
         if (!at || !metalLayer || !queue_) return false;
         CAMetalLayer* layer = (__bridge CAMetalLayer*)metalLayer;
         @try {
+            flushClearBatch(); // p7: clear đang dồn phải commit TRƯỚC present CB
             id<CAMetalDrawable> drawable = [layer nextDrawable];
             if (!drawable) {
                 if (log_) log_("presentTarget: nextDrawable nil (layer chưa vào window?)");
@@ -1061,6 +1091,7 @@ public:
         if (!s || !d || !queue_ || !w || !h) return false;
         if (s.pixelFormat != d.pixelFormat) return false;
         @try {
+            flushClearBatch(); // p7: clear đang dồn đi trước blit (cùng serial queue)
             id<MTLCommandBuffer> cb = [queue_ commandBuffer];
             if (!cb) return false;
             id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
@@ -1110,6 +1141,7 @@ public:
         @try {
             // Chỉ texture mipmapped mới sinh được; non-mipmapped → false để GL fallback base-level.
             if ([a->get() mipmapLevelCount] <= 1) return false;
+            flushClearBatch(); // p7: clear đang dồn đi trước mipgen CB
             id<MTLCommandBuffer> cb = [queue_ commandBuffer];
             if (!cb) return false;
             id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
@@ -1387,6 +1419,7 @@ public:
     }
     std::shared_ptr<IComputeEncoder> makeComputeEncoder() override {
         if (!queue_) return nullptr;
+        flushClearBatch(); // p7: clear đang dồn đi trước compute CB
         id<MTLCommandBuffer> cb = [queue_ commandBuffer];
         if (!cb) return nullptr;
         return std::make_shared<AppleComputeEncoder>(cb);
@@ -1476,6 +1509,7 @@ public:
         AppleTarget* at = dynamic_cast<AppleTarget*>(target);
         ApplePipeline* ap = dynamic_cast<ApplePipeline*>(pipeline);
         if (!at || !ap || !queue_) return nullptr;
+        flushClearBatch(); // p7: clear đang dồn đi trước draw CB (thứ tự queue)
         id<MTLCommandBuffer> cb = [queue_ commandBuffer];
         if (!cb) return nullptr;
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1516,6 +1550,7 @@ public:
         AppleTarget* at = dynamic_cast<AppleTarget*>(target);
         ApplePipeline* ap = dynamic_cast<ApplePipeline*>(pipeline);
         if (!at || !ap || !queue_) return nullptr;
+        flushClearBatch(); // p7: clear đang dồn đi trước draw CB (thứ tự queue)
         id<MTLCommandBuffer> cb = [queue_ commandBuffer];
         if (!cb) return nullptr;
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1547,6 +1582,7 @@ public:
         AppleTarget* at = dynamic_cast<AppleTarget*>(target);
         ApplePipeline* ap = dynamic_cast<ApplePipeline*>(pipeline);
         if (!at || !ap || !queue_) return nullptr;
+        flushClearBatch(); // p7: clear đang dồn đi trước draw CB (thứ tự queue)
         id<MTLCommandBuffer> cb = [queue_ commandBuffer];
         if (!cb) return nullptr;
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1582,8 +1618,18 @@ public:
         bool doColor = (colorLoad == LoadOp::Clear) && at->color();
         bool doDepth = (depthLoad == LoadOp::Clear) && at->depth();
         if (!doColor && !doDepth) return nullptr;
-        id<MTLCommandBuffer> cb = [queue_ commandBuffer];
-        if (!cb) return nullptr;
+        // p7: clear-ONLY pass nối tiếp vào CB đang dồn. Metal cho nhiều render
+        // encoder trên 1 CB (endEncoding rồi renderCommandEncoderWithDescriptor
+        // lần nữa). Đủ batch → commit rồi mở CB mới. ownCB=false → encoder chỉ
+        // endEncoding, KHÔNG commit (commit do flushClearBatch).
+        if (!clrCB_ || clrEncN_ >= kClearBatchMax) {
+            if (clrCB_) flushClearBatch();
+            clrCB_ = [queue_ commandBuffer];
+            if (!clrCB_) return nullptr;
+            clrEncN_ = 0;
+        }
+        id<MTLCommandBuffer> cb = clrCB_;
+        ++clrEncN_;
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         if (at->color()) {
             rp.colorAttachments[0].texture = at->color();
@@ -1612,9 +1658,10 @@ public:
             [enc setScissorRect:s];
         }
         return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_,
-                                                        cbCommitted_, cbCompleted_);
+                                                        cbCommitted_, cbCompleted_,
+                                                        /*ownCB=*/false);
     }
-    // Fallback chặy: blit từng hàng (đồi để lẟt dắng độ để, đảm hình nhắng).
+    // Fallback chụy: blit từng hàng (đồi để lẟt dắng độ để, đảm hình nhắng).
     bool flipCopy(ITexture* src, ITexture* dst) override {
         AppleTexture* a = dynamic_cast<AppleTexture*>(src);
         AppleTexture* b = dynamic_cast<AppleTexture*>(dst);
@@ -1622,6 +1669,7 @@ public:
         if (a->pixelFormat() != b->pixelFormat()) return false;
         if (!EnsureFlipPipeline(a->pixelFormat())) return false;
         @try {
+            flushClearBatch(); // p7: clear đang dồn đi trước flip CB
             id<MTLCommandBuffer> cb = [queue_ commandBuffer];
             if (!cb) return false;
             MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1738,6 +1786,17 @@ public:
     void NoteCommit(id<MTLCommandBuffer>) {
         if (cbCommitted_) cbCommitted_->fetch_add(1, std::memory_order_relaxed);
     }
+    // p7: 1 commit cho cả batch clear (handler + đếm + inflight tracking).
+    void FinishCB(id<MTLCommandBuffer> cb) {
+        if (!cb) return;
+        if (cbCompleted_)
+            [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+                cbCompleted_->fetch_add(1, std::memory_order_relaxed);
+            }];
+        NoteCommit(cb);
+        [cb commit];
+        NoteInflightCB(cb);
+    }
 
     // Scissor-region clear (GL parity): blit buffer→texture ghi ĐÚNG vùng —
     // loadAction clear không clip theo scissor (kiểm chứng test_clear_targets).
@@ -1787,6 +1846,7 @@ public:
             for (uint32_t x2 = 0; x2 < w; ++x2)
                 memcpy(dst + (size_t)r * stride + (size_t)x2 * 4, px, 4);
         @try {
+            flushClearBatch(); // p7: clear đang dồn đi trước blit CB (thứ tự queue)
             id<MTLCommandBuffer> cb = [queue_ commandBuffer];
             if (!cb) return false;
             id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
@@ -1835,6 +1895,12 @@ private:
     int presentProbe_ = 0;
     id<MTLBuffer> clearBuf_ = nil;             // buffer cho fillRegionColor (tái sử dụng)
     size_t clearBufSize_ = 0;
+    // p7: batch clear-ONLY. clrCB_ != nil ⟹ chưa commit; mọi method tạo CB khác
+    // phải flushClearBatch() trước. kClearBatchMax chặn batch dài bất thường.
+    static constexpr int kClearBatchMax = 16;
+    id<MTLCommandBuffer> clrCB_ = nil;
+    int clrEncN_ = 0;
+    uint64_t clrCBCommits_ = 0; // p7: đếm CB clear đã commit (log tỉ lệ dồn)
     std::vector<DrawTrace> trace_;
     std::map<std::string, id<MTLRenderPipelineState>> pcache_;
     std::map<uint64_t, id<MTLDepthStencilState>> dcache_; // IR: 16 depth states cache

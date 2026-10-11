@@ -399,6 +399,11 @@ public:
         uint64_t blitFast = 0;       // đi được GPU blit (không readback)
         uint64_t blitFastFail = 0;   // thử GPU blit nhưng bridge từ chối (định dạng/...)
         uint64_t blitCpu = 0;        // rơi CPU fallback: readback + vòng pixel/frame
+        // p7: glClear dồn clear-ONLY pass vào chung 1 command buffer.
+        // clears = số glClear đi qua makeClearEncoder; clearCBs = số CB đã commit.
+        // clears/clearCBs = tỉ lệ dồn (muốn ~1 CB cho nhiều clear liên tiếp).
+        uint64_t clears = 0;
+        uint64_t clearCBs = 0;
     };
     AppleStats appleStats;
 

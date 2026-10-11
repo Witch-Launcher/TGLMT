@@ -83,6 +83,9 @@ bool Renderer::EndFrame(void* metalLayer) {
     impl_->ctx->FlushPendingEncoder();
     impl_->ctx->FlushAllBufferStaging();
     impl_->ctx->FlushAllTextureStaging();
+    // p7: clear-ONLY pass đang dồn trong CB chưa commit phải xả ở đây —
+    // headless không present, nếu bỏ qua thì glClear cuối frame mất hẳn.
+    if (impl_->ctx->device) impl_->ctx->device->flushClearBatch();
     if (!metalLayer) return true; // headless: không present vẫn coi như xong
     if (!impl_->target) return false;
     return impl_->ctx->device->presentTarget(impl_->target.get(), metalLayer);

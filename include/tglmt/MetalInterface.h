@@ -250,6 +250,12 @@ public:
     virtual size_t inflightCount() const { return 0; }
     virtual bool waitOldestInflight() { return false; }
     virtual void clearInflight() {}
+    // p7: clear-ONLY pass đang dồn trong 1 command buffer chưa commit. Backend
+    // nào không dồn (Null) → no-op. Backend dồn PHẢI gọi trước mỗi lần tạo CB
+    // mới để commit order = thứ tự gọi GL (queue Metal tuần tự theo commit).
+    virtual void flushClearBatch() {}
+    // p7: số command buffer clear-ONLY đã commit (đo tỉ lệ dồn: clears/clearCBs).
+    virtual uint64_t clearBatchCommits() const { return 0; }
     virtual const std::vector<DrawTrace>& drawTrace() const = 0;
     virtual void clearTrace() = 0;
     // M5 render API — default nullptr (Null backend không GPU).
