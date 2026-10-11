@@ -172,14 +172,21 @@ void Context::CommitAndWait() {
 // latency, thấy rõ khi lia cam nhanh. Giờ chỉ chặn khi thực sự tắc.
 void Context::ThrottleGpu() {
     if (!device || device->isNull()) return;
-    // 1 vòng đủ: present đã commit nhưng chưa execute → 1 frame đang bay.
-    // Giới hạn số vòng để không bao giờ treo nếu backend không cập nhật counter
-    // (đã commit 1 lần rồi vẫn phải thoát).
+    // p6: chờ ĐÚNG CB CŨ NHẤT thay vì commitAndWait. commitAndWait tạo CB mới
+    // rồi đợi ⇒ phải đợi cả (gap+1) frame GPU — p5 đo stall 23.1ms/frame
+    // (45% dt) và thr=9592/9600 vì mỗi frame commit ~3 CB (batch+blit+present)
+    // mà ngân sách chỉ 2. Đợi CB cũ nhất = đợi đúng 1 frame GPU → CPU chạy
+    // song song thật. Vòng lặp + guard giữ nguyên để không bao giờ treo.
     for (int guard = 0; guard < 8; ++guard) {
         if ((cbCommitted.load(std::memory_order_relaxed) -
              cbCompleted.load(std::memory_order_relaxed)) < opt.framesInFlight)
             return;
-        CommitAndWait();
+        if (!device->waitOldestInflight()) {
+            // Không còn handle (site hiếm không push): rơi về barrier cũ cho chắc.
+            CommitAndWait();
+            ++appleStats.framesThrottled;
+            return;
+        }
         ++appleStats.framesThrottled;
     }
 }
@@ -359,13 +366,19 @@ std::pair<metal::IBuffer*, size_t> Context::RingAlloc(size_t n, size_t align) {
         return {nullptr, 0};
     }
     ringCursor[slot] = aligned + n;
+    ringUsedGen[slot] = cbCommitted.load(std::memory_order_relaxed);
     ++appleStats.ringAllocs;
     return {ringBuf[slot].get(), aligned};
 }
 void Context::NextFrame() {
     ++frameSeq;
     uint64_t slot = frameSeq % kRingFrames;
-    ringCursor[slot] = 0; // slot này đã qua 2 frames, GPU xong → tái dùng an toàn
+    // p6: chỉ tái dùng slot khi GPU đã execute xong frame đã dùng nó. Trước đây
+    // cứ reset theo giả định "3 slot = 2 frame đang bay" — vô hiệu khi
+    // framesInFlight đổi được (mặc định 4). Nếu GPU còn đang đọc → GIỮ cursor
+    // → RingAlloc tràn → fallback newBuffer (đúng, chậm hơn 1 chút nhưng không vỡ).
+    if (ringUsedGen[slot] <= cbCompleted.load(std::memory_order_relaxed))
+        ringCursor[slot] = 0;
     if (frameSeq > 0 && (frameSeq % kRingFrames) == 0) ++appleStats.ringWraps;
 }
 // PSO prewarm: đảm bảo program đã có appleVS/FS libraries (MSL compile đắt nhất

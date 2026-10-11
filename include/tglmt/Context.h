@@ -597,9 +597,15 @@ public:
     // lấy từ đây → 0 MTLBuffer alloc trong frame. Trả (buf, offset); nullptr
     // khi chưa init/size quá lớn (caller fallback newBuffer + đếm tempAllocs).
     static constexpr size_t kRingSize = 4 * 1024 * 1024;
-    static constexpr size_t kRingFrames = 3;
+    // p6: tăng 3 → 5 (framesInFlight mặc định 4 + 1 slot đang ghi). Giữ 3 trong
+    // khi framesInFlight=4 là HAZARD: NextFrame tái dùng slot mà GPU có thể vẫn
+    // đang đọc (triple-buffer chỉ an toàn cho ≤2 frame đang bay).
+    static constexpr size_t kRingFrames = 5;
     std::shared_ptr<metal::IBuffer> ringBuf[kRingFrames];
-    size_t ringCursor[kRingFrames] = {0, 0, 0};
+    size_t ringCursor[kRingFrames] = {0, 0, 0, 0, 0};
+    // Đợi (cbCommitted) của frame gần nhất đã dùng slot ring — NextFrame chỉ
+    // reset cursor khi GPU đã execute xong (không đoán theo số slot nữa).
+    uint64_t ringUsedGen[kRingFrames] = {0, 0, 0, 0, 0};
     uint64_t frameSeq = 0; // tăng mỗi EndFrame/NextFrame (triple-buffer rotation)
     std::pair<metal::IBuffer*, size_t> RingAlloc(size_t n, size_t align = 256);
     void NextFrame(); // xoay ring + tăng frameSeq (gọi ở BeginFrame/EndFrame)
@@ -621,7 +627,10 @@ public:
                cbCompleted.load(std::memory_order_relaxed);
     }
     // Số frame trong flight tối đa trước khi buộc chờ (bảo vệ target/buffer pool).
-    static constexpr uint32_t kMaxFramesInFlight = 2;
+    // p6: MỖI frame commit ~3 CB (batch + blit NoWait + present) nên ngân sách 2
+    // làm gap luôn ≥2 → ThrottleGpu chờ mỗi frame (p5: thr=9592/9600, stall
+    // 23.1ms/frame = 45% dt). Đặt 4 = chừa chỗ cho 3 CB + 1 frame GPU đang chạy.
+    static constexpr uint32_t kMaxFramesInFlight = 4;
     // Cấu hình runtime: launcher setenv TRƯỚC khi Context sinh ra (tab Đồ hoạ →
     // mục TGLMT). Compile-time chỉ là mặc định → không phải build lại dylib để
     // đổi. Mọi key đọc 1 lần trong LoadOptions(), tôn trọng khoảng [1..8].
@@ -631,7 +640,8 @@ public:
     //   TGLMT_DIAG             1     (xem DiagOn)
     struct Options {
         uint32_t framesInFlight = kMaxFramesInFlight;
-        size_t bufPoolSlots = 3;
+        // p6: slot pool nên ≥ framesInFlight (4) để xoay không rơi vào nhánh chờ.
+        size_t bufPoolSlots = 4;
         // Trần pool (MB). Slot pool từng đo tới 320MB sau spike load chunk →
         // góp phần chạm jetsam (limit 2148MB). Vượt trần → KHÔNG alloc slot mới,
         // rớt vào nhánh chờ (CommitAndWait) thay vì giữ thêm RAM. 0 = không giới hạn.

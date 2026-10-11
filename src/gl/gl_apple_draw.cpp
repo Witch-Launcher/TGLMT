@@ -12,8 +12,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <tuple>
 #include <vector>
@@ -315,6 +317,66 @@ bool AppleClearNow(GLbitfield m) {
     // cũ) để draw kế tiếp không clear thêm lần nữa với mask/color cũ.
     ConsumeDeferredClear(c);
     return true;
+}
+
+// --- p6: cache viết lại index cho baseVertex ----------------------------------
+// Metal drawIndexed KHÔNG có baseVertex ⇒ TGLMT cộng baseVertex vào từng index
+// rồi ring-upload. Trước đây MỖI call đều std::vector alloc + giải mã/ghi lại
+// từng byte → gltop#1 ở p5: 6.5–11.1s/600 (~115 call/frame × 0.1ms =
+// 11–18ms CPU/frame). Giờ cache theo (ebo, off, count, bv, contentGen): hit
+// = chỉ RingUpload (memcpy). Chỉ cache khi eboId != 0 — client pointer không
+// có contentGen nên không invalidate được.
+struct IdxRewriteEnt {
+    GLuint ebo = 0;
+    size_t off = 0;
+    GLsizei count = 0;
+    GLint bv = 0;
+    size_t elem = 0;
+    uint64_t gen = 0;
+    std::vector<uint8_t> bytes;
+};
+static std::unordered_map<uint64_t, IdxRewriteEnt> gIdxRewrite;
+static size_t gIdxRewriteBytes = 0;
+static const size_t kIdxRewriteMaxBytes = 8u * 1024u * 1024u;
+static uint64_t IdxRewriteKey(GLuint ebo, size_t off, GLsizei count, GLint bv,
+                              size_t elem, uint64_t gen) {
+    uint64_t h = 0x9E3779B97F4A7C15ull;
+    auto mix = [&h](uint64_t v) { h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2); };
+    mix(ebo); mix(off); mix((uint64_t)(uint32_t)count);
+    mix((uint64_t)(uint32_t)bv); mix(elem); mix(gen);
+    return h ? h : 1;
+}
+static IdxRewriteEnt* IdxRewriteLookup(GLuint ebo, size_t off, GLsizei count, GLint bv,
+                                       size_t elem, uint64_t gen) {
+    auto it = gIdxRewrite.find(IdxRewriteKey(ebo, off, count, bv, elem, gen));
+    if (it == gIdxRewrite.end()) return nullptr;
+    IdxRewriteEnt& e = it->second;
+    // Check full key: va chạm hash chỉ được coi là miss (không bao giờ dùng sai).
+    if (e.ebo != ebo || e.off != off || e.count != count || e.bv != bv ||
+        e.elem != elem || e.gen != gen)
+        return nullptr;
+    return &e;
+}
+static void IdxRewriteStore(GLuint ebo, size_t off, GLsizei count, GLint bv,
+                            size_t elem, uint64_t gen, const std::vector<uint8_t>& b) {
+    if (gIdxRewriteBytes + b.size() > kIdxRewriteMaxBytes) {
+        gIdxRewrite.clear();
+        gIdxRewriteBytes = 0;
+    }
+    uint64_t k = IdxRewriteKey(ebo, off, count, bv, elem, gen);
+    auto it = gIdxRewrite.find(k);
+    if (it != gIdxRewrite.end()) {
+        if (gIdxRewriteBytes >= it->second.bytes.size())
+            gIdxRewriteBytes -= it->second.bytes.size();
+        else
+            gIdxRewriteBytes = 0;
+        gIdxRewrite.erase(it);
+    }
+    IdxRewriteEnt e;
+    e.ebo = ebo; e.off = off; e.count = count; e.bv = bv;
+    e.elem = elem; e.gen = gen; e.bytes = b;
+    gIdxRewriteBytes += b.size();
+    gIdxRewrite.emplace(k, std::move(e));
 }
 
 // Thực thi 1 draw GL trên Apple backend. Trả true nếu đã encode thật
@@ -1532,29 +1594,44 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
         } else {
             if (!srcBytes) return false;
-            // Viết lại indices + baseVertex vào buffer tạm (ring, 0 alloc)
-            std::vector<uint8_t> rewritten((size_t)count * elem);
-            for (GLsizei k = 0; k < count; ++k) {
-                int64_t v = (elem == 2) ? (int64_t)(srcBytes[2 * k] | (srcBytes[2 * k + 1] << 8))
-                                        : (int64_t)(srcBytes[4 * k] | (srcBytes[4 * k + 1] << 8) |
-                                                   (srcBytes[4 * k + 2] << 16) | (srcBytes[4 * k + 3] << 24));
-                int64_t nv = v + (int64_t)baseVertex;
-                if (nv < 0 || (elem == 2 && nv > 0xFFFF) || (elem == 4 && (uint64_t)nv > 0xFFFFFFFFu)) {
-                    c.errors.Record(0x0502); // index âm/tràn sau cộng baseVertex
-                    return false;
+            // p6: cache theo (ebo, off, count, bv, contentGen) → hit = bỏ hẳn
+            // vòng decode/encode từng byte; miss = viết vào thread-local scratch
+            // (hết malloc mỗi call) rồi copy vào cache.
+            const uint64_t gen = bit != c.buffers.end() ? bit->second.contentGen : 0;
+            const uint8_t* rw = nullptr;
+            static thread_local std::vector<uint8_t> scratch;
+            IdxRewriteEnt* hit = eboId ? IdxRewriteLookup(eboId, indexByteOff, count,
+                                                          baseVertex, (size_t)elem, gen)
+                                       : nullptr;
+            if (hit) {
+                rw = hit->bytes.data();
+            } else {
+                scratch.resize((size_t)count * elem);
+                for (GLsizei k = 0; k < count; ++k) {
+                    int64_t v = (elem == 2) ? (int64_t)(srcBytes[2 * k] | (srcBytes[2 * k + 1] << 8))
+                                            : (int64_t)(srcBytes[4 * k] | (srcBytes[4 * k + 1] << 8) |
+                                                       (srcBytes[4 * k + 2] << 16) | (srcBytes[4 * k + 3] << 24));
+                    int64_t nv = v + (int64_t)baseVertex;
+                    if (nv < 0 || (elem == 2 && nv > 0xFFFF) || (elem == 4 && (uint64_t)nv > 0xFFFFFFFFu)) {
+                        c.errors.Record(0x0502); // index âm/tràn sau cộng baseVertex
+                        return false;
+                    }
+                    if (elem == 2) {
+                        scratch[2 * k] = (uint8_t)nv;
+                        scratch[2 * k + 1] = (uint8_t)(nv >> 8);
+                    } else {
+                        scratch[4 * k] = (uint8_t)nv;
+                        scratch[4 * k + 1] = (uint8_t)(nv >> 8);
+                        scratch[4 * k + 2] = (uint8_t)(nv >> 16);
+                        scratch[4 * k + 3] = (uint8_t)(nv >> 24);
+                    }
                 }
-                if (elem == 2) {
-                    rewritten[2 * k] = (uint8_t)nv;
-                    rewritten[2 * k + 1] = (uint8_t)(nv >> 8);
-                } else {
-                    rewritten[4 * k] = (uint8_t)nv;
-                    rewritten[4 * k + 1] = (uint8_t)(nv >> 8);
-                    rewritten[4 * k + 2] = (uint8_t)(nv >> 16);
-                    rewritten[4 * k + 3] = (uint8_t)(nv >> 24);
-                }
+                if (eboId) IdxRewriteStore(eboId, indexByteOff, count, baseVertex,
+                                           (size_t)elem, gen, scratch);
+                rw = scratch.data();
             }
             metal::IBuffer* raw = nullptr;
-            size_t roff = RingUpload(c, rewritten.data(), rewritten.size(), raw, ibKeep);
+            size_t roff = RingUpload(c, rw, (size_t)count * elem, raw, ibKeep);
             if (raw && !ibKeep) {
                 for (size_t i = 0; i < Context::kRingFrames; ++i)
                     if (c.ringBuf[i] && c.ringBuf[i].get() == raw) { ibOwned = c.ringBuf[i]; break; }

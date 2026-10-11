@@ -15,7 +15,7 @@ static void Check(bool cond, const char* msg) {
 }
 
 static const uint32_t kDefFIF = tglmt::Context::kMaxFramesInFlight;
-static const size_t kDefPool = 3;
+static const size_t kDefPool = 4;
 static const size_t kDefBgtMB = 192;
 
 int main() {

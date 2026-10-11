@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
@@ -24,6 +25,21 @@ std::shared_ptr<IDevice> CreateAppleDevice(LogFn log);
 
 #ifdef TGLMT_APPLE_METAL
 namespace tglmt::metal {
+
+// --- p6: CB đã commit nhưng chưa chắc GPU xong --------------------------------
+// Mọi CB (batch/blit/present/rare) đi qua cùng 1 serial queue nên thứ tự đúng
+// tuyệt đối. Context::ThrottleGpu chờ ĐÚNG CB CŨ NHẤT thay vì commitAndWait:
+// commitAndWait tạo CB MỚI rồi đợi nó ⇒ phải đợi cả (gap+1) frame GPU
+// (đo p5: stall 23.1ms/frame = 45% dt, thr=9592/9600).
+// File-static có chủ đích: GL context là đơn luồng và chỉ có 1 AppleDevice
+// hoạt động; site hiếm (mipmaps/cube upload) không push → chỉ over-wait nhẹ.
+static std::deque<id<MTLCommandBuffer>> gInflightCB;
+static const size_t kInflightCap = 32;
+static void NoteInflightCB(id<MTLCommandBuffer> cb) {
+    if (!cb) return;
+    gInflightCB.push_back(cb);
+    while (gInflightCB.size() > kInflightCap) gInflightCB.pop_front();
+}
 
 static MTLPixelFormat ToMTL(PixelFormat f) {
     switch (f) {
@@ -498,6 +514,7 @@ public:
         }
         NoteCommit();
         [cb_ commit];
+        NoteInflightCB(cb_); // p6: ThrottleGpu chờ CB này thay vì drain cả pipeline
         return ok_;
     }
     void setCompletedCounter(std::atomic<uint64_t>* c) { countCompleted_ = c; }
@@ -596,6 +613,25 @@ public:
         cbCommitted_ = committed;
         cbCompleted_ = completed;
     }
+    // p6: chờ đúng CB CŨ NHẤT. Bỏ qua CB đã Completed/Error (giá 0) rồi mới
+    // waitUntilCompleted — không tạo CB mới, không drain cả pipeline.
+    size_t inflightCount() const override { return gInflightCB.size(); }
+    bool waitOldestInflight() override {
+        while (!gInflightCB.empty()) {
+            id<MTLCommandBuffer> cb = gInflightCB.front();
+            MTLCommandBufferStatus st = [cb status];
+            if (st == MTLCommandBufferStatusCompleted ||
+                st == MTLCommandBufferStatusError) {
+                gInflightCB.pop_front();
+                continue;
+            }
+            [cb waitUntilCompleted];
+            gInflightCB.pop_front();
+            return true;
+        }
+        return false;
+    }
+    void clearInflight() override { gInflightCB.clear(); }
     void commitAndWait() override {
         // Barrier thật: commit rỗng + đợi → xả hết draws NoWait trước đó (cho
         // glFinish/glReadPixels). Không ảnh hưởng throughput frame thường.
@@ -609,6 +645,7 @@ public:
         NoteCommit(cb);
         [cb commit];
         [cb waitUntilCompleted];
+        gInflightCB.clear(); // barrier: mọi CB trước đã xong
         // Chẩn đoán đen màn hình: CPU-side đếm encode đủ mà GPU không chạy gì
         // (A11) thì status ở đây lộ ra (error/timeout/device-removed...).
         if ([cb status] != MTLCommandBufferStatusCompleted && log_) {
@@ -870,6 +907,7 @@ public:
             // loading frame 3) và drawable giữ bởi CB không commit làm
             // nextDrawable chặn vô hạn → treo hình.
             [cb commit];
+            NoteInflightCB(cb); // p6
             // Tự kiểm: 3 frame đầu, đọc ngược 1 pixel giữa drawable sau khi
             // GPU xong và so với pixel nguồn. Nếu lệch (hoặc đen) thì flip
             // hỏng trên máy này → log rõ thay vì chỉ hiện "màn đen" giống
@@ -1039,6 +1077,7 @@ public:
                 }];
             NoteCommit(cb);
             [cb commit];
+            NoteInflightCB(cb); // p6
             // p5: KHÔNG waitUntilCompleted. Trước đây mỗi frame blit cuối
             // (glBlitFramebuffer → blitToTarget) đều drain toàn bộ pipeline
             // (CB này xếp sau batch vừa commit) → đo gltop#1 = 10.4–22ms/call

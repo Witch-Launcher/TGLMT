@@ -243,6 +243,13 @@ public:
                                            std::atomic<uint64_t>* completed) {
         (void)committed; (void)completed;
     }
+    // p6: CB đã commit nhưng chưa chắc GPU xong. Context dùng để chờ ĐÚNG CB CŨ
+    // NHẤT (waitOldestInflight) thay vì commitAndWait — commitAndWait tạo CB mới
+    // rồi đợi nó ⇒ phải đợi cả (gap+1) frame GPU, đo được stall 23.1ms/frame
+    // = 45% dt ở p5. Default no-op (Null backend).
+    virtual size_t inflightCount() const { return 0; }
+    virtual bool waitOldestInflight() { return false; }
+    virtual void clearInflight() {}
     virtual const std::vector<DrawTrace>& drawTrace() const = 0;
     virtual void clearTrace() = 0;
     // M5 render API — default nullptr (Null backend không GPU).
