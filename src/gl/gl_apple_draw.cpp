@@ -788,6 +788,29 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 c.applePendingClear = false;
                 c.appleClearMask = 0;
             }
+            // glInvalidateFramebuffer (spec §18.4): attachment đã bị invalidate →
+            // nội dung undefined → loadAction=DontCare (TBDR không cần đọc tile từ
+            // DRAM). Chỉ áp khi KHÔNG có pending Clear cho bit đó. Tiêu thụ cờ khi
+            // encoder sinh ra (nội dung mới do chính pass này tạo).
+            {
+                if (cl == metal::LoadOp::Load && curColorTex) {
+                    auto tit = c.textures.find(curColorTex);
+                    if (tit != c.textures.end() && tit->second.contentUndefined) {
+                        cl = metal::LoadOp::DontCare;
+                        tit->second.contentUndefined = false;
+                    }
+                }
+                if (dl == metal::LoadOp::Load && curDrawFBO) {
+                    auto fit = c.fbos.find(curDrawFBO);
+                    if (fit != c.fbos.end() && fit->second.depthTex) {
+                        auto dit = c.textures.find(fit->second.depthTex);
+                        if (dit != c.textures.end() && dit->second.contentUndefined) {
+                            dl = metal::LoadOp::DontCare;
+                            dit->second.contentUndefined = false;
+                        }
+                    }
+                }
+            }
             enc = c.device->makeRenderEncoderActions(
                 target.get(), pipe.get(),
                 metal::ClearColor{(double)c.clearColor[0], (double)c.clearColor[1],
@@ -822,6 +845,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             c.pendingDepthValid = false;
             c.pendingDepthState.reset();
             c.pendingFillValid = false;
+            c.pendingPolyOffValid = false;
             c.pendingScissorValid = false;
             c.appleStats.encodersCreated++;
             isNewEncoder = true;
@@ -976,6 +1000,37 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         // (hasDepth gate flush), depth attachment không còn ý nghĩa → xóa shadow.
         c.pendingDepthValid = false;
         c.pendingDepthState.reset();
+    }
+    // glPolygonOffset / glPolygonOffsetClamp (ARB_polygon_offset_clamp) →
+    // Metal setDepthBias:bias slopeScale:clamp. Spec §17.4.3.1:
+    //   offset = factor×DZ + r×units
+    // Metal: bias + slopeScale×maxDepthSlope
+    //   slopeScale ← factor        (cùng nhân max-depth-slope)
+    //   bias       ← units × r     (r = minimum resolvable difference)
+    //   clamp      ← clamp         (0 = không clamp theo convention Vulkan/Metal)
+    // r: depth attachment của TGLMT là Depth32Float; ULP tại z≈1 là 2^-23, còn
+    // desktop GL 24-bit fixed-point cho r = 1/(2^24−1) ≈ 5.96e-8 — cùng bậc.
+    // Dùng hằng số của desktop để MA/decals của shaderpack giữ đúng độ lệch so với
+    // GPU桌面 mà shaderpack vốn được viết cho. Chỉ encode khi POLYGON_OFFSET_FILL
+    // bật (spec: offset chỉ áp cho filled primitives).
+    {
+        const bool poOn = opts.depth && c.state.IsEnabled(0x8037 /*GL_POLYGON_OFFSET_FILL*/);
+        const float kDepthUnitR = 1.0f / 16777215.0f; // 1/(2^24−1)
+        float bias = poOn ? c.state.PolygonUnits() * kDepthUnitR : 0.0f;
+        float slope = poOn ? c.state.PolygonFactor() : 0.0f;
+        float clampV = poOn ? c.state.PolygonClamp() : 0.0f;
+        bool poSame = c.pendingPolyOffValid &&
+                      c.pendingPolyBias == bias && c.pendingPolySlope == slope &&
+                      c.pendingPolyClamp == clampV;
+        if (!poSame) {
+            enc->setDepthBias(bias, slope, clampV);
+            c.pendingPolyBias = bias;
+            c.pendingPolySlope = slope;
+            c.pendingPolyClamp = clampV;
+            c.pendingPolyOffValid = true;
+        } else {
+            c.appleStats.stateSkipped++;
+        }
     }
     // Vertex buffers theo binding + ghi nhận cho conditional-flush.
     // Giải shared_ptr ĐỘT NÀY (sau mọi flush) để bind đúng buffer vừa ghi.

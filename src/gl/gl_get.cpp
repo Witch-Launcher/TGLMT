@@ -24,7 +24,12 @@ static bool StaticLimit(GLenum p, GLint* v) {
         case 0x821B: *v = 4; break;      // MAJOR_VERSION
         case 0x821C: *v = 6; break;      // MINOR_VERSION
         case 0x821D: *v = (GLint)tglmt_num_extensions(); break; // khớp glGetStringi
+        // CONTEXT_FLAGS (0x821E): không debug bit → 0. CONTEXT_PROFILE_MASK (0x9126):
+        // TGLMT là GL 4.6 CORE (không compatibility) → bắt buộc trả CORE_PROFILE_BIT
+        // (0x1). Trả 0 là nói dối: app check mask để chọn core/compat path sẽ thấy
+        // "không phải core" rồi rơi vào nhánh compat không kiểm chứng.
         case 0x821E: *v = 0; break;      // CONTEXT_FLAGS (không debug bit)
+        case 0x9126: *v = 0x00000001; break; // CONTEXT_PROFILE_MASK → CORE_PROFILE_BIT
         case 0x0D33: *v = 8192; break;   // MAX_TEXTURE_SIZE
         case 0x8073: *v = 2048; break;   // MAX_3D_TEXTURE_SIZE
         case 0x851C: *v = 8192; break;   // MAX_CUBE_MAP_TEXTURE_SIZE
@@ -77,8 +82,30 @@ void glGetIntegerv(GLenum p, GLint* v) {
     OutI(c, p, v);
 }
 void glGetIntegeri_v(GLenum p, GLuint i, GLint* v) { OutI(Context::Current(), p, v, i); }
-void glGetInteger64v(GLenum p, GLint64* v) { GLint t=0; glGetIntegerv(p,&t); *v=t; }
-void glGetInteger64i_v(GLenum p, GLuint i, GLint64* v) { GLint t=0; glGetIntegeri_v(p,i,&t); *v=t; }
+// glGetInteger64v: HÀNH VI CŨ đọc GLint (32-bit) rồi ép sang 64-bit → mọi giá trị
+// >2^31-1 bị cắt cụt. App dùng nó cho timestamp (GL_TIMESTAMP), buffer size lớn,
+// GL_MAX_* 64-bit. Sửa: thử shadow 8-trước (SetShadow với n=8), rồi 4-trước,
+// rồi StaticLimit, rồi giá trị mặc định spec (0).
+void glGetInteger64v(GLenum p, GLint64* v) {
+    Context& c = Context::Current();
+    if (c.state.GetShadow(p, v, 8)) return;      // 8-byte shadow (timestamp/size thật)
+    GLint t = 0;
+    if (c.state.GetShadow(p, &t, 4)) { *v = t; return; }
+    if (StaticLimit(p, &t)) { *v = t; return; }
+    // Các pname 64-bit spec mà shadow/StaticLimit chưa cover.
+    if (p == 0x8E28) { // GL_TIMESTAMP (glQueryCounter đã lưu shadow 8-byte)
+        *v = 0; return;
+    }
+    *v = 0;
+}
+void glGetInteger64i_v(GLenum p, GLuint i, GLint64* v) {
+    Context& c = Context::Current();
+    if (c.state.GetShadow(p, v, 8, i)) return;
+    GLint t = 0;
+    if (c.state.GetShadow(p, &t, 4, i)) { *v = t; return; }
+    OutI(c, p, &t, i);
+    *v = t;
+}
 void glGetBooleanv(GLenum p, GLboolean* v) { GLint t=0; glGetIntegerv(p,&t); *v=t?1:0; }
 void glGetBooleani_v(GLenum p, GLuint i, GLboolean* v) { GLint t=0; glGetIntegeri_v(p,i,&t); *v=t?1:0; }
 void glGetFloatv(GLenum p, GLfloat* v) {

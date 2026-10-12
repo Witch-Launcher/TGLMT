@@ -62,12 +62,44 @@ static std::vector<uint8_t> ExpandUByteIndices(const uint8_t* src, GLsizei count
     return out;
 }
 
+// ARB_pipeline_statistics_query — đếm software (xem Context::PipeStats).
+// Số primitive submit cho Metal tính theo mode + count, đúng cách driver desktop
+// tính GL_PRIMITIVES_SUBMITTED_ARB (input primitives, TRƯỚC expansion của GS).
+// Bảng theo spec §10.1 (primitive assembly): strip/fan đếm n-2 (hoặc n-1),
+// adjacency n/4 & n/6, LOOP khép kín.
+static uint64_t PrimCount(GLenum mode, GLsizei count) {
+    switch (mode) {
+        case 0x0000: return (uint64_t)count;                             // POINTS
+        case 0x0001: return (uint64_t)count / 2;                         // LINES
+        case 0x0002:                                                     // LINE_LOOP
+            if (count < 2) return 0;
+            return (count == 2) ? 1u : (uint64_t)count;                  // n>=3: n cạnh khép
+        case 0x0003: return count >= 2 ? (uint64_t)count - 1 : 0;        // LINE_STRIP
+        case 0x0004: return (uint64_t)count / 3;                         // TRIANGLES
+        case 0x0005:                                                     // TRIANGLE_STRIP
+        case 0x0006: return count >= 3 ? (uint64_t)count - 2 : 0;        // TRIANGLE_FAN
+        case 0x000A: return (uint64_t)count / 4;                         // LINES_ADJACENCY
+        case 0x000B: return count >= 2 ? (uint64_t)count - 2 : 0;        // LINE_STRIP_ADJACENCY
+        case 0x000D: return (uint64_t)count / 6;                         // TRIANGLES_ADJACENCY
+        case 0x000E: return count >= 3 ? (uint64_t)count - 2 : 0;        // TRI_STRIP_ADJACENCY
+        case 0x8E42: return (uint64_t)count;                             // PATCHES
+        default: return (uint64_t)count / 3;
+    }
+}
+
 static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, GLsizei inst = 1,
                      GLint baseVertex = 0, GLuint baseInstance = 0, GLint first = 0) {
     Context& c = Context::Current();
     if (count < 0 || inst < 1) { c.errors.Record(0x0501); return; }
     if (count == 0) return; // no-op đúng spec (không encode draw-0)
+    // Software pipeline-statistics (spec §18.4.2): đếm draw hợp lệ đã submit
+    // (qua gate count/inst). VS invocations = input vertices — CHƯA nhân expansion
+    // của GS vì GS chưa có đường thật (P6); số này đúng tuyệt đối với mọi
+    // program không có GS, tức là toàn bộ Minecraft + Sodium.
     auto prim = ToPrim(mode, c);
+    c.pipeStats.vertsSubmitted += (uint64_t)count * (uint64_t)inst;
+    c.pipeStats.primsSubmitted += PrimCount(mode, count);
+    c.pipeStats.vsInvocations += (uint64_t)count * (uint64_t)inst;
     // Deferred full: Apple path bỏ trace-encoder thừa (1 GL → 1 Metal thay vì 2 encoders).
     // Null backend giữ trace để unit test so khớp hành vi.
     bool isApple = c.device && !c.device->isNull();

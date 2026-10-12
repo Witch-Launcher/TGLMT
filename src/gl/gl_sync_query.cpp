@@ -53,18 +53,49 @@ void glDeleteQueries(GLsizei n, const GLuint* ids) {
     for (GLsizei i = 0; i < n; ++i) c.queries.erase(ids[i]);
 }
 GLboolean glIsQuery(GLuint id) { return Context::Current().registry.Is(ObjectKind::Query, id) ? 1 : 0; }
+
+// ARB_pipeline_statistics_query — đọc software counter (Context::PipeStats).
+// Target theo extension spec (ARB_pipeline_statistics_query.txt New Tokens):
+//   VERTICES_SUBMITTED_ARB=0x82EE, PRIMITIVES_SUBMITTED_ARB=0x82EF,
+//   VERTEX_SHADER_INVOCATIONS_ARB=0x82F0, TESS_CONTROL_SHADER_PATCHES_ARB=0x82F1,
+//   TESS_EVALUATION_SHADER_INVOCATIONS_ARB=0x82F2,
+//   GEOMETRY_SHADER_INVOCATIONS=0x887F, GEOMETRY_SHADER_PRIMITIVES_EMITTED_ARB=0x82F3,
+//   FRAGMENT_SHADER_INVOCATIONS_ARB=0x82F4, COMPUTE_SHADER_INVOCATIONS_ARB=0x82F5,
+//   CLIPPING_INPUT_PRIMITIVES_ARB=0x82F6, CLIPPING_OUTPUT_PRIMITIVES_ARB=0x82F7.
+// Trả false nếu target không phải statistics (fallback 0 + ready).
+static bool PipeStatOf(const Context::PipeStats& s, GLenum t, GLuint64* out) {
+    switch (t) {
+        case 0x82EE: *out = s.vertsSubmitted; return true;      // VERTICES_SUBMITTED_ARB
+        case 0x82EF: *out = s.primsSubmitted; return true;      // PRIMITIVES_SUBMITTED_ARB
+        case 0x82F0: *out = s.vsInvocations; return true;       // VERTEX_SHADER_INVOCATIONS_ARB
+        case 0x887F: *out = s.gsInvocations; return true;       // GEOMETRY_SHADER_INVOCATIONS
+        case 0x82F3: *out = s.gsPrimsWritten; return true;      // GEOM_SHADER_PRIMITIVES_EMITTED_ARB
+        case 0x82F4: *out = s.fsInvocations; return true;       // FRAGMENT_SHADER_INVOCATIONS_ARB
+        case 0x82F5: *out = s.csInvocations; return true;       // COMPUTE_SHADER_INVOCATIONS_ARB
+        // TESS_CONTROL_SHADER_PATCHES / TESS_EVALUATION_SHADER_INVOCATIONS /
+        // CLIPPING_* : chưa có counter thật (P6 tess) → 0, không quảng cáo ext.
+        case 0x82F1: case 0x82F2: case 0x82F6: case 0x82F7:
+            *out = 0; return true;
+        default: return false;
+    }
+}
+
 void glBeginQuery(GLenum t, GLuint id) {
     Context& c = Context::Current();
     auto it = c.queries.find(id);
     if (it == c.queries.end()) { c.errors.Record(0x0502); return; }
     it->second.target = t; it->second.active = true; it->second.ready = false;
+    GLuint64 v = 0;
+    if (PipeStatOf(c.pipeStats, t, &v)) it->second.pipeSnapshot = v;
 }
 void glEndQuery(GLenum t) {
     Context& c = Context::Current();
     for (auto& [id, q] : c.queries) if (q.target == t && q.active) {
         q.active = false; q.ready = true;
         // visibilityResultMode / GPUStartTime-EndTime → Null: result 0 + ready
-        q.result = 0;
+        GLuint64 v = 0;
+        if (PipeStatOf(c.pipeStats, t, &v)) q.result = v - q.pipeSnapshot; // delta
+        else q.result = 0;
     }
 }
 void glBeginQueryIndexed(GLenum t, GLuint idx, GLuint id) { (void)idx; glBeginQuery(t, id); }
@@ -77,6 +108,10 @@ void glQueryCounter(GLuint id, GLenum t) {
     // Metal GPUStartTime/GPUEndTime — Null: timestamp CPU nano
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     it->second.result = (GLuint64)now; it->second.ready = true;
+    // shadow 8-byte cho glGetInteger64v(GL_TIMESTAMP) — trước đây chỉ lưu trong
+    // QueryObject → glGetInteger64v phải đọc QueryObject mới ra giá trị thật.
+    if (t == 0x8E28 /*GL_TIMESTAMP*/)
+        c.state.SetShadow(0x8E28, &it->second.result, 8);
 }
 void glGetQueryObjectiv(GLuint id, GLenum p, GLint* v) {
     Context& c = Context::Current();

@@ -1260,11 +1260,49 @@ void glTextureStorage2D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h) {
 void glTextureStorage3D(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g; }
 void glTextureStorage2DMultisample(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLboolean g) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g; }
 void glTextureStorage3DMultisample(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g, GLboolean h) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h; }
-void glTexStorage1D(GLenum a, GLsizei b, GLenum d, GLsizei e) { (void)a;(void)b;(void)d;(void)e; }
-void glTexStorage2D(GLenum a, GLsizei b, GLenum d, GLsizei e, GLsizei f) { (void)a;(void)b;(void)d;(void)e;(void)f; }
-void glTexStorage3D(GLenum a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g; }
-void glTexStorage2DMultisample(GLenum a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLboolean g) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g; }
-void glTexStorage3DMultisample(GLenum a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g, GLboolean h) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h; }
+// glTexStorage* (non-DSA, GL 4.2/4.3): resolve texture đang bind trên active unit
+// rồi gọi DSA thật. HÀNH VI CŨ LÀ NO-OP → texture không bao giờ có GPU allocation
+// → glTexSubImage2D chỉ ghi shadow → draw ra MTLTexture nil/đen. Sodium dùng
+// immutable storage (chuẩn 4.5+) nên mọi texture Sodium đều rơi vào nhánh này.
+// Route sang DSA để có GPU allocation thật (glTextureStorage1D/2D đã làm thật).
+static bool BoundTexIdForStorage(Context& c, GLenum target, GLuint* out) {
+    GLuint unit = c.state.ActiveTexture();
+    GLuint id = c.state.BoundTexture(unit, target);
+    if (!id) { c.errors.Record(0x0502); return false; }
+    if (!c.textures.count(id)) { c.errors.Record(0x0502); return false; }
+    *out = id;
+    return true;
+}
+void glTexStorage1D(GLenum a, GLsizei b, GLenum d, GLsizei e) {
+    Context& c = Context::Current();
+    GLuint t;
+    if (!BoundTexIdForStorage(c, a, &t)) return;
+    glTextureStorage1D(t, b, d, e);
+}
+void glTexStorage2D(GLenum a, GLsizei b, GLenum d, GLsizei e, GLsizei f) {
+    Context& c = Context::Current();
+    GLuint t;
+    if (!BoundTexIdForStorage(c, a, &t)) return;
+    glTextureStorage2D(t, b, d, e, f);
+}
+void glTexStorage3D(GLenum a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g) {
+    Context& c = Context::Current();
+    GLuint t;
+    if (!BoundTexIdForStorage(c, a, &t)) return;
+    glTextureStorage3D(t, b, d, e, f, g);
+}
+void glTexStorage2DMultisample(GLenum a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLboolean g) {
+    Context& c = Context::Current();
+    GLuint t;
+    if (!BoundTexIdForStorage(c, a, &t)) return;
+    glTextureStorage2DMultisample(t, b, d, e, f, g);
+}
+void glTexStorage3DMultisample(GLenum a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g, GLboolean h) {
+    Context& c = Context::Current();
+    GLuint t;
+    if (!BoundTexIdForStorage(c, a, &t)) return;
+    glTextureStorage3DMultisample(t, b, d, e, f, g, h);
+}
 void glTextureSubImage1D(GLuint a, GLint b, GLint c_, GLsizei d, GLenum e, GLenum f, const void* g) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g; }
 void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void* p) {
     Context& c = Context::Current();

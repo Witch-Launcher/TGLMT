@@ -142,6 +142,11 @@ struct TextureObject {
     // (~2–6ms + churn RAM). Bỏ qua khi buffer + ifmt + contentGen không đổi.
     GLuint buftexBuf = 0;
     uint64_t buftexGen = 0;
+    // glInvalidateFramebuffer (spec §18.4): nội dung attachment trở nên KHÔNG XÁC
+    // ĐỊNH. TBDR (A11) chỉ được trả DONT_CARE khi load ở pass kế tiếp — đó là
+    // thắng lợi băng thông thật, không phải no-op. Cờ được TIÊU THỤ khi encoder
+    // dùng attachment này được tạo (nội dung mới do chính pass đó sinh ra).
+    bool contentUndefined = false;
 };
 
 // P1: pixel có đọc lại được từ GPU (buffer Shared) không? Nếu KHÔNG → shadow CPU
@@ -252,7 +257,16 @@ struct FramebufferObject {
     std::vector<GLenum> drawBuffers = {0x8CE0}; // GL_COLOR_ATTACHMENT0
 };
 
-struct QueryObject { GLuint id = 0; GLenum target = 0; GLuint64 result = 0; bool active = false, ready = true; };
+struct QueryObject {
+    GLuint id = 0;
+    GLenum target = 0;
+    GLuint64 result = 0;
+    bool active = false, ready = true;
+    // ARB_pipeline_statistics_query: counter software là tích luỹ từ đầu context,
+    // glBeginQuery snapshot lại, glEndQuery tính delta (đúng spec §18.4.2 —
+    // kết quả là số lần gọi GIỮA glBegin/glEnd, không phải tổng cả session).
+    GLuint64 pipeSnapshot = 0;
+};
 struct SyncObject { GLuint id = 0; bool signaled = false; };
 // Buffer range cho glBindBufferBase/Range (UBO index 0x8A11, SSBO 0x90D2).
 // Vanilla chunk uploader + Sodium persistent mapping dùng đường này.
@@ -407,6 +421,23 @@ public:
     };
     AppleStats appleStats;
 
+    // ARB_pipeline_statistics_query — software counter (spec §18.4.2).
+    // Metal KHÔNG có hardware counter cho số lần gọi shader; TGLMT đếm chính xác
+    // những gì tính được từ state draw (vertex/primitive/VS-invocation = count×inst
+    // và số primitive theo mode). Fragment-shader-invocation KHÔNG tính được →
+    // extension không được quảng cáo (xem gl_error_string_debug.cpp) cho tới khi
+    // đường counter GPU (P5) chạy thật. Đếm luôn, query bất cứ lúc nào cũng trả
+    // đúng phần tính được.
+    struct PipeStats {
+        uint64_t vertsSubmitted = 0;   // GL_VERTICES_SUBMITTED_ARB
+        uint64_t primsSubmitted = 0;   // GL_PRIMITIVES_SUBMITTED_ARB
+        uint64_t vsInvocations = 0;    // GL_VERTEX_SHADER_INVOCATIONS_ARB
+        uint64_t gsInvocations = 0;    // GL_GEOMETRY_SHADER_INVOCATIONS
+        uint64_t gsPrimsWritten = 0;   // GL_GEOMETRY_SHADER_PRIMITIVES_WRITTEN_ARB
+        uint64_t fsInvocations = 0;    // GL_FRAGMENT_SHADER_INVOCATIONS_ARB (0: không đo được)
+        uint64_t csInvocations = 0;    // GL_COMPUTE_SHADER_INVOCATIONS
+    } pipeStats;
+
     // RAII đo thời gian CPU của một pha: khai báo biến ở đầu hàm, huỷ tự cộng
     // thời gian vào AppleStats::*field. Không nhánh return nào bị sót.
     struct PhaseTimer {
@@ -446,6 +477,12 @@ public:
     std::shared_ptr<metal::IDepthStencilState> pendingDepthState;
     bool pendingFillValid = false;
     bool pendingFillLines = false;
+    // glPolygonOffset / glPolygonOffsetClamp (ARB_polygon_offset_clamp) → Metal
+    // setDepthBias:slopeScale:clamp:. Đúng spec: bias = units × r (r = minimum
+    // resolvable difference), slopeScale = factor, clamp = clamp (0 = không clamp,
+    // theo convention của Vulkan/Metal).
+    bool pendingPolyOffValid = false;
+    float pendingPolyBias = 0.0f, pendingPolySlope = 0.0f, pendingPolyClamp = 0.0f;
     bool pendingScissorValid = false;
     bool pendingScissorEnabled = false;
     metal::ScissorRect pendingScissor{0,0,0,0};

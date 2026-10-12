@@ -190,6 +190,12 @@ public:
     virtual void setTriangleFillModeLines(bool lines) { (void)lines; } // glPolygonMode LINE
     virtual void setScissorRect(const ScissorRect& r) { (void)r; }     // glScissor
     virtual void setDepthStencilState(IDepthStencilState* s) { (void)s; } // glDepthFunc/Mask
+    // glPolygonOffset / glPolygonOffsetClamp (ARB_polygon_offset_clamp):
+    // Metal setDepthBias:slopeScale:clamp: — bias là hằng số, slopeScale nhân
+    // max-depth-slope, clamp là giá trị lớn nhất bias được phép (0 = không clamp).
+    virtual void setDepthBias(float bias, float slopeScale, float clamp) {
+        (void)bias; (void)slopeScale; (void)clamp;
+    }
     virtual void setFragmentTexture(ITexture* t, uint32_t idx) { (void)t; (void)idx; }
     virtual void setFragmentSamplerState(ISamplerState* s, uint32_t idx) { (void)s; (void)idx; }
     virtual void setVertexTexture(ITexture* t, uint32_t idx) { (void)t; (void)idx; }

@@ -87,7 +87,10 @@ void glStencilMaskSeparate(GLenum face, GLuint m) {
 void glCullFace(GLenum m) { Context::Current().state.SetCullFace(m); }
 void glFrontFace(GLenum m) { Context::Current().state.SetFrontFace(m); }
 void glPolygonMode(GLenum f, GLenum m) { Context::Current().state.SetPolygonMode(f, m); }
-void glPolygonOffset(GLfloat f, GLfloat u) { Context::Current().state.SetPolygonOffset(f, u, 1e30f); }
+// glPolygonOffset không có tham số clamp: theo convention Vulkan/Metal, clamp==0
+// nghĩa là KHÔNG clamp bias. (Trước đây truyền 1e30f → giá trị rác trong shadow
+// glGet + không bao giờ tới Metal vì depth bias chẳng được encode.)
+void glPolygonOffset(GLfloat f, GLfloat u) { Context::Current().state.SetPolygonOffset(f, u, 0.0f); }
 void glPolygonOffsetClamp(GLfloat f, GLfloat u, GLfloat c) { Context::Current().state.SetPolygonOffset(f, u, c); }
 void glLineWidth(GLfloat w) { Context::Current().state.SetLineWidth(w); }
 void glPointSize(GLfloat s) { Context::Current().state.SetShadow(0x0B11, &s, 4); }

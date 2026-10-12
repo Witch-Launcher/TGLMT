@@ -99,7 +99,6 @@ public:
     void SetFrontFace(GLenum mode);
     GLenum CullMode() const { return cullMode_; }
     GLenum FrontFace() const { return frontFace_; }
-    void SetPolygonOffset(float factor, float units, float clamp);
     void SetLineWidth(float w) { if (lineWidth_==w) return; lineWidth_=w; ++stateSeq_; }
     void SetViewport(int idx, float x, float y, float w, float h) {
         if (idx>=0&&idx<kMaxViewports) {
@@ -123,6 +122,12 @@ public:
     GLenum ClipDepth() const { return clipDepth_; }
     void SetPolygonMode(GLenum face, GLenum mode);
     GLenum PolygonMode() const { return polyMode_; } // FRONT_AND_BACK dùng chung (M5b)
+    // glPolygonOffset / glPolygonOffsetClamp → Metal setDepthBias (xem
+    // StateTracker::SetPolygonOffset). Clamp 0 = không clamp (quy ước Vulkan/Metal).
+    void SetPolygonOffset(float factor, float units, float clamp);
+    float PolygonFactor() const { return polyFactor_; }
+    float PolygonUnits() const { return polyUnits_; }
+    float PolygonClamp() const { return polyClamp_; }
     // Scissor (glScissor*): Metal setScissorRect — trước đây no-op, giờ lưu thật.
     void SetScissor(int x, int y, int w, int h) {
         if (scissor_.x==x&&scissor_.y==y&&scissor_.w==w&&scissor_.h==h) return;

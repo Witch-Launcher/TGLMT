@@ -4,6 +4,7 @@
 #include "tglmt/Context.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 using namespace tglmt;
@@ -401,8 +402,16 @@ void glGetAttachedShaders(GLuint p, GLsizei m, GLsizei* c_, GLuint* s) {
     if (c_) *c_ = k;
 }
 void glProgramBinary(GLuint p, GLenum f, const void* b, GLsizei l) { (void)p;(void)f;(void)b;(void)l; }
+// glGetProgramBinary (spec §7.2): app LWJGL có thể gọi thử để cache shader. TGLMT
+// không serialize được state Metal → không có binary để trả. HÀNH VI CŨ GÂY UB:
+// để nguyên output của caller (giá trị rác) và length=0. ĐÚNG: ghi 0 vào mọi
+// output để caller không đọc rác. Không INVALID_OPERATION — caller spec-callback
+// sẽ treat length=0 là "không có binary" (đúng nghĩa).
 void glGetProgramBinary(GLuint p, GLsizei n, GLsizei* l, GLenum* f, void* b) {
-    (void)p;(void)n;(void)l;(void)f;(void)b;
+    (void)p;
+    if (l) *l = 0;
+    if (f) *f = 0;
+    if (b && n > 0) memset(b, 0, (size_t)n);
 }
 void glValidateProgram(GLuint p) { (void)p; }
 void glActiveShaderProgram(GLuint pl, GLuint pr) { (void)pl;(void)pr; }

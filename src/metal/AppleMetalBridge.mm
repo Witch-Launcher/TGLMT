@@ -464,6 +464,13 @@ public:
         if (!ok_) return;
         [enc_ setBlendColorRed:r green:g blue:b alpha:a];
     }
+    void setDepthBias(float bias, float slopeScale, float clamp) override {
+        // ARB_polygon_offset_clamp: Metal không có "depth bias clamp" ở descriptor,
+        // nó nằm ngay trên encoder. Clamp == 0 theo convention Vulkan/Metal nghĩa là
+        // KHÔNG clamp (khác GL: glPolygonOffset không có tham số clamp).
+        if (!ok_) return;
+        [enc_ setDepthBias:bias slopeScale:slopeScale clamp:clamp];
+    }
     bool endAndCommitNoWait() override {
         if (!enc_ || !cb_) return false;
         [enc_ endEncoding];

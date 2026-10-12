@@ -94,14 +94,60 @@ void glTransformFeedbackBufferRange(GLuint x, GLuint b, GLuint buf, GLintptr o, 
     (void)o; (void)s;
     glTransformFeedbackBufferBase(x, b, buf); // offset/size cho M5b capture kernel
 }
+// Đổi GLSL type string (converter đã parse) sang (GLenum GL type, số component).
+// Spec §7.1 glGetTransformFeedbackVarying: type là GL type của varying, size là
+// SỐ COMPONENT (không phải số phần tử mảng — mảng handled riêng qua arraySize).
+// Bảng cover float/vecN/int/ivecN/uint/uvecN (99% varying của MC + Sodium +
+// shaderpack Iris). Ma trận / types khác fallback (1, FLOAT) + ghi chú.
+static bool GlslTypeToGL(const std::string& t, GLenum* glType, GLsizei* comps) {
+    if (t == "float")  { *glType = 0x1406; *comps = 1; return true; } // GL_FLOAT
+    if (t == "vec2")   { *glType = 0x1406; *comps = 2; return true; }
+    if (t == "vec3")   { *glType = 0x1406; *comps = 3; return true; }
+    if (t == "vec4")   { *glType = 0x1406; *comps = 4; return true; }
+    if (t == "int")    { *glType = 0x1404; *comps = 1; return true; } // GL_INT
+    if (t == "ivec2")  { *glType = 0x1404; *comps = 2; return true; }
+    if (t == "ivec3")  { *glType = 0x1404; *comps = 3; return true; }
+    if (t == "ivec4")  { *glType = 0x1404; *comps = 4; return true; }
+    if (t == "uint")   { *glType = 0x1405; *comps = 1; return true; } // GL_UNSIGNED_INT
+    if (t == "uvec2")  { *glType = 0x1405; *comps = 2; return true; }
+    if (t == "uvec3")  { *glType = 0x1405; *comps = 3; return true; }
+    if (t == "uvec4")  { *glType = 0x1405; *comps = 4; return true; }
+    return false; // mat*/double*/array → caller fallback
+}
 void glGetTransformFeedbackVarying(GLuint p, GLuint i, GLsizei n, GLsizei* l, GLsizei* s, GLenum* t, GLchar* name) {
     Context& c = Context::Current();
     auto it = c.programs.find(p);
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
     if (i >= it->second.xfbVaryings.size()) { c.errors.Record(0x0501); return; }
     const std::string& nm = it->second.xfbVaryings[i];
-    if (s) *s = 1;
-    if (t) *t = 0x1406; // FLOAT (ghi nhận: M5b suy type thật từ shader)
+    // Reflection THẬT từ vertex shader đã compile (GLSLConvertResult::outputs chứa
+    // glslType + name). Hành vi cũ hardcode (GL_FLOAT, 1) → app tính sai độ rộng
+    // varying rồi ghi XFB lệch offset. Tìm theo tên trong mọi attached VS.
+    GLenum glType = 0x1406;
+    GLsizei comps = 1;
+    bool found = false;
+    for (GLuint sid : it->second.shaders) {
+        auto sit = c.shaders.find(sid);
+        if (sit == c.shaders.end()) continue;
+        if (sit->second.type != 0x8B31 /*VERTEX_SHADER*/) continue;
+        for (auto& v : sit->second.conv.outputs) {
+            if (v.name == nm) {
+                if (!GlslTypeToGL(v.glslType, &glType, &comps)) {
+                    // mat*/types khác: size = số cột (mat4 → 4), type = FLOAT_MAT4.
+                    if (v.glslType == "mat4")       { glType = 0x140C; comps = 4; } // FLOAT_MAT4
+                    else if (v.glslType == "mat3")  { glType = 0x140B; comps = 3; } // FLOAT_MAT3
+                    else if (v.glslType == "mat2")  { glType = 0x140A; comps = 2; } // FLOAT_MAT2
+                    else                            { glType = 0x1406; comps = 1; } // fallback
+                }
+                if (v.arraySize > 0) comps = comps * v.arraySize; // mảng: tổng component
+                found = true;
+                break;
+            }
+        }
+        if (found) break;
+    }
+    if (s) *s = comps;
+    if (t) *t = glType;
     size_t k = std::min((size_t)(n > 0 ? n - 1 : 0), nm.size());
     if (name && n > 0) { memcpy(name, nm.c_str(), k); name[k] = 0; }
     if (l) *l = (GLsizei)k;

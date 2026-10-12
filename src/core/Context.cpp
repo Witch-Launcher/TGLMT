@@ -41,6 +41,18 @@ static void LogSelfSlide() {
 Context::Context(const std::string& backend) : backendName(backend) {
     LogSelfSlide();
     opt = LoadOptions();
+    // KHR_no_error (ROADMAP M8): extension này KHÔNG có hàm mới — nó là context flag
+    // mà app chọn lúc tạo context (EGL_CONTEXT_NO_ERROR_KHR). TGLMT không có EGL
+    // nên đường "bật" đúng duy nhất là env (launcher setenv trước khi nạp dylib).
+    // Khi bật: validation bị bỏ + hàng đợi lỗi được xoá (spec cho phép UB).
+    // Mặc định TẮT — bật mù sẽ che mất bug thật.
+    if (const char* e = std::getenv("TGLMT_NO_ERROR")) {
+        if (e[0] == '1' || e[0] == 'y' || e[0] == 'Y' || e[0] == 't' || e[0] == 'T') {
+            errors.SetNoError(true);
+            CtxLog("KHR_no_error ENABLED (TGLMT_NO_ERROR): validation OFF, glGetError "
+                   "luôn trả NO_ERROR");
+        }
+    }
     device = metal::CreateDevice(backend, CtxLog);
     if (!device) { // vd apple backend nhưng máy không có MTLDevice → fallback Null, ghi rõ
         backendName = backend + "(fallback:null,no-MTL-device)";

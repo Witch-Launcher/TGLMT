@@ -21,7 +21,7 @@ const GLubyte* glGetString(GLenum n) {
         default: Context::Current().errors.Record(0x0500); return kEmpty;
     }
 }
-// Danh sách extension: CỐ TÌNH giữ nguyên 6 mục cũ.
+// Danh sách extension: CỐ TÌNH giữ nguyên các mục cũ.
 // KHÔNG thêm GL_ARB_direct_state_access / GL_ARB_vertex_attrib_binding /
 // GL_ARB_buffer_storage dù TGLMT "làm được": LWJGL dựng Capabilities từ
 // ĐÚNG danh sách string này, nên thêm vào sẽ đảo quyết định của Minecraft:
@@ -31,10 +31,18 @@ const GLubyte* glGetString(GLenum n) {
 // Cả 3 đường đó chưa được kiểm chứng trên TGLMT và làm MC treo/mất dữ liệu
 // (đo được: chỉ 12 frame rồi đứng, uboMap 0 → 48). Danh sách phải khớp với
 // đường nào đã test, không phải đường nào "lý thuyết" hỗ trợ được.
+//
+// ĐÃ BỎ GL_ARB_pipeline_statistics_query (P0.3): extension này bắt buộc mọi
+// target query phải trả kết quả thật, trong đó có GL_FRAGMENT_SHADER_INVOCATIONS_
+// ARB — Metal không có counter nào đếm được số fragment shader invocation. TGLMT
+// vẫn ĐẾM thật các target tính được (vertex/primitive/VS-invocation, xem
+// Context::PipeStats) và glBeginQuery vẫn nhận các target đó, nhưng KHÔNG quảng
+// cáo extension cho tới khi đường counter GPU (P5) chạy thật. Quảng cáo extension
+// rồi trả 0 cho fragment invocations = nói dối, đúng thứ hạng "No-op accepted"
+// mà vocabulary docs cấm.
 static const char* const kExts[] = {
     "GL_ARB_gl_spirv",
     "GL_ARB_indirect_parameters",
-    "GL_ARB_pipeline_statistics_query",
     "GL_ARB_polygon_offset_clamp",
     "GL_ARB_texture_filter_anisotropic",
     "GL_KHR_no_error",

@@ -537,7 +537,62 @@ void glBlitNamedFramebuffer(GLuint r, GLuint d, GLint s0, GLint s1, GLint s2, GL
     c.state.BindFBO(0x8CA8, savedR);
     c.state.BindFBO(0x8CA9, savedD);
 }
-void glInvalidateFramebuffer(GLenum t, GLsizei n, const GLenum* a) { (void)t;(void)n;(void)a; }
+// glInvalidateFramebuffer (spec §18.4): nội dung attachment được chỉ định trở nên
+// KHÔNG XÁC ĐỊNH. Metal không có "invalidate" — nhưng TBDR (A11) thắng băng thông
+// thật nếu pass kế tiếp load attachment đó bằng MTLLoadActionDontCare thay vì Load
+// (không cần đọc tile từ DRAM). TGLMT đánh dấu TextureObject::contentUndefined;
+// AppleDrawGL tiêu thụ cờ khi tạo encoder kế tiếp và chọn DontCare. Chỉ đánh dấu
+// đúng attachment liệt kê trong `attachments` (COLOR_ATTACHMENTi / DEPTH / STENCIL),
+// KHÔNG đốt cả target — app invalidate depth chứ không invalidate color là bình thường.
+// Cờ được tiêu thụ khi encoder dùng attachment đó sinh ra → nội dung mới do chính
+// pass đó sinh, không còn undefined.
+static void MarkInvalidate(Context& c, GLuint fboId, GLenum attachment) {
+    if (!fboId) return; // default FB (swapchain): không đánh dấu (target khác nhau mỗi frame)
+    auto fit = c.fbos.find(fboId);
+    if (fit == c.fbos.end()) return;
+    auto mark = [&](GLuint texId) {
+        if (!texId) return;
+        auto tit = c.textures.find(texId);
+        if (tit != c.textures.end()) tit->second.contentUndefined = true;
+    };
+    if (attachment == 0x8CE0 /*COLOR_ATTACHMENT0*/ || attachment == 0x8CE1 ||
+        attachment == 0x8CE2 || attachment == 0x8CE3 || attachment == 0x8CE4 ||
+        attachment == 0x8CE5 || attachment == 0x8CE6 || attachment == 0x8CE7) {
+        // colorTex dùng index dense 0..7 (xem glFramebufferTexture2D: colorTex[0]
+        // cho ATTACHMENT0, colorTex[a-0x8CE0] cho ATTACHMENTn) — KHÔNG dùng enum
+        // 0x8CE0 làm key.
+        GLuint idx = attachment - 0x8CE0;
+        auto ait = fit->second.colorTex.find(idx);
+        if (ait != fit->second.colorTex.end()) mark(ait->second);
+    } else if (attachment == 0x8D00 /*DEPTH_ATTACHMENT*/) {
+        mark(fit->second.depthTex);
+    } else if (attachment == 0x8D20 /*STENCIL_ATTACHMENT*/) {
+        mark(fit->second.stencilTex);
+        mark(fit->second.depthStencilTex);
+    } else if (attachment == 0x821A /*DEPTH_STENCIL_ATTACHMENT*/) {
+        mark(fit->second.depthStencilTex);
+        mark(fit->second.depthTex);
+    } else if (attachment == 0x1902 /*DEPTH*/ || attachment == 0x1903 /*STENCIL*/) {
+        mark(fit->second.depthTex);
+    } else if (attachment == 0x84F9 /*COLOR*/) {
+        for (auto& [k, v] : fit->second.colorTex) mark(v);
+    }
+}
+void glInvalidateFramebuffer(GLenum t, GLsizei n, const GLenum* a) {
+    Context& c = Context::Current();
+    // Spec §18.4: invalidate áp cho framebuffer target `t` đang bind (DRAW /
+    // READ / FRAMEWORK). Resolve binding theo t.
+    GLuint fbo = 0;
+    if (t == 0x8CA8 /*READ_FRAMEBUFFER*/) fbo = c.state.BoundReadFBO();
+    else if (t == 0x8CA9 /*DRAW_FRAMEBUFFER*/) fbo = c.state.BoundDrawFBO();
+    else fbo = c.state.BoundDrawFBO(); // GL_FRAMEBUFFER
+    // Nếu target này đang có encoder mở → flush để invalidate có thứ tự đúng
+    // (content trước invalidate là của draw đã encode, content sau là undefined).
+    if (c.pendingEncoder && c.pendingDrawFBO == fbo) c.FlushPendingEncoder();
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    if (n == 0 || !a) return; // không liệt kê gì = không invalidate gì
+    for (GLsizei i = 0; i < n; ++i) MarkInvalidate(c, fbo, a[i]);
+}
 void glInvalidateSubFramebuffer(GLenum t, GLsizei n, const GLenum* a, GLint x, GLint y, GLsizei w, GLsizei h) { (void)t;(void)n;(void)a;(void)x;(void)y;(void)w;(void)h; }
 void glInvalidateNamedFramebufferData(GLuint f, GLsizei n, const GLenum* a) { (void)f;(void)n;(void)a; }
 void glInvalidateNamedFramebufferSubData(GLuint f, GLsizei n, const GLenum* a, GLint x, GLint y, GLsizei w, GLsizei h) { (void)f;(void)n;(void)a;(void)x;(void)y;(void)w;(void)h; }

@@ -54,7 +54,19 @@ void StateTracker::SetDepthRange(double n, double f, GLuint idx) {
 // SetLineWidth/SetViewport/SetDepthRangef đã inline trong header (shadowing).
 void StateTracker::SetCullFace(GLenum m){ if (cullMode_==m) return; cullMode_=m; dirtyPipeline_=true; ++stateSeq_; SetShadow(0x0B45,&m,4); }
 void StateTracker::SetFrontFace(GLenum m){ if (frontFace_==m) return; frontFace_=m; dirtyPipeline_=true; ++stateSeq_; SetShadow(0x0B46,&m,4); }
-void StateTracker::SetPolygonOffset(float f, float u, float c){ if (polyFactor_==f&&polyUnits_==u&&polyClamp_==c) return; polyFactor_=f; polyUnits_=u; polyClamp_=c; dirtyPipeline_=true; ++stateSeq_; }
+void StateTracker::SetPolygonOffset(float f, float u, float c){
+    if (polyFactor_==f&&polyUnits_==u&&polyClamp_==c) return;
+    polyFactor_=f; polyUnits_=u; polyClamp_=c;
+    dirtyPipeline_=true; ++stateSeq_;
+    // shadow cho glGet(GL_POLYGON_OFFSET_{FACTOR,UNITS,CLAMP}) — spec yêu cầu trả
+    // lại đúng giá trị đã set. Đối chiếu gl.xml: FACTOR=0x8038, UNITS=0x2A00,
+    // CLAMP=0x8E1B (ARB_polygon_offset_clamp). LƯU Ý: 0x8037 là POLYGON_OFFSET_FILL
+    // (enable cap), KHÔNG phải clamp.
+    float fv[3] = {f, u, c};
+    SetShadow(0x8038, &fv[0], 4); // POLYGON_OFFSET_FACTOR
+    SetShadow(0x2A00, &fv[1], 4); // POLYGON_OFFSET_UNITS
+    SetShadow(0x8E1B, &fv[2], 4); // POLYGON_OFFSET_CLAMP
+}
 // SetLineWidth/SetViewport/SetDepthRangef đã inline trong header (shadowing).
 void StateTracker::SetClipControl(GLenum o, GLenum d){ if (clipOrigin_==o&&clipDepth_==d) return; clipOrigin_=o; clipDepth_=d; dirtyPipeline_=true; ++stateSeq_; }
 void StateTracker::SetPolygonMode(GLenum face, GLenum mode){
