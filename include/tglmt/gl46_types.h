@@ -1392,4 +1392,31 @@ constexpr GLenum GL_WRITE_ONLY = 0x88B9; // GL_VERSION_1_5
 constexpr GLenum GL_XOR = 0x1506; // GL_VERSION_1_0
 constexpr GLenum GL_ZERO = 0; // GL_VERSION_1_0
 constexpr GLenum GL_ZERO_TO_ONE = 0x935F; // GL_VERSION_4_5
+constexpr GLenum GL_TEXTURE_SWIZZLE_R_EXT = 0x8E42; // GL_EXT_texture_swizzle
+constexpr GLenum GL_TEXTURE_SWIZZLE_G_EXT = 0x8E43; // GL_EXT_texture_swizzle
+constexpr GLenum GL_TEXTURE_SWIZZLE_B_EXT = 0x8E44; // GL_EXT_texture_swizzle
+constexpr GLenum GL_TEXTURE_SWIZZLE_A_EXT = 0x8E45; // GL_EXT_texture_swizzle
+constexpr GLenum GL_TEXTURE_SWIZZLE_RGBA_EXT = 0x8E46; // GL_EXT_texture_swizzle
+// GL_ARB_internalformat_query2 — VIEW_CLASS_* (compressed format class) + SRGB_DECODE.
+constexpr GLenum GL_VIEW_CLASS_EAC_R11 = 0x9383; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_EAC_RG11 = 0x9384; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ETC2_RGB = 0x9385; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ETC2_RGBA = 0x9386; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ETC2_EAC_RGBA = 0x9387; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_4x4_RGBA = 0x9388; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_5x4_RGBA = 0x9389; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_5x5_RGBA = 0x938A; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_6x5_RGBA = 0x938B; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_6x6_RGBA = 0x938C; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_8x5_RGBA = 0x938D; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_8x6_RGBA = 0x938E; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_8x8_RGBA = 0x938F; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_10x5_RGBA = 0x9390; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_10x6_RGBA = 0x9391; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_10x8_RGBA = 0x9392; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_10x10_RGBA = 0x9393; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_12x10_RGBA = 0x9394; // GL_ARB_internalformat_query2
+constexpr GLenum GL_VIEW_CLASS_ASTC_12x12_RGBA = 0x9395; // GL_ARB_internalformat_query2
+constexpr GLenum GL_SRGB_DECODE_ARB = 0x8299; // GL_ARB_internalformat_query2
+
 } // namespace tglmt

@@ -904,7 +904,18 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     if (!tp) return;
     tp->params[pname] = param;
 }
-void glTexParameteriv(GLenum t, GLenum p, const GLint* v) { glTexParameteri(t, p, v[0]); }
+void glTexParameteriv(GLenum t, GLenum p, const GLint* v) {
+    // GL_TEXTURE_SWIZZLE_RGBA (0x8E46) nhận mảng 4 phần tử [R,G,B,A] → tách
+    // store từng GL_TEXTURE_SWIZZLE_{R,G,B,A}. Các pnames khác giữ v[0].
+    if (p == 0x8E46 && v) {
+        glTexParameteri(t, 0x8E42, v[0]); // SWIZZLE_R
+        glTexParameteri(t, 0x8E43, v[1]); // SWIZZLE_G
+        glTexParameteri(t, 0x8E44, v[2]); // SWIZZLE_B
+        glTexParameteri(t, 0x8E45, v[3]); // SWIZZLE_A
+        return;
+    }
+    glTexParameteri(t, p, v[0]);
+}
 void glTexParameterIiv(GLenum t, GLenum p, const GLint* v) { glTexParameteri(t, p, v[0]); }
 void glTexParameterIuiv(GLenum t, GLenum p, const GLuint* v) { glTexParameteri(t, p, (GLint)v[0]); }
 void glTextureParameterf(GLuint t, GLenum p, GLfloat v) {

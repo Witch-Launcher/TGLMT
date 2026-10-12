@@ -50,8 +50,7 @@ struct SamplerDesc {
     // cho MỌI sampler không mipmap và set BASE/MAX_LEVEL=0 cho mọi texture —
     // bỏ qua thì Metal tự clamp 0..1000 (đọc ngoài atlas, mip sai).
     float lodMin = 0.0f;
-    float lodMax = 1000.0f;
-};
+    float lodMax = 1000.0f;};
 struct ScissorRect {
     uint32_t x = 0;
     uint32_t y = 0;
@@ -208,6 +207,9 @@ public:
     virtual void setCullMode(bool enabled, uint32_t cullModeGL, uint32_t frontFaceGL) {
         (void)enabled; (void)cullModeGL; (void)frontFaceGL;
     }
+    // GL_DEPTH_CLAMP (ARB_depth_clamp): clamp=true → MTLDepthClipModeClamp
+    // (depth vượt near/far KHÔNG bị clip); false → clip (mặc định GL).
+    virtual void setDepthClipMode(bool clamp) { (void)clamp; }
     // Blend color (glBlendColor) cho factors CONSTANT_*.
     virtual void setBlendColor(float r, float g, float b, float a) {
         (void)r; (void)g; (void)b; (void)a;

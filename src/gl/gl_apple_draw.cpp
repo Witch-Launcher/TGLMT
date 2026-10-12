@@ -947,6 +947,17 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             c.appleStats.stateSkipped++;
         }
     }
+    {   // GL_DEPTH_CLAMP (ARB_depth_clamp): clamp=true → MTLDepthClipModeClamp.
+        bool depthClamp = c.state.IsEnabled(0x864F);
+        bool dcSame = c.pendingDepthClampValid && c.pendingDepthClamp == depthClamp;
+        if (!dcSame) {
+            enc->setDepthClipMode(depthClamp);
+            c.pendingDepthClamp = depthClamp;
+            c.pendingDepthClampValid = true;
+        } else {
+            c.appleStats.stateSkipped++;
+        }
+    }
     {
         bool wantLines = (c.state.PolygonMode() == 0x1B01);
         bool fillSame = c.pendingFillValid && c.pendingFillLines == wantLines;

@@ -460,6 +460,11 @@ public:
         [enc_ setFrontFacingWinding:(frontFaceGL == 0x0900) ? MTLWindingClockwise
                                                            : MTLWindingCounterClockwise];
     }
+    void setDepthClipMode(bool clamp) override {
+        // GL_DEPTH_CLAMP (ARB_depth_clamp): clamp → depth vượt near/far không bị clip.
+        if (!ok_) return;
+        [enc_ setDepthClipMode:clamp ? MTLDepthClipModeClamp : MTLDepthClipModeClip];
+    }
     void setBlendColor(float r, float g, float b, float a) override {
         if (!ok_) return;
         [enc_ setBlendColorRed:r green:g blue:b alpha:a];

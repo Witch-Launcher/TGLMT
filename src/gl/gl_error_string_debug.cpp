@@ -114,11 +114,6 @@ static const char* const kExts[] = {
     // P3 batch-3: enum-only exts — behavior = core đã verify thật, enums đã define.
     // (bind map generic → COPY_READ/WRITE OK; indirect đọc buffer OK; map/UBO/
     // sampler/texStorage/VAO core OK; UNSIGNED_INT index handle OK.)
-    // LOẠI enum-ext behavior chưa implement: depth_clamp/seamless/sRGB/stencil-
-    // texturing (enable không handle), texture_swizzle (không apply), rgtc (không
-    // decode), occlusion ANY_SAMPLES (không handle), internalformat_query (trả 0),
-    // vertex_attrib_64bit (double không render), clear_texture/get_program_binary
-    // (no-op), half_float_vertex (HALF_FLOAT không handle) → nói dối nếu advertise.
     "GL_ARB_copy_buffer",
     "GL_ARB_draw_indirect",
     "GL_ARB_map_buffer_range",
@@ -127,6 +122,19 @@ static const char* const kExts[] = {
     "GL_ARB_uniform_buffer_object",
     "GL_ARB_vertex_array_object",
     "GL_OES_element_index_uint",
+    // P3 batch-4: behavior ĐÃ implement (xem gl_get_extra/gl_apple_draw):
+    //  - internalformat_query(_2): glGetInternalformativ trả data THẬT (format
+    //    supported/renderable/component size), 0 cho pname chưa implement.
+    //  - depth_clamp: glEnable(0x864F) → encoder setDepthClipMode Clamp/Clip.
+    "GL_ARB_internalformat_query",
+    "GL_ARB_internalformat_query2",
+    "GL_ARB_depth_clamp",
+    // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
+    //  texture_swizzle (cần texture-view swizzle, sampler không swizzle trên Metal),
+    //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
+    //  stencil_texturing, rgtc (không decode), occlusion ANY_SAMPLES (cần GPU
+    //  query), clear_texture (no-op), get_program_binary (no-op),
+    //  vertex_attrib_64bit/half_float_vertex (không render) → P4/P7.
 };
 static const GLuint kNumExts = (GLuint)(sizeof(kExts) / sizeof(kExts[0]));
 const GLubyte* glGetStringi(GLenum n, GLuint i) {

@@ -469,6 +469,9 @@ public:
     bool pendingCullValid = false;
     bool pendingCullEnabled = false;
     uint32_t pendingCullMode = 0, pendingFrontFace = 0;
+    // GL_DEPTH_CLAMP (ARB_depth_clamp) → MTLDepthClipModeClamp/Clip.
+    bool pendingDepthClampValid = false;
+    bool pendingDepthClamp = false;
     bool pendingBlendValid = false;
     float pendingBlend[4] = {0,0,0,0};
     bool pendingDepthValid = false;

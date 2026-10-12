@@ -116,6 +116,7 @@ void Context::FlushPendingEncoder() {
         pendingColorTex = 0xFFFFFFFFu;
         pendingViewportValid = false;
         pendingCullValid = false;
+        pendingDepthClampValid = false;
         pendingBlendValid = false;
         pendingDepthValid = false;
         pendingDepthState.reset();
@@ -137,6 +138,7 @@ void Context::FlushPendingEncoder() {
     pendingColorTex = 0xFFFFFFFFu;
     pendingViewportValid = false;
     pendingCullValid = false;
+    pendingDepthClampValid = false;
     pendingBlendValid = false;
     pendingDepthValid = false;
     pendingDepthState.reset();

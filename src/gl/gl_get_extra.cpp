@@ -410,8 +410,59 @@ void glGetActiveSubroutineUniformName(GLuint p, GLenum st, GLuint ix, GLsizei n,
 void glGetActiveSubroutineName(GLuint p, GLenum st, GLuint ix, GLsizei n, GLsizei* l, GLchar* name) { (void)p;(void)st;(void)ix; if(l)*l=0; if(name&&n>0)name[0]=0; }
 void glGetUniformSubroutineuiv(GLenum st, GLint l, GLuint* v) { (void)st;(void)l; *v=0; }
 void glGetUniformIndices(GLuint p, GLsizei n, const GLchar* const* names, GLuint* ix) { (void)p; for(GLsizei i=0;i<n;++i) ix[i]=0xFFFFFFFFu; (void)names; }
-void glGetInternalformativ(GLenum t, GLenum inf, GLenum p, GLsizei n, GLint* v) { (void)t;(void)inf;(void)p; for(GLsizei i=0;i<n;++i)v[i]=0; }
-void glGetInternalformati64v(GLenum t, GLenum inf, GLenum p, GLsizei n, GLint64* v) { (void)t;(void)inf;(void)p; for(GLsizei i=0;i<n;++i)v[i]=0; }
+// Trả internalformat có HỖ TRỢ THẬT (đúng ToMetalFormat switch — KHÔNG fallback
+// RGBA8). Trả false cho format lạ = trung thực (chúng ta không tạo đúng format).
+static bool IfmtSupported(GLenum f) {
+    switch (f) {
+        case 0x8058: // RGBA8
+        case 0x8C43: // SRGB8_ALPHA8
+        case 0x8229: // R8
+        case 0x822B: // RG8
+        case 0x822E: // R32F
+        case 0x8235: // R32I
+        case 0x8236: // R32UI
+        case 0x81A5: // DEPTH_COMPONENT16
+        case 0x81A6: // DEPTH_COMPONENT24
+        case 0x81A7: // DEPTH_COMPONENT32
+        case 0x8CAC: // DEPTH_COMPONENT32F
+        case 0x88F0: // DEPTH24_STENCIL8
+            return true;
+        default: return false;
+    }
+}
+static bool IfmtColor(GLenum f) {
+    return f==0x8058||f==0x8C43||f==0x8229||f==0x822B||f==0x822E||f==0x8235||f==0x8236;
+}
+static bool IfmtDepth(GLenum f) {
+    return f==0x81A5||f==0x81A6||f==0x81A7||f==0x8CAC||f==0x88F0;
+}
+static void InternalFormatQuery(GLenum inf, GLenum p, GLint64* v, GLsizei n) {
+    auto set = [&](GLint64 x) { for (GLsizei i=0;i<n;++i) v[i]=x; };
+    switch (p) {
+        case 0x826F: set(IfmtSupported(inf)); break;            // INTERNALFORMAT_SUPPORTED
+        case 0x8270: set(inf); break;                           // INTERNALFORMAT_PREFERRED
+        case 0x9380: set(1); break;                             // NUM_SAMPLE_COUNTS (không MSAA query)
+        case 0x8286: set(IfmtColor(inf)); break;                // COLOR_RENDERABLE
+        case 0x8287: set(IfmtDepth(inf)); break;                // DEPTH_RENDERABLE
+        // Component sizes — trả đúng cho format map thật, 0 cho lạ.
+        case 0x8274: set(inf==0x8058||inf==0x8C43?8:0); break;  // RED_SIZE
+        case 0x8275: set(inf==0x8058||inf==0x8C43||inf==0x822B?8:0); break; // GREEN_SIZE
+        case 0x8276: set(inf==0x8058||inf==0x8C43||inf==0x822B?8:0); break; // BLUE_SIZE
+        case 0x8277: set(inf==0x8058||inf==0x8C43?8:inf==0x8C43?8:0); break; // ALPHA_SIZE
+        case 0x8273: set(IfmtSupported(inf)?1:0); break;        // DEPTH_BITS-ish (trung thực)
+        default: set(0); break; // chưa implement pnames khác → 0 (không bịa)
+    }
+}
+void glGetInternalformativ(GLenum t, GLenum inf, GLenum p, GLsizei n, GLint* v) {
+    (void)t;
+    GLint64 tmp[64]; GLsizei m = n > 64 ? 64 : n;
+    InternalFormatQuery(inf, p, tmp, m);
+    for (GLsizei i=0;i<n;++i) v[i]=(GLint)(i<m?tmp[i]:0);
+}
+void glGetInternalformati64v(GLenum t, GLenum inf, GLenum p, GLsizei n, GLint64* v) {
+    (void)t;
+    InternalFormatQuery(inf, p, v, n);
+}
 void glGetMultisamplefv(GLenum p, GLuint i, GLfloat* v) { (void)p;(void)i; *v=0; }
 void glGetShaderPrecisionFormat(GLenum st, GLenum p, GLint* r, GLint* v) { (void)st;(void)p; *r=0; *v=0; }
 } // namespace tglmt::gl
