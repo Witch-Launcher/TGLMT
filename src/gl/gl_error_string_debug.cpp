@@ -111,6 +111,22 @@ static const char* const kExts[] = {
     "GL_OES_texture_storage_multisample_2d_array",
     "GL_OES_texture_view",
     "GL_OES_vertex_array_object",
+    // P3 batch-3: enum-only exts — behavior = core đã verify thật, enums đã define.
+    // (bind map generic → COPY_READ/WRITE OK; indirect đọc buffer OK; map/UBO/
+    // sampler/texStorage/VAO core OK; UNSIGNED_INT index handle OK.)
+    // LOẠI enum-ext behavior chưa implement: depth_clamp/seamless/sRGB/stencil-
+    // texturing (enable không handle), texture_swizzle (không apply), rgtc (không
+    // decode), occlusion ANY_SAMPLES (không handle), internalformat_query (trả 0),
+    // vertex_attrib_64bit (double không render), clear_texture/get_program_binary
+    // (no-op), half_float_vertex (HALF_FLOAT không handle) → nói dối nếu advertise.
+    "GL_ARB_copy_buffer",
+    "GL_ARB_draw_indirect",
+    "GL_ARB_map_buffer_range",
+    "GL_ARB_sampler_objects",
+    "GL_ARB_texture_storage",
+    "GL_ARB_uniform_buffer_object",
+    "GL_ARB_vertex_array_object",
+    "GL_OES_element_index_uint",
 };
 static const GLuint kNumExts = (GLuint)(sizeof(kExts) / sizeof(kExts[0]));
 const GLubyte* glGetStringi(GLenum n, GLuint i) {
