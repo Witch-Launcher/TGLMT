@@ -139,25 +139,36 @@ def main():
     if check:
         return 0
 
-    # sinh file
+    # sinh file — extern "C" (như c_exports) để LWJGL dlsym("glXxxARB") thấy.
+    # Đây là lý do P3 cần file này: 5 ext đang advertise nhưng hàm ARB/EXT của
+    # chúng KHÔNG có symbol (glSpecializeShaderARB=0) → code check ext rồi gọi
+    # sẽ null. Sinh extern "C" forward làm alias resolvable.
     seen = set()
     with open(OUT, "w") as fp:
         fp.write("// AUTO-GENERATED bởi tools/gen_ext_aliases.py — KHÔNG SỬA TAY.\n")
-        fp.write("// Alias extension functions: forward 1:1 sang core-đã-implement.\n")
+        fp.write("// Alias extension functions: extern \"C\" forward 1:1 sang core-đã-implement.\n")
         fp.write("// Chỉ sinh khi signature gl.xml TRÙNG core-base (trung thực, không đoán).\n")
-        fp.write('#include "tglmt/gl46.h"\nnamespace tglmt::gl {\n')
-        # forward decls cho core base (đã có trong gl46.h, nhưng an toàn)
+        fp.write('// LWJGL dlsym("glXxxARB") thấy symbol này khi extension được advertise.\n')
+        fp.write('#include "tglmt/gl46.h"\n')
+        fp.write("using namespace tglmt;\n")
+        fp.write("namespace tglmt { namespace gl {\n")
+        # forward decl cho mọi hàm core-base (an toàn dù đã có trong gl46.h)
+        for f, b, _ in forward:
+            ret, params = sig[b]
+            args = ", ".join(f"{t} a{i}" for i, t in enumerate(params)) if params else "void"
+            fp.write(f"{ret} {b}({args});\n")
+        fp.write("} }\n\n")
+        fp.write('extern "C" {\n')
         for f, b, _ in forward:
             if f in seen:
                 continue
             seen.add(f)
             ret, params = sig[f]
-            # dùng tên biến a0..aN để forward
             args = ", ".join(f"{t} a{i}" for i, t in enumerate(params)) if params else "void"
             call = ", ".join(f"a{i}" for i in range(len(params)))
-            fp.write(f"{ret} {f}({args}) {{ {b}({call}); }}\n")
-        fp.write("} // namespace tglmt::gl\n")
-    print(f"\nWrote {OUT}: {len(seen)} alias functions.")
+            fp.write(f"{ret} {f}({args}) {{ tglmt::gl::{b}({call}); }}\n")
+        fp.write("} // extern \"C\"\n")
+    print(f"\nWrote {OUT}: {len(seen)} alias functions (extern \"C\").")
     return 0
 
 

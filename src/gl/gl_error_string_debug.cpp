@@ -46,6 +46,19 @@ static const char* const kExts[] = {
     "GL_ARB_polygon_offset_clamp",
     "GL_ARB_texture_filter_anisotropic",
     "GL_KHR_no_error",
+    // P3 batch-1: alias-ready — mọi hàm = alias của core-đã-implement
+    // (glXxxARB forward 1:1 sang glXxx, xem gl_ext_aliases_gen.cpp).
+    // Mirror core-promoted → MC dùng core path, không flip sang path chưa verify.
+    "GL_ARB_color_buffer_float",
+    "GL_ARB_draw_buffers",
+    "GL_ARB_draw_instanced",
+    "GL_ARB_instanced_arrays",
+    "GL_ARB_multisample",
+    "GL_ARB_occlusion_query",
+    "GL_ARB_point_parameters",
+    "GL_ARB_sample_shading",
+    "GL_ARB_texture_buffer_object",
+    "GL_ARB_vertex_buffer_object",
 };
 static const GLuint kNumExts = (GLuint)(sizeof(kExts) / sizeof(kExts[0]));
 const GLubyte* glGetStringi(GLenum n, GLuint i) {
