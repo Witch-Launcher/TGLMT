@@ -1301,6 +1301,15 @@ public:
                 case 4: return MTLVertexFormatHalf4;
                 default: break;
             }
+        } else if (type == 0x8368 && size == 4) { // GL_INT_2_10_10_10_REV
+            // Packed 4×10-bit signed trong 1 uint32. Metal chỉ có bản Normalized
+            // (không có non-normalized) → combo norm trả format, else Invalid.
+            if (norm) return MTLVertexFormatInt1010102Normalized;
+        } else if (type == 0x8367 && size == 4) { // GL_UNSIGNED_INT_2_10_10_10_REV
+            if (norm) return MTLVertexFormatUInt1010102Normalized;
+        } else if (type == 0x80E1 && size == 4) { // GL_BGRA (vertex_array_bgra)
+            // glVertexAttribPointer type=GL_BGRA → 4×ubyte theo thứ tự BGRA.
+            if (norm) return MTLVertexFormatUChar4Normalized_BGRA;
         } else if (type == 0x1405) { // UNSIGNED_INT
             switch (size) {
                 case 1: return MTLVertexFormatUInt;

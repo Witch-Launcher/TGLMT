@@ -353,6 +353,8 @@ void glGetVertexAttribiv(GLuint i, GLenum p, GLint* v) {
     if (p == 0x8622) *v = a.enabled ? 1 : 0;      // VERTEX_ATTRIB_ARRAY_ENABLED
     else if (p == 0x8623) *v = a.size;            // ..._SIZE
     else if (p == 0x8625) *v = a.stride;          // ..._STRIDE
+    else if (p == 0x8626) *v = (GLint)a.type;     // ..._ARRAY_TYPE
+    else if (p == 0x886A) *v = a.normalized ? 1 : 0;   // ..._ARRAY_NORMALIZED
     else if (p == 0x88FD) *v = (GLint)a.divisor;  // ..._DIVISOR
     else if (p == 0x82EB) *v = (GLint)a.binding;  // VERTEX_ATTRIB_BINDING
     else if (p == 0x82EC) *v = (GLint)a.relativeOffset; // VERTEX_ATTRIB_RELATIVE_OFFSET

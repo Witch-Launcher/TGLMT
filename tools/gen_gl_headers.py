@@ -55,6 +55,17 @@ def parse():
                             v = "/*alias*/"
                         if nm not in core_enums:
                             core_enums[nm] = (v, n)
+    # enums của extension: name -> ext name (chỉ emit cho ext đang advertise,
+    # xem advertised_exts() — nếu không, generator sẽ xoá mất ext enum mỗi lần gen).
+    ext_enums = {}
+    for exts in r.findall("extensions"):
+        for ext in exts.findall("extension"):
+            en = ext.get("name")
+            for req in ext.findall("require"):
+                for e in req.findall("enum"):
+                    nm = e.get("name")
+                    if nm and nm not in ext_enums:
+                        ext_enums[nm] = (value_of.get(nm, ""), en)
     # commands core 4.6
     proto_of = {}
     for cmds in r.findall("commands"):
@@ -82,7 +93,13 @@ def parse():
             for c in rm.findall("command"):
                 removed.add(c.get("name"))
     core46 = {k: v for k, v in core_cmds.items() if k not in removed}
-    return types, core_enums, proto_of, core46
+    return types, core_enums, proto_of, core46, ext_enums
+
+def advertised_exts():
+    """Đọc kExts[] trong gl_error_string_debug.cpp — nguồn sự thật ext đang advertise."""
+    src = (ROOT / "src/gl/gl_error_string_debug.cpp").read_text()
+    m = re.search(r"kExts\[\]\s*=\s*\{(.*?)\};", src, re.S)
+    return set(re.findall(r'"(GL_[A-Za-z0-9_]+)"', m.group(1))) if m else set()
 
 C_TYPE_MAP = {
     "GLenum": "uint32_t", "GLboolean": "uint8_t", "GLbitfield": "uint32_t",
@@ -96,9 +113,13 @@ C_TYPE_MAP = {
 
 def main():
     check = "--check" in sys.argv
-    types, enums, proto_of, core46 = parse()
+    types, enums, proto_of, core46, ext_enums = parse()
     print(f"[gen] gl.xml core46 functions: {len(core46)}")
     print(f"[gen] core46 enums: {len(enums)}")
+    adv = advertised_exts()
+    ext_extra = sorted((nm, ext_enums[nm][0], ext_enums[nm][1]) for nm in ext_enums
+                       if ext_enums[nm][1] in adv and nm not in enums)
+    print(f"[gen] advertised exts: {len(adv)}; ext enums thêm: {len(ext_extra)}")
     # phát hiện lệch mapping
     mp = (ROOT / "docs/mapping/GL46_to_Metal.md").read_text()
     missing = [k for k in core46 if k not in mp]
@@ -130,6 +151,11 @@ def main():
                 continue
             # chỉ emit value số hoặc biểu thức hex
             f.write(f"constexpr GLenum {name} = {val}; // {intro}\n")
+        # enums của ext đang advertise (bền qua mỗi lần regenerate; nếu thiếu,
+        # ext_coverage --kexts sẽ fail vì ext advertise mà enum chưa define).
+        for nm, val, en in ext_extra:
+            if val and val != "/*alias*/":
+                f.write(f"constexpr GLenum {nm} = {val}; // {en}\n")
         f.write("} // namespace tglmt\n")
     # --- gl46.h ---
     with open(OUT_H, "w") as f:
@@ -143,6 +169,9 @@ def main():
             f.write(f"{ret} {name}({plist}); // introduced {core46[name]}\n")
         f.write("} // namespace gl\n")
         f.write("int GetCoreFunctionCount(); // = 698\n")
+        # glGetStringi liệt kê KN extensions; glGet(GL_NUM_EXTENSIONS) phải khớp
+        # tuyệt đối (định nghĩa trong gl_error_string_debug.cpp).
+        f.write("GLuint tglmt_num_extensions();\n")
         f.write("} // namespace tglmt\n")
     # --- dispatch gen ---
     with open(OUT_DISPATCH, "w") as f:

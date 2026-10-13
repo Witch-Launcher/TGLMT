@@ -129,12 +129,25 @@ static const char* const kExts[] = {
     "GL_ARB_internalformat_query",
     "GL_ARB_internalformat_query2",
     "GL_ARB_depth_clamp",
+    // P3 batch-5: vertex-format behaviors — ToMTLVertexFormat map THẬT
+    // (xem AppleMetalBridge.mm):
+    //  - half_float_vertex: HALF_FLOAT (0x140B) → MTLVertexFormatHalf2/3/4,
+    //    GLTypeSize stride=2. (Trước bị loại nhầm do grep sai chỗ.)
+    //  - vertex_type_2_10_10_10_rev: INT_2_10_10_10_REV/UINT_2_10_10_10_REV
+    //    (size=4, norm) → MTLVertexFormatInt/UInt1010102Normalized.
+    //  - vertex_array_bgra (+EXT): type=GL_BGRA size=4 norm →
+    //    MTLVertexFormatUChar4Normalized_BGRA.
+    "GL_ARB_half_float_vertex",
+    "GL_ARB_vertex_type_2_10_10_10_rev",
+    "GL_ARB_vertex_array_bgra",
+    "GL_EXT_vertex_array_bgra",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  texture_swizzle (cần texture-view swizzle, sampler không swizzle trên Metal),
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
-    //  stencil_texturing, rgtc (không decode), occlusion ANY_SAMPLES (cần GPU
-    //  query), clear_texture (no-op), get_program_binary (no-op),
-    //  vertex_attrib_64bit/half_float_vertex (không render) → P4/P7.
+    //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),
+    //  occlusion ANY_SAMPLES (cần GPU query), clear_texture (no-op),
+    //  get_program_binary (no-op), vertex_attrib_64bit (Double không render),
+    //  vertex_type_10f_11f_11f_rev (Metal không có Float101111) → P4/P7.
 };
 static const GLuint kNumExts = (GLuint)(sizeof(kExts) / sizeof(kExts[0]));
 const GLubyte* glGetStringi(GLenum n, GLuint i) {
