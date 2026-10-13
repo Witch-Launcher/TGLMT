@@ -53,6 +53,10 @@ static const char* kBatch9[] = {
     "GL_ARB_robustness", "GL_KHR_robustness", "GL_EXT_robustness",
     "GL_ATI_separate_stencil",
 };
+static const char* kBatch10[] = {
+    "GL_ARB_occlusion_query2", "GL_ARB_multi_bind",
+    "GL_ARB_map_buffer_alignment", "GL_ARB_explicit_uniform_location",
+};
 // Alias OES chỉ có symbol extern "C" (gl_ext_aliases_gen), không khai báo gl46.h.
 extern "C" void glProgramBinaryOES(GLuint p, GLenum f, const void* d, GLint l);
 extern "C" void glGetProgramBinaryOES(GLuint p, GLsizei b, GLsizei* w, GLenum* f, void* d);
@@ -477,6 +481,36 @@ int main() {
         Check(avail == 1, "occlusion QUERY_RESULT_AVAILABLE = 1");
         Check(res == 0 || res == 1, "occlusion result boolean 0/1");
         glDeleteQueries(1, &occl);
+
+        // --- 10. Batch-10: enum-only ext có behavior thật.
+        {
+            GLint n10 = 0;
+            glGetIntegerv(0x821D, &n10);
+            for (const char* want : kBatch10) {
+                bool found = false;
+                for (GLint i = 0; i < n10 && !found; ++i) {
+                    const char* e = (const char*)glGetStringi(0x1F03, (GLuint)i);
+                    if (e && !strcmp(e, want)) found = true;
+                }
+                Check(found, want);
+            }
+            // MIN_MAP_BUFFER_ALIGNMENT = 16 (base map至少 16-aligned).
+            GLint mma = 0;
+            glGetIntegerv(0x90BC /*MIN_MAP_BUFFER_ALIGNMENT*/, &mma);
+            Check(mma == 16, "MIN_MAP_BUFFER_ALIGNMENT = 16");
+            // MAX_UNIFORM_LOCATIONS = 1024.
+            GLint mul = 0;
+            glGetIntegerv(0x826E /*MAX_UNIFORM_LOCATIONS*/, &mul);
+            Check(mul == 1024, "MAX_UNIFORM_LOCATIONS = 1024");
+            // multi_bind: glBindBuffersBase không lỗi.
+            while (glGetError() != 0) {}
+            GLuint mbb[2] = {0, 0};
+            glGenBuffers(2, mbb);
+            glBindBuffersBase(0x8A11 /*UNIFORM_BUFFER*/, 0, 2, mbb);
+            Check(glGetError() == 0, "glBindBuffersBase không lỗi");
+            glDeleteBuffers(2, mbb);
+            // occlusion_query2: ANY_SAMPLES_PASSED đã test ở 9e (cùng target).
+        }
     }
 
     if (gFails) return 1;

@@ -97,6 +97,12 @@ void glGetIntegerv(GLenum p, GLint* v) {
         // GL_ARB_get_program_binary: TGLMT có 1 format duy nhất (GLSL gốc).
         case 0x87FE: *v = 1; return;                               // NUM_PROGRAM_BINARY_FORMATS
         case 0x87FD: *v = (GLint)0x54474D54; return;               // PROGRAM_BINARY_FORMATS[0] = 'TGMT'
+        // GL_ARB_map_buffer_alignment: base map至少 16-aligned (std::vector/malloc;
+        // MTLBuffer contents page-aligned). App đảm bảo offset chia hết → pointer aligned.
+        case 0x90BC: *v = 16; return;                              // MIN_MAP_BUFFER_ALIGNMENT
+        // GL_ARB_explicit_uniform_location: GL 4.3 đòi tối thiểu 1024; TGLMT
+        // dùng map → mọi location < 1024 hoạt động.
+        case 0x826E: *v = 1024; return;                            // MAX_UNIFORM_LOCATIONS
         case 0x1F02: break;
         default: break;
     }

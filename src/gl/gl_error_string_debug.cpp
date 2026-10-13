@@ -192,6 +192,15 @@ static const char* const kExts[] = {
     //  - glStencilFuncSeparateATI/glStencilOpSeparateATI → core separate stencil
     //    (StencilFront/Back state thật, đã render được).
     "GL_ATI_separate_stencil",
+    // ===== P3 batch-10: enum-only ext có behavior thật. =====
+    //  - occlusion_query2: ANY_SAMPLES_PASSED ĐÃ implement (visibility result)
+    "GL_ARB_occlusion_query2",
+    //  - multi_bind: glBindBuffersBase/Range loop glBindBufferBase thật
+    "GL_ARB_multi_bind",
+    //  - map_buffer_alignment: glGet(MIN_MAP_BUFFER_ALIGNMENT)=16 thật
+    "GL_ARB_map_buffer_alignment",
+    //  - explicit_uniform_location: glGet(MAX_UNIFORM_LOCATIONS)=1024 thật
+    "GL_ARB_explicit_uniform_location",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),
