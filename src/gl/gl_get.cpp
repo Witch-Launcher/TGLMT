@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 using namespace tglmt;
+namespace tglmt::gl { GLint ProgramBinaryLength(GLuint p); } // gl_program.cpp
 
 static void OutI(Context& c, GLenum p, GLint* v, GLuint idx = 0) {
     GLint t = 0;
@@ -75,6 +76,9 @@ void glGetIntegerv(GLenum p, GLint* v) {
         case 0x0BE2: *v = c.state.IsEnabled(0x0BE2) ? 1 : 0; return; // BLEND
         case 0x0B44: *v = c.state.IsEnabled(0x0B44) ? 1 : 0; return; // CULL_FACE
         case 0x0D3A: v[0] = 8192; v[1] = 8192; return;             // MAX_VIEWPORT_DIMS (2 giá trị)
+        // GL_ARB_get_program_binary: TGLMT có 1 format duy nhất (GLSL gốc).
+        case 0x87FE: *v = 1; return;                               // NUM_PROGRAM_BINARY_FORMATS
+        case 0x87FD: *v = (GLint)0x54474D54; return;               // PROGRAM_BINARY_FORMATS[0] = 'TGMT'
         case 0x1F02: break;
         default: break;
     }
@@ -194,6 +198,9 @@ void glGetProgramiv(GLuint p, GLenum q, GLint* v) {
     // không chạy → Globals KHÔNG BAO GIỜ ĐƯỢC BIND cho prog ngoài pipeline
     // desc (terrain/blur) → CameraBlockPos rác, MenuBlurRadius rác.
     else if (q == 0x8A36) *v = (GLint)it->second.uniformBlocks.size();
+    // GL_ARB_get_program_binary
+    else if (q == 0x8741) *v = gl::ProgramBinaryLength(p); // PROGRAM_BINARY_LENGTH
+    else if (q == 0x87FE) *v = 1; // NUM_PROGRAM_BINARY_FORMATS (context-level)
     else *v = 0;
 }
 void glGetProgramInfoLog(GLuint p, GLsizei n, GLsizei* l, GLchar* log) {

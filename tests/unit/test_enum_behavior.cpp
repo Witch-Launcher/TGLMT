@@ -1,4 +1,4 @@
-// test_enum_behavior.cpp — Unit: P3 batch-4 + batch-5 enum-ext behaviors.
+// test_enum_behavior.cpp — Unit: P3 batch-4..7 enum-ext behaviors.
 //
 // Quy tắc vàng: ext advertise ⇒ test pass. Verify behavior THẬT:
 //  1. internalformat_query: glGetInternalformativ trả INTERNALFORMAT_SUPPORTED
@@ -9,11 +9,14 @@
 //     và store type (ToMTLVertexFormat map Metal thật).
 //  4. batch-6 EXT_texture_swizzle: mặc định identity, round-trip qua
 //     glTexParameteriv(0x8E46) + component lẻ (glTexParameteri) hiện trong mảng.
+//  5. batch-7 GL_ARB_get_program_binary: serialize GLSL gốc → glProgramBinary
+//     parse + relink → LINK_STATUS=1, LENGTH ổn định; format lạ → INVALID_ENUM.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 using namespace tglmt;
 using namespace tglmt::gl;
@@ -32,6 +35,7 @@ static const char* kBatch5[] = {
     "GL_ARB_vertex_array_bgra", "GL_EXT_vertex_array_bgra",
 };
 static const char* kBatch6[] = {"GL_EXT_texture_swizzle"};
+static const char* kBatch7[] = {"GL_ARB_get_program_binary"};
 
 int main() {
     Context ctx("null");
@@ -157,6 +161,59 @@ int main() {
     }
     glBindTexture(GL_TEXTURE_2D, 0);
     glDeleteTextures(1, &tex);
+
+    // --- P3 batch-7: GL_ARB_get_program_binary round-trip.
+    for (const char* want : kBatch7) {
+        bool found = false;
+        for (GLint i = 0; i < n; ++i) {
+            const char* e = (const char*)glGetStringi(0x1F03, (GLuint)i);
+            if (e && std::string(e) == want) { found = true; break; }
+        }
+        Check(found, want);
+    }
+    while (glGetError() != 0) {}
+    GLint nf = -1, fmtQ = 0;
+    glGetIntegerv(0x87FE /*NUM_PROGRAM_BINARY_FORMATS*/, &nf);
+    Check(nf == 1, "NUM_PROGRAM_BINARY_FORMATS = 1");
+    glGetIntegerv(0x87FD /*PROGRAM_BINARY_FORMATS*/, &fmtQ);
+    Check(fmtQ == (GLint)0x54474D54, "PROGRAM_BINARY_FORMATS[0] = TGMT");
+    {
+        const char* vs = "#version 460 core\nvoid main(){ gl_Position = vec4(0.25); }";
+        const char* fs = "#version 460 core\nout vec4 c;\nvoid main(){ c = vec4(0.5); }";
+        GLuint vsS = glCreateShader(0x8B31), fsS = glCreateShader(0x8B30);
+        glShaderSource(vsS, 1, &vs, nullptr);
+        glCompileShader(vsS);
+        glShaderSource(fsS, 1, &fs, nullptr);
+        glCompileShader(fsS);
+        GLuint p1 = glCreateProgram();
+        glAttachShader(p1, vsS);
+        glAttachShader(p1, fsS);
+        glLinkProgram(p1);
+        GLint ok = 0;
+        glGetProgramiv(p1, 0x8B82 /*LINK_STATUS*/, &ok);
+        Check(ok == 1, "link program gốc");
+        GLint len = 0;
+        glGetProgramiv(p1, 0x8741 /*PROGRAM_BINARY_LENGTH*/, &len);
+        Check(len >= 8, "PROGRAM_BINARY_LENGTH > 0");
+        std::vector<unsigned char> bin((size_t)(len > 0 ? len : 1));
+        GLsizei written = 0;
+        GLenum f = 0;
+        glGetProgramBinary(p1, len, &written, &f, bin.data());
+        Check(written == len && f == 0x54474D54, "glGetProgramBinary ghi đủ + format TGMT");
+        GLuint p2 = glCreateProgram();
+        glProgramBinary(p2, f, bin.data(), written);
+        GLint ok2 = 0;
+        glGetProgramiv(p2, 0x8B82, &ok2);
+        Check(ok2 == 1, "glProgramBinary → relink OK");
+        GLint len2 = 0;
+        glGetProgramiv(p2, 0x8741, &len2);
+        Check(len2 == len, "round-trip LENGTH ổn định");
+        // Format lạ → INVALID_ENUM trung thực (không đoán nội dung driver khác).
+        while (glGetError() != 0) {}
+        GLuint p3 = glCreateProgram();
+        glProgramBinary(p3, 0x1234, bin.data(), written);
+        Check(glGetError() == 0x0500, "format lạ → INVALID_ENUM");
+    }
 
     if (gFails) return 1;
     printf("test_enum_behavior PASS\n");

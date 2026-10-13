@@ -146,11 +146,16 @@ static const char* const kExts[] = {
     // swizzledView + SwzOrBase trong gl_apple_draw): glTexParm decode swz[] →
     // bind lúc draw qua MTLTextureSwizzle; glGetTexParameteriv(0x8E46) round-trip.
     "GL_EXT_texture_swizzle",
+    // P3 batch-7: get_program_binary ĐÃ implement (gl_program.cpp): binary =
+    // GLSL gốc; glGetProgramBinary serialize, glProgramBinary parse + relink
+    // (location sinh lại đúng khi link). Format lạ → INVALID_ENUM trung thực.
+    // glGetIntegerv(NUM/FORMATS) + glGetProgramiv(LENGTH) trả thật.
+    "GL_ARB_get_program_binary",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),
     //  occlusion ANY_SAMPLES (cần GPU query), clear_texture (no-op),
-    //  get_program_binary (no-op), vertex_attrib_64bit (Double không render),
+    //  vertex_attrib_64bit (Double không render),
     //  vertex_type_10f_11f_11f_rev (Metal không có Float101111) → P4/P7.
 };
 static const GLuint kNumExts = (GLuint)(sizeof(kExts) / sizeof(kExts[0]));

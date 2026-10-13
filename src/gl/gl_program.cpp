@@ -401,17 +401,127 @@ void glGetAttachedShaders(GLuint p, GLsizei m, GLsizei* c_, GLuint* s) {
     for (GLsizei i = 0; i < k; ++i) s[i] = it->second.shaders[i];
     if (c_) *c_ = k;
 }
-void glProgramBinary(GLuint p, GLenum f, const void* b, GLsizei l) { (void)p;(void)f;(void)b;(void)l; }
-// glGetProgramBinary (spec §7.2): app LWJGL có thể gọi thử để cache shader. TGLMT
-// không serialize được state Metal → không có binary để trả. HÀNH VI CŨ GÂY UB:
-// để nguyên output của caller (giá trị rác) và length=0. ĐÚNG: ghi 0 vào mọi
-// output để caller không đọc rác. Không INVALID_OPERATION — caller spec-callback
-// sẽ treat length=0 là "không có binary" (đúng nghĩa).
+// --- GL_ARB_get_program_binary (get_program_binary) ---------------------------
+// Binary = GLSL GỐC của các shader (không serialize được state Metal). Round-trip
+// trung thực: glGetProgramBinary ghi (type, source) từng shader; glProgramBinary
+// parse → tạo shader mới → compile + link lại → program dùng được y hệt.
+// Lưu MSL làm binary cũng được nhưng reload sẽ không tái tạo được uniform/attrib
+// location (link mới sinh location) → GLSL + relink là đường trung thực duy nhất.
+static const uint32_t kBinMagic = 0x54474D54u; // 'TGMT'
+static const GLenum kBinFmt = 0x54474D54u;
+static inline void Put32(unsigned char* o, uint32_t v) {
+    o[0] = (unsigned char)(v & 0xFF); o[1] = (unsigned char)((v >> 8) & 0xFF);
+    o[2] = (unsigned char)((v >> 16) & 0xFF); o[3] = (unsigned char)((v >> 24) & 0xFF);
+}
+static inline uint32_t Get32(const unsigned char* o) {
+    return (uint32_t)o[0] | ((uint32_t)o[1] << 8) | ((uint32_t)o[2] << 16) |
+           ((uint32_t)o[3] << 24);
+}
+// Thu shader còn nguồn GLSL (thiếu nguồn → không serialize được shader đó).
+static std::vector<const ShaderObject*> BinShaders(const Context& c,
+                                                   const ProgramObject& pr) {
+    std::vector<const ShaderObject*> sh;
+    for (GLuint s : pr.shaders) {
+        auto si = c.shaders.find(s);
+        if (si != c.shaders.end() && !si->second.source.empty())
+            sh.push_back(&si->second);
+    }
+    return sh;
+}
+static size_t ProgramBinSize(const ProgramObject& pr,
+                             const std::vector<const ShaderObject*>& sh) {
+    size_t n = 8; // magic + count
+    for (auto* s : sh) n += 8 + s->source.size();
+    return n;
+}
+// glGetProgramiv(GL_PROGRAM_BINARY_LENGTH) (gl_get.cpp dùng qua decl extern).
+GLint ProgramBinaryLength(GLuint p) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) return 0;
+    std::vector<const ShaderObject*> sh = BinShaders(c, it->second);
+    if (!it->second.linked || sh.empty()) return 0;
+    return (GLint)ProgramBinSize(it->second, sh);
+}
 void glGetProgramBinary(GLuint p, GLsizei n, GLsizei* l, GLenum* f, void* b) {
-    (void)p;
-    if (l) *l = 0;
-    if (f) *f = 0;
-    if (b && n > 0) memset(b, 0, (size_t)n);
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) {
+        c.errors.Record(0x0502);
+        if (l) *l = 0;
+        if (f) *f = 0;
+        return;
+    }
+    auto& pr = it->second;
+    std::vector<const ShaderObject*> sh = BinShaders(c, pr);
+    // Chưa link / không có nguồn → không có binary (length=0 = "không có", đúng
+    // spec — caller đọc length trước khi cấp buffer).
+    if (!pr.linked || sh.empty()) {
+        if (l) *l = 0;
+        if (f) *f = 0;
+        if (b && n > 0) memset(b, 0, (size_t)n);
+        return;
+    }
+    size_t total = ProgramBinSize(pr, sh);
+    if (l) *l = (GLsizei)total;
+    if (f) *f = kBinFmt;
+    if (!b) return;
+    if ((size_t)n < total) { c.errors.Record(0x0501); return; } // buffer quá nhỏ
+    unsigned char* o = (unsigned char*)b;
+    Put32(o, kBinMagic);
+    Put32(o + 4, (uint32_t)sh.size());
+    o += 8;
+    for (auto* s : sh) {
+        Put32(o, s->type);
+        Put32(o + 4, (uint32_t)s->source.size());
+        memcpy(o + 8, s->source.data(), s->source.size());
+        o += 8 + s->source.size();
+    }
+}
+void glProgramBinary(GLuint p, GLenum f, const void* b, GLsizei l) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
+    auto& pr = it->second;
+    pr.linked = false;
+    pr.infoLog.clear();
+    // Format khác → trung thực báo lỗi (không đoán nội dung của driver khác).
+    if (f != kBinFmt || !b || l < 8) {
+        pr.infoLog = "error: unsupported program binary format";
+        c.errors.Record(0x0500 /*INVALID_ENUM*/);
+        return;
+    }
+    const unsigned char* base = (const unsigned char*)b;
+    const unsigned char* o = base;
+    uint32_t magic = Get32(o), count = Get32(o + 4);
+    o += 8; // qua header (magic + count) trước khi đọc từng shader
+    if (magic != kBinMagic || count == 0 || count > 64) {
+        pr.infoLog = "error: bad program binary";
+        c.errors.Record(0x0501);
+        return;
+    }
+    // Xóa shader cũ rồi tạo lại từ binary (compile + attach + link).
+    pr.shaders.clear();
+    for (uint32_t i = 0; i < count; ++i) {
+        if ((size_t)(o - base) + 8 > (size_t)l) {
+            pr.infoLog = "error: truncated program binary";
+            return;
+        }
+        uint32_t type = Get32(o), len = Get32(o + 4);
+        o += 8;
+        if (len == 0 || (size_t)(o - base) + len > (size_t)l || len > (32u << 20)) {
+            pr.infoLog = "error: truncated program binary";
+            return;
+        }
+        GLuint sh = glCreateShader(type);
+        const char* src = (const char*)o;
+        GLint sl = (GLint)len;
+        glShaderSource(sh, 1, &src, &sl);
+        glCompileShader(sh);
+        glAttachShader(p, sh);
+        o += len;
+    }
+    glLinkProgram(p);
 }
 void glValidateProgram(GLuint p) { (void)p; }
 void glActiveShaderProgram(GLuint pl, GLuint pr) { (void)pl;(void)pr; }
