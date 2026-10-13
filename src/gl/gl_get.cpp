@@ -80,6 +80,20 @@ void glGetIntegerv(GLenum p, GLint* v) {
         // Refpage: POLYGON_MODE trả 2 phần tử [front, back] — TGLMT dùng chung 1 mode.
         case 0x0B40: v[0] = (GLint)c.state.PolygonMode();
                      v[1] = (GLint)c.state.PolygonMode(); return;  // POLYGON_MODE
+        // Stencil state: GL 1.0 (front) + GL 2.0 (back) — ATI_separate_stencil
+        // advertise ⇒ query được. Trước đây stencil chỉ set, không đọc → nói dối.
+        case 0x0B92: *v = (GLint)c.state.StencilFront().func; return;       // STENCIL_FUNC
+        case 0x0B93: *v = (GLint)c.state.StencilFront().valueMask; return;  // STENCIL_VALUE_MASK
+        case 0x0B97: *v = c.state.StencilFront().ref; return;               // STENCIL_REF
+        case 0x0B98: *v = (GLint)c.state.StencilFront().writeMask; return;  // STENCIL_WRITEMASK
+        case 0x0B94: *v = (GLint)c.state.StencilFront().sfail; return;      // STENCIL_FAIL
+        case 0x0B95: *v = (GLint)c.state.StencilFront().dpfail; return;     // STENCIL_PASS_DEPTH_FAIL
+        case 0x0B96: *v = (GLint)c.state.StencilFront().dppass; return;     // STENCIL_PASS_DEPTH_PASS
+        case 0x8800: *v = (GLint)c.state.StencilBack().func; return;        // STENCIL_BACK_FUNC
+        case 0x8801: *v = (GLint)c.state.StencilBack().sfail; return;       // STENCIL_BACK_FAIL
+        case 0x8802: *v = (GLint)c.state.StencilBack().dpfail; return;      // STENCIL_BACK_PASS_DEPTH_FAIL
+        case 0x8803: *v = (GLint)c.state.StencilBack().dppass; return;      // STENCIL_BACK_PASS_DEPTH_PASS
+        case 0x8CA3: *v = c.state.StencilBack().ref; return;                // STENCIL_BACK_REF
         // GL_ARB_get_program_binary: TGLMT có 1 format duy nhất (GLSL gốc).
         case 0x87FE: *v = 1; return;                               // NUM_PROGRAM_BINARY_FORMATS
         case 0x87FD: *v = (GLint)0x54474D54; return;               // PROGRAM_BINARY_FORMATS[0] = 'TGMT'

@@ -173,7 +173,8 @@ def main():
             ret, params = sig[f]
             args = ", ".join(f"{t} a{i}" for i, t in enumerate(params)) if params else "void"
             call = ", ".join(f"a{i}" for i in range(len(params)))
-            fp.write(f"{ret} {f}({args}) {{ tglmt::gl::{b}({call}); }}\n")
+            kw = "return " if ret != "void" else ""
+            fp.write(f"{ret} {f}({args}) {{ {kw}tglmt::gl::{b}({call}); }}\n")
         fp.write("} // extern \"C\"\n")
     print(f"\nWrote {OUT}: {len(seen)} alias functions (extern \"C\").")
     return 0

@@ -77,12 +77,18 @@ void glMultiTexCoordP4uiv(GLenum t, GLenum ty, const GLuint* v) { glMultiTexCoor
 void glGetnCompressedTexImage(GLenum t, GLint l, GLsizei n, void* p) { (void)t;(void)l; if(p&&n>0) memset(p,0,(size_t)n); }
 void glGetnUniformfv(GLuint p, GLint l, GLsizei n, GLfloat* v) {
     Context& c = Context::Current();
+    if (n < 0) { c.errors.Record(0x0501); return; }
     auto it = c.programs.find(p);
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
     auto f = it->second.uniforms.find(l);
-    if (f == it->second.uniforms.end()) { if(n>0) v[0]=0; return; }
-    size_t k = std::min((size_t)n, f->second.size());
-    memcpy(v, f->second.data(), k);
+    if (f == it->second.uniforms.end()) {
+        // GL: location không active → INVALID_OPERATION (0x0502), không ghi.
+        c.errors.Record(0x0502); return;
+    }
+    // Robustness: bufSize là SỐ BYTE của buffer caller. Spec: nếu bufSize <
+    // dữ liệu sẽ trả → INVALID_OPERATION, KHÔNG ghi gì (không truncate).
+    if ((size_t)n < f->second.size()) { c.errors.Record(0x0502); return; }
+    memcpy(v, f->second.data(), f->second.size());
 }
 void glGetnUniformiv(GLuint p, GLint l, GLsizei n, GLint* v) { glGetnUniformfv(p,l,n,(GLfloat*)v); }
 void glGetnUniformuiv(GLuint p, GLint l, GLsizei n, GLuint* v) { glGetnUniformfv(p,l,n,(GLfloat*)v); }

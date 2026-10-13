@@ -179,6 +179,19 @@ static const char* const kExts[] = {
     "GL_NV_non_square_matrices",
     "GL_ATI_draw_buffers",
     "GL_OES_get_program_binary",
+    // ===== P3 batch-9: robustness + separate stencil — hàm thật đã verify. =====
+    //  - glGetnUniform*/glReadnPixels: đọc CÓ GIỚI HẠN bufSize (thực thi guard
+    //    0x0501/0x0502 thật) — đây là cốt lõi robustness, làm thật được.
+    //  - glGetGraphicsResetStatus trả NO_ERROR (0x8252): Metal không reset GPU
+    //    → trung thực "chưa từng reset".
+    //  - glGetnColorTable/Histogram/Minmap/Map*: điếm core (đã remove) → trả 0
+    //    trung thực thay vì crash.
+    "GL_ARB_robustness",
+    "GL_KHR_robustness",
+    "GL_EXT_robustness",
+    //  - glStencilFuncSeparateATI/glStencilOpSeparateATI → core separate stencil
+    //    (StencilFront/Back state thật, đã render được).
+    "GL_ATI_separate_stencil",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),

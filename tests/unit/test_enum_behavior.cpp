@@ -49,9 +49,20 @@ static const char* kBatch8[] = {
     "GL_NV_non_square_matrices", "GL_ATI_draw_buffers",
     "GL_OES_get_program_binary",
 };
+static const char* kBatch9[] = {
+    "GL_ARB_robustness", "GL_KHR_robustness", "GL_EXT_robustness",
+    "GL_ATI_separate_stencil",
+};
 // Alias OES chỉ có symbol extern "C" (gl_ext_aliases_gen), không khai báo gl46.h.
 extern "C" void glProgramBinaryOES(GLuint p, GLenum f, const void* d, GLint l);
 extern "C" void glGetProgramBinaryOES(GLuint p, GLsizei b, GLsizei* w, GLenum* f, void* d);
+// Batch-9 alias (robustness / ATI stencil).
+extern "C" GLenum glGetGraphicsResetStatusKHR();
+extern "C" void glGetnUniformfvKHR(GLuint p, GLint l, GLsizei n, GLfloat* v);
+extern "C" void glReadnPixelsKHR(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, GLsizei n, void* p);
+extern "C" GLenum glGetGraphicsResetStatusEXT();
+extern "C" void glStencilFuncSeparateATI(GLenum face, GLenum f, GLint r, GLuint m);
+extern "C" void glStencilOpSeparateATI(GLenum face, GLenum sf, GLenum dpf, GLenum dpp);
 
 int main() {
     Context ctx("null");
@@ -373,6 +384,82 @@ int main() {
         Check(glGetError() == 0, "glMultiDrawArraysIndirect count=0 không lỗi");
         glDrawElementsBaseVertex(0x0004, 0, 0x1403 /*UNSIGNED_SHORT*/, nullptr, 0);
         Check(glGetError() == 0, "glDrawElementsBaseVertex count=0 không lỗi");
+    }
+
+    // --- 9. Batch-9: robustness + separate stencil.
+    {
+        GLint n9 = 0;
+        glGetIntegerv(0x821D /*NUM_EXTENSIONS*/, &n9);
+        for (const char* want : kBatch9) {
+            bool found = false;
+            for (GLint i = 0; i < n9 && !found; ++i) {
+                const char* e = (const char*)glGetStringi(0x1F03, (GLuint)i);
+                if (e && !strcmp(e, want)) found = true;
+            }
+            Check(found, want);
+        }
+
+        // 9a. glGetGraphicsResetStatus trả NO_ERROR (0x8252) — trung thực.
+        while (glGetError() != 0) {}
+        Check(glGetGraphicsResetStatusKHR() == 0x8252, "KHR reset status = NO_ERROR");
+        Check(glGetGraphicsResetStatusEXT() == 0x8252, "EXT reset status = NO_ERROR");
+        Check(glGetError() == 0, "reset status không lỗi");
+
+        // 9b. glReadnPixels guard bufSize: bufSize nhỏ hơn w*h*4 → INVALID_OPERATION.
+        while (glGetError() != 0) {}
+        unsigned char small[8] = {0};
+        glReadnPixelsKHR(0, 0, 4, 4, 0x1908, 0x1401, (GLsizei)sizeof(small), small);
+        Check(glGetError() == 0x0502, "glReadnPixels bufSize thiếu → INVALID_OPERATION");
+        while (glGetError() != 0) {}
+        unsigned char big[4 * 4 * 4] = {0};
+        glReadnPixelsKHR(0, 0, 4, 4, 0x1908, 0x1401, (GLsizei)sizeof(big), big);
+        Check(glGetError() == 0, "glReadnPixels bufSize đủ → không lỗi");
+
+        // 9c. glGetnUniformfv đọc uniform có giới hạn count (không overflow).
+        while (glGetError() != 0) {}
+        const char* vsR = "#version 460 core\nlayout(location=0) uniform float u[4];\nvoid main(){ gl_Position = vec4(u[0],u[1],u[2],u[3]); }";
+        const char* fsR = "#version 460 core\nout vec4 c;\nvoid main(){ c = vec4(1.0); }";
+        GLuint vsR_s = glCreateShader(0x8B31), fsR_s = glCreateShader(0x8B30);
+        glShaderSource(vsR_s, 1, &vsR, nullptr);
+        glCompileShader(vsR_s);
+        glShaderSource(fsR_s, 1, &fsR, nullptr);
+        glCompileShader(fsR_s);
+        GLuint pR = glCreateProgram();
+        glAttachShader(pR, vsR_s);
+        glAttachShader(pR, fsR_s);
+        glLinkProgram(pR);
+        GLint locR = glGetUniformLocation(pR, "u");
+        Check(locR >= 0, "uniform u location hợp lệ");
+        float setU[4] = {1.f, 2.f, 3.f, 4.f};
+        glUseProgram(pR);
+        glUniform1fv(locR, 4, setU);
+        float getU[4] = {0};
+        // bufSize là SỐ BYTE (spec glGetnUniformfv).
+        glGetnUniformfvKHR(pR, locR, (GLsizei)sizeof(getU), getU);
+        Check(glGetError() == 0, "glGetnUniformfv bufSize đủ → không lỗi");
+        Check(getU[0] == 1.f && getU[1] == 2.f && getU[3] == 4.f, "glGetnUniformfv đọc đủ 4 phần tử");
+        // bufSize < dữ liệu → INVALID_OPERATION, không ghi (robustness thật).
+        float getU2[1] = {-1.f};
+        glGetnUniformfvKHR(pR, locR, (GLsizei)sizeof(getU2), getU2);
+        Check(glGetError() == 0x0502, "glGetnUniformfv bufSize thiếu → INVALID_OPERATION");
+        Check(getU2[0] == -1.f, "bufSize thiếu → KHÔNG ghi (không truncate)");
+        glUseProgram(0);
+
+        // 9d. GL_ATI_separate_stencil: round-trip front/back riêng.
+        while (glGetError() != 0) {}
+        glStencilFuncSeparateATI(0x0408 /*FRONT*/, 0x0202 /*EQUAL*/, 1, 0xFF);
+        glStencilOpSeparateATI(0x0408, 0x1E00 /*KEEP*/, 0x1E01 /*ZERO*/, 0x1E02 /*REPLACE*/);
+        Check(glGetError() == 0, "glStencilFuncSeparateATI/OpSeparate không lỗi");
+        GLint sf = 0, so = 0;
+        glGetIntegerv(0x0B92 /*STENCIL_FUNC*/, &sf);
+        Check(sf == 0x0202, "ATI separate stencil front func round-trip");
+        glGetIntegerv(0x0B94 /*STENCIL_FAIL*/, &so);
+        Check(so == 0x1E00, "ATI separate stencil front sfail round-trip");
+        glStencilFuncSeparateATI(0x0409 /*BACK*/, 0x0204 /*NOTEQUAL*/, 7, 0x0F);
+        glGetIntegerv(0x8800 /*STENCIL_BACK_FUNC*/, &sf);
+        Check(sf == 0x0204, "ATI separate stencil back func round-trip");
+        glGetIntegerv(0x8CA3 /*STENCIL_BACK_REF*/, &sf);
+        Check(sf == 7, "ATI separate stencil back ref round-trip");
     }
 
     if (gFails) return 1;

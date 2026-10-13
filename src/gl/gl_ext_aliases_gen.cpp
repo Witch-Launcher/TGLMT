@@ -416,21 +416,21 @@ void glPointParameterfv(GLenum a0, const GLfloat * a1);
 extern "C" {
 void glMultiDrawArraysIndirectAMD(GLenum a0, const void * a1, GLsizei a2, GLsizei a3) { tglmt::gl::glMultiDrawArraysIndirect(a0, a1, a2, a3); }
 void glMultiDrawElementsIndirectAMD(GLenum a0, GLenum a1, const void * a2, GLsizei a3, GLsizei a4) { tglmt::gl::glMultiDrawElementsIndirect(a0, a1, a2, a3, a4); }
-GLenum glClientWaitSyncAPPLE(GLsync a0, GLbitfield a1, GLuint64 a2) { tglmt::gl::glClientWaitSync(a0, a1, a2); }
+GLenum glClientWaitSyncAPPLE(GLsync a0, GLbitfield a1, GLuint64 a2) { return tglmt::gl::glClientWaitSync(a0, a1, a2); }
 void glDeleteSyncAPPLE(GLsync a0) { tglmt::gl::glDeleteSync(a0); }
-GLsync glFenceSyncAPPLE(GLenum a0, GLbitfield a1) { tglmt::gl::glFenceSync(a0, a1); }
+GLsync glFenceSyncAPPLE(GLenum a0, GLbitfield a1) { return tglmt::gl::glFenceSync(a0, a1); }
 void glGetInteger64vAPPLE(GLenum a0, GLint64 * a1) { tglmt::gl::glGetInteger64v(a0, a1); }
 void glGetSyncivAPPLE(GLsync a0, GLenum a1, GLsizei a2, GLsizei * a3, GLint * a4) { tglmt::gl::glGetSynciv(a0, a1, a2, a3, a4); }
-GLboolean glIsSyncAPPLE(GLsync a0) { tglmt::gl::glIsSync(a0); }
+GLboolean glIsSyncAPPLE(GLsync a0) { return tglmt::gl::glIsSync(a0); }
 void glWaitSyncAPPLE(GLsync a0, GLbitfield a1, GLuint64 a2) { tglmt::gl::glWaitSync(a0, a1, a2); }
 void glBindVertexArrayAPPLE(GLuint a0) { tglmt::gl::glBindVertexArray(a0); }
 void glDeleteVertexArraysAPPLE(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteVertexArrays(a0, a1); }
 void glGenVertexArraysAPPLE(GLsizei a0, GLuint * a1) { tglmt::gl::glGenVertexArrays(a0, a1); }
-GLboolean glIsVertexArrayAPPLE(GLuint a0) { tglmt::gl::glIsVertexArray(a0); }
+GLboolean glIsVertexArrayAPPLE(GLuint a0) { return tglmt::gl::glIsVertexArray(a0); }
 void glClampColorARB(GLenum a0, GLenum a1) { tglmt::gl::glClampColor(a0, a1); }
 void glDebugMessageControlARB(GLenum a0, GLenum a1, GLenum a2, GLsizei a3, const GLuint * a4, GLboolean a5) { tglmt::gl::glDebugMessageControl(a0, a1, a2, a3, a4, a5); }
 void glDebugMessageInsertARB(GLenum a0, GLenum a1, GLuint a2, GLenum a3, GLsizei a4, const GLchar * a5) { tglmt::gl::glDebugMessageInsert(a0, a1, a2, a3, a4, a5); }
-GLuint glGetDebugMessageLogARB(GLuint a0, GLsizei a1, GLenum * a2, GLenum * a3, GLuint * a4, GLenum * a5, GLsizei * a6, GLchar * a7) { tglmt::gl::glGetDebugMessageLog(a0, a1, a2, a3, a4, a5, a6, a7); }
+GLuint glGetDebugMessageLogARB(GLuint a0, GLsizei a1, GLenum * a2, GLenum * a3, GLuint * a4, GLenum * a5, GLsizei * a6, GLchar * a7) { return tglmt::gl::glGetDebugMessageLog(a0, a1, a2, a3, a4, a5, a6, a7); }
 void glDrawBuffersARB(GLsizei a0, const GLenum * a1) { tglmt::gl::glDrawBuffers(a0, a1); }
 void glBlendEquationSeparateiARB(GLuint a0, GLenum a1, GLenum a2) { tglmt::gl::glBlendEquationSeparatei(a0, a1, a2); }
 void glBlendEquationiARB(GLuint a0, GLenum a1) { tglmt::gl::glBlendEquationi(a0, a1); }
@@ -450,10 +450,10 @@ void glGenQueriesARB(GLsizei a0, GLuint * a1) { tglmt::gl::glGenQueries(a0, a1);
 void glGetQueryObjectivARB(GLuint a0, GLenum a1, GLint * a2) { tglmt::gl::glGetQueryObjectiv(a0, a1, a2); }
 void glGetQueryObjectuivARB(GLuint a0, GLenum a1, GLuint * a2) { tglmt::gl::glGetQueryObjectuiv(a0, a1, a2); }
 void glGetQueryivARB(GLenum a0, GLenum a1, GLint * a2) { tglmt::gl::glGetQueryiv(a0, a1, a2); }
-GLboolean glIsQueryARB(GLuint a0) { tglmt::gl::glIsQuery(a0); }
+GLboolean glIsQueryARB(GLuint a0) { return tglmt::gl::glIsQuery(a0); }
 void glPointParameterfARB(GLenum a0, GLfloat a1) { tglmt::gl::glPointParameterf(a0, a1); }
 void glPointParameterfvARB(GLenum a0, const GLfloat * a1) { tglmt::gl::glPointParameterfv(a0, a1); }
-GLenum glGetGraphicsResetStatusARB(void) { tglmt::gl::glGetGraphicsResetStatus(); }
+GLenum glGetGraphicsResetStatusARB(void) { return tglmt::gl::glGetGraphicsResetStatus(); }
 void glGetnColorTableARB(GLenum a0, GLenum a1, GLenum a2, GLsizei a3, void * a4) { tglmt::gl::glGetnColorTable(a0, a1, a2, a3, a4); }
 void glGetnCompressedTexImageARB(GLenum a0, GLint a1, GLsizei a2, void * a3) { tglmt::gl::glGetnCompressedTexImage(a0, a1, a2, a3); }
 void glGetnConvolutionFilterARB(GLenum a0, GLenum a1, GLenum a2, GLsizei a3, void * a4) { tglmt::gl::glGetnConvolutionFilter(a0, a1, a2, a3, a4); }
@@ -487,9 +487,9 @@ void glDeleteBuffersARB(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteBuff
 void glGenBuffersARB(GLsizei a0, GLuint * a1) { tglmt::gl::glGenBuffers(a0, a1); }
 void glGetBufferParameterivARB(GLenum a0, GLenum a1, GLint * a2) { tglmt::gl::glGetBufferParameteriv(a0, a1, a2); }
 void glGetBufferPointervARB(GLenum a0, GLenum a1, void ** a2) { tglmt::gl::glGetBufferPointerv(a0, a1, a2); }
-GLboolean glIsBufferARB(GLuint a0) { tglmt::gl::glIsBuffer(a0); }
-void * glMapBufferARB(GLenum a0, GLenum a1) { tglmt::gl::glMapBuffer(a0, a1); }
-GLboolean glUnmapBufferARB(GLenum a0) { tglmt::gl::glUnmapBuffer(a0); }
+GLboolean glIsBufferARB(GLuint a0) { return tglmt::gl::glIsBuffer(a0); }
+void * glMapBufferARB(GLenum a0, GLenum a1) { return tglmt::gl::glMapBuffer(a0, a1); }
+GLboolean glUnmapBufferARB(GLenum a0) { return tglmt::gl::glUnmapBuffer(a0); }
 void glDisableVertexAttribArrayARB(GLuint a0) { tglmt::gl::glDisableVertexAttribArray(a0); }
 void glEnableVertexAttribArrayARB(GLuint a0) { tglmt::gl::glEnableVertexAttribArray(a0); }
 void glGetVertexAttribPointervARB(GLuint a0, GLenum a1, void ** a2) { tglmt::gl::glGetVertexAttribPointerv(a0, a1, a2); }
@@ -543,8 +543,8 @@ void glBlendColorEXT(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3) { tglmt::gl
 void glBlendEquationSeparateEXT(GLenum a0, GLenum a1) { tglmt::gl::glBlendEquationSeparate(a0, a1); }
 void glBindFragDataLocationEXT(GLuint a0, GLuint a1, const GLchar * a2) { tglmt::gl::glBindFragDataLocation(a0, a1, a2); }
 void glBindFragDataLocationIndexedEXT(GLuint a0, GLuint a1, GLuint a2, const GLchar * a3) { tglmt::gl::glBindFragDataLocationIndexed(a0, a1, a2, a3); }
-GLint glGetFragDataIndexEXT(GLuint a0, const GLchar * a1) { tglmt::gl::glGetFragDataIndex(a0, a1); }
-GLint glGetProgramResourceLocationIndexEXT(GLuint a0, GLenum a1, const GLchar * a2) { tglmt::gl::glGetProgramResourceLocationIndex(a0, a1, a2); }
+GLint glGetFragDataIndexEXT(GLuint a0, const GLchar * a1) { return tglmt::gl::glGetFragDataIndex(a0, a1); }
+GLint glGetProgramResourceLocationIndexEXT(GLuint a0, GLenum a1, const GLchar * a2) { return tglmt::gl::glGetProgramResourceLocationIndex(a0, a1, a2); }
 void glBlendFuncSeparateEXT(GLenum a0, GLenum a1, GLenum a2, GLenum a3) { tglmt::gl::glBlendFuncSeparate(a0, a1, a2, a3); }
 void glBlendEquationEXT(GLenum a0) { tglmt::gl::glBlendEquation(a0); }
 void glBufferStorageEXT(GLenum a0, GLsizeiptr a1, const void * a2, GLbitfield a3) { tglmt::gl::glBufferStorage(a0, a1, a2, a3); }
@@ -567,7 +567,7 @@ void glGetQueryObjectivEXT(GLuint a0, GLenum a1, GLint * a2) { tglmt::gl::glGetQ
 void glGetQueryObjectui64vEXT(GLuint a0, GLenum a1, GLuint64 * a2) { tglmt::gl::glGetQueryObjectui64v(a0, a1, a2); }
 void glGetQueryObjectuivEXT(GLuint a0, GLenum a1, GLuint * a2) { tglmt::gl::glGetQueryObjectuiv(a0, a1, a2); }
 void glGetQueryivEXT(GLenum a0, GLenum a1, GLint * a2) { tglmt::gl::glGetQueryiv(a0, a1, a2); }
-GLboolean glIsQueryEXT(GLuint a0) { tglmt::gl::glIsQuery(a0); }
+GLboolean glIsQueryEXT(GLuint a0) { return tglmt::gl::glIsQuery(a0); }
 void glQueryCounterEXT(GLuint a0, GLenum a1) { tglmt::gl::glQueryCounter(a0, a1); }
 void glDrawBuffersEXT(GLsizei a0, const GLenum * a1) { tglmt::gl::glDrawBuffers(a0, a1); }
 void glBlendEquationSeparateiEXT(GLuint a0, GLenum a1, GLenum a2) { tglmt::gl::glBlendEquationSeparatei(a0, a1, a2); }
@@ -577,7 +577,7 @@ void glBlendFunciEXT(GLuint a0, GLenum a1, GLenum a2) { tglmt::gl::glBlendFunci(
 void glColorMaskiEXT(GLuint a0, GLboolean a1, GLboolean a2, GLboolean a3, GLboolean a4) { tglmt::gl::glColorMaski(a0, a1, a2, a3, a4); }
 void glDisableiEXT(GLenum a0, GLuint a1) { tglmt::gl::glDisablei(a0, a1); }
 void glEnableiEXT(GLenum a0, GLuint a1) { tglmt::gl::glEnablei(a0, a1); }
-GLboolean glIsEnablediEXT(GLenum a0, GLuint a1) { tglmt::gl::glIsEnabledi(a0, a1); }
+GLboolean glIsEnablediEXT(GLenum a0, GLuint a1) { return tglmt::gl::glIsEnabledi(a0, a1); }
 void glDrawElementsBaseVertexEXT(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLint a4) { tglmt::gl::glDrawElementsBaseVertex(a0, a1, a2, a3, a4); }
 void glDrawElementsInstancedBaseVertexEXT(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4, GLint a5) { tglmt::gl::glDrawElementsInstancedBaseVertex(a0, a1, a2, a3, a4, a5); }
 void glDrawRangeElementsBaseVertexEXT(GLenum a0, GLuint a1, GLuint a2, GLsizei a3, GLenum a4, const void * a5, GLint a6) { tglmt::gl::glDrawRangeElementsBaseVertex(a0, a1, a2, a3, a4, a5, a6); }
@@ -591,7 +591,7 @@ void glBlitFramebufferEXT(GLint a0, GLint a1, GLint a2, GLint a3, GLint a4, GLin
 void glRenderbufferStorageMultisampleEXT(GLenum a0, GLsizei a1, GLenum a2, GLsizei a3, GLsizei a4) { tglmt::gl::glRenderbufferStorageMultisample(a0, a1, a2, a3, a4); }
 void glBindFramebufferEXT(GLenum a0, GLuint a1) { tglmt::gl::glBindFramebuffer(a0, a1); }
 void glBindRenderbufferEXT(GLenum a0, GLuint a1) { tglmt::gl::glBindRenderbuffer(a0, a1); }
-GLenum glCheckFramebufferStatusEXT(GLenum a0) { tglmt::gl::glCheckFramebufferStatus(a0); }
+GLenum glCheckFramebufferStatusEXT(GLenum a0) { return tglmt::gl::glCheckFramebufferStatus(a0); }
 void glDeleteFramebuffersEXT(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteFramebuffers(a0, a1); }
 void glDeleteRenderbuffersEXT(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteRenderbuffers(a0, a1); }
 void glFramebufferRenderbufferEXT(GLenum a0, GLenum a1, GLenum a2, GLuint a3) { tglmt::gl::glFramebufferRenderbuffer(a0, a1, a2, a3); }
@@ -603,12 +603,12 @@ void glGenRenderbuffersEXT(GLsizei a0, GLuint * a1) { tglmt::gl::glGenRenderbuff
 void glGenerateMipmapEXT(GLenum a0) { tglmt::gl::glGenerateMipmap(a0); }
 void glGetFramebufferAttachmentParameterivEXT(GLenum a0, GLenum a1, GLenum a2, GLint * a3) { tglmt::gl::glGetFramebufferAttachmentParameteriv(a0, a1, a2, a3); }
 void glGetRenderbufferParameterivEXT(GLenum a0, GLenum a1, GLint * a2) { tglmt::gl::glGetRenderbufferParameteriv(a0, a1, a2); }
-GLboolean glIsFramebufferEXT(GLuint a0) { tglmt::gl::glIsFramebuffer(a0); }
-GLboolean glIsRenderbufferEXT(GLuint a0) { tglmt::gl::glIsRenderbuffer(a0); }
+GLboolean glIsFramebufferEXT(GLuint a0) { return tglmt::gl::glIsFramebuffer(a0); }
+GLboolean glIsRenderbufferEXT(GLuint a0) { return tglmt::gl::glIsRenderbuffer(a0); }
 void glRenderbufferStorageEXT(GLenum a0, GLenum a1, GLsizei a2, GLsizei a3) { tglmt::gl::glRenderbufferStorage(a0, a1, a2, a3); }
 void glFramebufferTextureEXT(GLenum a0, GLenum a1, GLuint a2, GLint a3) { tglmt::gl::glFramebufferTexture(a0, a1, a2, a3); }
 void glProgramParameteriEXT(GLuint a0, GLenum a1, GLint a2) { tglmt::gl::glProgramParameteri(a0, a1, a2); }
-GLint glGetFragDataLocationEXT(GLuint a0, const GLchar * a1) { tglmt::gl::glGetFragDataLocation(a0, a1); }
+GLint glGetFragDataLocationEXT(GLuint a0, const GLchar * a1) { return tglmt::gl::glGetFragDataLocation(a0, a1); }
 void glGetUniformuivEXT(GLuint a0, GLint a1, GLuint * a2) { tglmt::gl::glGetUniformuiv(a0, a1, a2); }
 void glGetVertexAttribIivEXT(GLuint a0, GLenum a1, GLint * a2) { tglmt::gl::glGetVertexAttribIiv(a0, a1, a2); }
 void glGetVertexAttribIuivEXT(GLuint a0, GLenum a1, GLuint * a2) { tglmt::gl::glGetVertexAttribIuiv(a0, a1, a2); }
@@ -643,7 +643,7 @@ void glVertexAttribI4usvEXT(GLuint a0, const GLushort * a1) { tglmt::gl::glVerte
 void glVertexAttribIPointerEXT(GLuint a0, GLint a1, GLenum a2, GLsizei a3, const void * a4) { tglmt::gl::glVertexAttribIPointer(a0, a1, a2, a3, a4); }
 void glVertexAttribDivisorEXT(GLuint a0, GLuint a1) { tglmt::gl::glVertexAttribDivisor(a0, a1); }
 void glFlushMappedBufferRangeEXT(GLenum a0, GLintptr a1, GLsizeiptr a2) { tglmt::gl::glFlushMappedBufferRange(a0, a1, a2); }
-void * glMapBufferRangeEXT(GLenum a0, GLintptr a1, GLsizeiptr a2, GLbitfield a3) { tglmt::gl::glMapBufferRange(a0, a1, a2, a3); }
+void * glMapBufferRangeEXT(GLenum a0, GLintptr a1, GLsizeiptr a2, GLbitfield a3) { return tglmt::gl::glMapBufferRange(a0, a1, a2, a3); }
 void glMultiDrawArraysEXT(GLenum a0, const GLint * a1, const GLsizei * a2, GLsizei a3) { tglmt::gl::glMultiDrawArrays(a0, a1, a2, a3); }
 void glMultiDrawElementsEXT(GLenum a0, const GLsizei * a1, GLenum a2, const void *const* a3, GLsizei a4) { tglmt::gl::glMultiDrawElements(a0, a1, a2, a3, a4); }
 void glMultiDrawArraysIndirectEXT(GLenum a0, const void * a1, GLsizei a2, GLsizei a3) { tglmt::gl::glMultiDrawArraysIndirect(a0, a1, a2, a3); }
@@ -653,7 +653,7 @@ void glPointParameterfvEXT(GLenum a0, const GLfloat * a1) { tglmt::gl::glPointPa
 void glPolygonOffsetEXT(GLfloat a0, GLfloat a1) { tglmt::gl::glPolygonOffset(a0, a1); }
 void glPolygonOffsetClampEXT(GLfloat a0, GLfloat a1, GLfloat a2) { tglmt::gl::glPolygonOffsetClamp(a0, a1, a2); }
 void glProvokingVertexEXT(GLenum a0) { tglmt::gl::glProvokingVertex(a0); }
-GLenum glGetGraphicsResetStatusEXT(void) { tglmt::gl::glGetGraphicsResetStatus(); }
+GLenum glGetGraphicsResetStatusEXT(void) { return tglmt::gl::glGetGraphicsResetStatus(); }
 void glGetnUniformfvEXT(GLuint a0, GLint a1, GLsizei a2, GLfloat * a3) { tglmt::gl::glGetnUniformfv(a0, a1, a2, a3); }
 void glGetnUniformivEXT(GLuint a0, GLint a1, GLsizei a2, GLint * a3) { tglmt::gl::glGetnUniformiv(a0, a1, a2, a3); }
 void glReadnPixelsEXT(GLint a0, GLint a1, GLsizei a2, GLsizei a3, GLenum a4, GLenum a5, GLsizei a6, void * a7) { tglmt::gl::glReadnPixels(a0, a1, a2, a3, a4, a5, a6, a7); }
@@ -687,7 +687,7 @@ void glVertexAttribL3dvEXT(GLuint a0, const GLdouble * a1) { tglmt::gl::glVertex
 void glVertexAttribL4dEXT(GLuint a0, GLdouble a1, GLdouble a2, GLdouble a3, GLdouble a4) { tglmt::gl::glVertexAttribL4d(a0, a1, a2, a3, a4); }
 void glVertexAttribL4dvEXT(GLuint a0, const GLdouble * a1) { tglmt::gl::glVertexAttribL4dv(a0, a1); }
 void glVertexAttribLPointerEXT(GLuint a0, GLint a1, GLenum a2, GLsizei a3, const void * a4) { tglmt::gl::glVertexAttribLPointer(a0, a1, a2, a3, a4); }
-GLenum glGetGraphicsResetStatusKHR(void) { tglmt::gl::glGetGraphicsResetStatus(); }
+GLenum glGetGraphicsResetStatusKHR(void) { return tglmt::gl::glGetGraphicsResetStatus(); }
 void glGetnUniformfvKHR(GLuint a0, GLint a1, GLsizei a2, GLfloat * a3) { tglmt::gl::glGetnUniformfv(a0, a1, a2, a3); }
 void glGetnUniformivKHR(GLuint a0, GLint a1, GLsizei a2, GLint * a3) { tglmt::gl::glGetnUniformiv(a0, a1, a2, a3); }
 void glGetnUniformuivKHR(GLuint a0, GLint a1, GLsizei a2, GLuint * a3) { tglmt::gl::glGetnUniformuiv(a0, a1, a2, a3); }
@@ -719,7 +719,7 @@ void glBindTransformFeedbackNV(GLenum a0, GLuint a1) { tglmt::gl::glBindTransfor
 void glDeleteTransformFeedbacksNV(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteTransformFeedbacks(a0, a1); }
 void glDrawTransformFeedbackNV(GLenum a0, GLuint a1) { tglmt::gl::glDrawTransformFeedback(a0, a1); }
 void glGenTransformFeedbacksNV(GLsizei a0, GLuint * a1) { tglmt::gl::glGenTransformFeedbacks(a0, a1); }
-GLboolean glIsTransformFeedbackNV(GLuint a0) { tglmt::gl::glIsTransformFeedback(a0); }
+GLboolean glIsTransformFeedbackNV(GLuint a0) { return tglmt::gl::glIsTransformFeedback(a0); }
 void glPauseTransformFeedbackNV(void) { tglmt::gl::glPauseTransformFeedback(); }
 void glResumeTransformFeedbackNV(void) { tglmt::gl::glResumeTransformFeedback(); }
 void glBlendEquationSeparateOES(GLenum a0, GLenum a1) { tglmt::gl::glBlendEquationSeparate(a0, a1); }
@@ -733,13 +733,13 @@ void glBlendFunciOES(GLuint a0, GLenum a1, GLenum a2) { tglmt::gl::glBlendFunci(
 void glColorMaskiOES(GLuint a0, GLboolean a1, GLboolean a2, GLboolean a3, GLboolean a4) { tglmt::gl::glColorMaski(a0, a1, a2, a3, a4); }
 void glDisableiOES(GLenum a0, GLuint a1) { tglmt::gl::glDisablei(a0, a1); }
 void glEnableiOES(GLenum a0, GLuint a1) { tglmt::gl::glEnablei(a0, a1); }
-GLboolean glIsEnablediOES(GLenum a0, GLuint a1) { tglmt::gl::glIsEnabledi(a0, a1); }
+GLboolean glIsEnablediOES(GLenum a0, GLuint a1) { return tglmt::gl::glIsEnabledi(a0, a1); }
 void glDrawElementsBaseVertexOES(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLint a4) { tglmt::gl::glDrawElementsBaseVertex(a0, a1, a2, a3, a4); }
 void glDrawElementsInstancedBaseVertexOES(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4, GLint a5) { tglmt::gl::glDrawElementsInstancedBaseVertex(a0, a1, a2, a3, a4, a5); }
 void glDrawRangeElementsBaseVertexOES(GLenum a0, GLuint a1, GLuint a2, GLsizei a3, GLenum a4, const void * a5, GLint a6) { tglmt::gl::glDrawRangeElementsBaseVertex(a0, a1, a2, a3, a4, a5, a6); }
 void glBindFramebufferOES(GLenum a0, GLuint a1) { tglmt::gl::glBindFramebuffer(a0, a1); }
 void glBindRenderbufferOES(GLenum a0, GLuint a1) { tglmt::gl::glBindRenderbuffer(a0, a1); }
-GLenum glCheckFramebufferStatusOES(GLenum a0) { tglmt::gl::glCheckFramebufferStatus(a0); }
+GLenum glCheckFramebufferStatusOES(GLenum a0) { return tglmt::gl::glCheckFramebufferStatus(a0); }
 void glDeleteFramebuffersOES(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteFramebuffers(a0, a1); }
 void glDeleteRenderbuffersOES(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteRenderbuffers(a0, a1); }
 void glFramebufferRenderbufferOES(GLenum a0, GLenum a1, GLenum a2, GLuint a3) { tglmt::gl::glFramebufferRenderbuffer(a0, a1, a2, a3); }
@@ -749,15 +749,15 @@ void glGenRenderbuffersOES(GLsizei a0, GLuint * a1) { tglmt::gl::glGenRenderbuff
 void glGenerateMipmapOES(GLenum a0) { tglmt::gl::glGenerateMipmap(a0); }
 void glGetFramebufferAttachmentParameterivOES(GLenum a0, GLenum a1, GLenum a2, GLint * a3) { tglmt::gl::glGetFramebufferAttachmentParameteriv(a0, a1, a2, a3); }
 void glGetRenderbufferParameterivOES(GLenum a0, GLenum a1, GLint * a2) { tglmt::gl::glGetRenderbufferParameteriv(a0, a1, a2); }
-GLboolean glIsFramebufferOES(GLuint a0) { tglmt::gl::glIsFramebuffer(a0); }
-GLboolean glIsRenderbufferOES(GLuint a0) { tglmt::gl::glIsRenderbuffer(a0); }
+GLboolean glIsFramebufferOES(GLuint a0) { return tglmt::gl::glIsFramebuffer(a0); }
+GLboolean glIsRenderbufferOES(GLuint a0) { return tglmt::gl::glIsRenderbuffer(a0); }
 void glRenderbufferStorageOES(GLenum a0, GLenum a1, GLsizei a2, GLsizei a3) { tglmt::gl::glRenderbufferStorage(a0, a1, a2, a3); }
 void glFramebufferTextureOES(GLenum a0, GLenum a1, GLuint a2, GLint a3) { tglmt::gl::glFramebufferTexture(a0, a1, a2, a3); }
 void glGetProgramBinaryOES(GLuint a0, GLsizei a1, GLsizei * a2, GLenum * a3, void * a4) { tglmt::gl::glGetProgramBinary(a0, a1, a2, a3, a4); }
 void glProgramBinaryOES(GLuint a0, GLenum a1, const void * a2, GLint a3) { tglmt::gl::glProgramBinary(a0, a1, a2, a3); }
 void glGetBufferPointervOES(GLenum a0, GLenum a1, void ** a2) { tglmt::gl::glGetBufferPointerv(a0, a1, a2); }
-void * glMapBufferOES(GLenum a0, GLenum a1) { tglmt::gl::glMapBuffer(a0, a1); }
-GLboolean glUnmapBufferOES(GLenum a0) { tglmt::gl::glUnmapBuffer(a0); }
+void * glMapBufferOES(GLenum a0, GLenum a1) { return tglmt::gl::glMapBuffer(a0, a1); }
+GLboolean glUnmapBufferOES(GLenum a0) { return tglmt::gl::glUnmapBuffer(a0); }
 void glMinSampleShadingOES(GLfloat a0) { tglmt::gl::glMinSampleShading(a0); }
 void glPatchParameteriOES(GLenum a0, GLint a1) { tglmt::gl::glPatchParameteri(a0, a1); }
 void glCompressedTexImage3DOES(GLenum a0, GLint a1, GLenum a2, GLsizei a3, GLsizei a4, GLsizei a5, GLint a6, GLsizei a7, const void * a8) { tglmt::gl::glCompressedTexImage3D(a0, a1, a2, a3, a4, a5, a6, a7, a8); }
@@ -780,7 +780,7 @@ void glTextureViewOES(GLuint a0, GLenum a1, GLuint a2, GLenum a3, GLuint a4, GLu
 void glBindVertexArrayOES(GLuint a0) { tglmt::gl::glBindVertexArray(a0); }
 void glDeleteVertexArraysOES(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteVertexArrays(a0, a1); }
 void glGenVertexArraysOES(GLsizei a0, GLuint * a1) { tglmt::gl::glGenVertexArrays(a0, a1); }
-GLboolean glIsVertexArrayOES(GLuint a0) { tglmt::gl::glIsVertexArray(a0); }
+GLboolean glIsVertexArrayOES(GLuint a0) { return tglmt::gl::glIsVertexArray(a0); }
 void glPointParameterfSGIS(GLenum a0, GLfloat a1) { tglmt::gl::glPointParameterf(a0, a1); }
 void glPointParameterfvSGIS(GLenum a0, const GLfloat * a1) { tglmt::gl::glPointParameterfv(a0, a1); }
 } // extern "C"
