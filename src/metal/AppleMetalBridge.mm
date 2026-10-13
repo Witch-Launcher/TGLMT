@@ -16,6 +16,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
 
 namespace tglmt::metal {
 #ifdef TGLMT_APPLE_METAL
@@ -185,11 +186,54 @@ public:
         @try { return (uint32_t)[tex_ mipmapLevelCount]; } @catch (NSException*) { return 1; }
     }
     id<MTLTexture> get() const { return tex_; }
+    // EXT_texture_swizzle: view MTLTextureSwizzle (chỉ đúng trên texture —
+    // MTLColorSwizzle/rgbaSwizzle trên sampler KHÔNG tồn tại trong SDK).
+    // tex_ bất biến trong suốt đời wrapper → view cache an toàn; texture
+    // re-upload tạo wrapper MỚI → cache mới tự sạch.
+    std::shared_ptr<ITexture> swizzledView(uint8_t r, uint8_t g, uint8_t b,
+                                           uint8_t a) override {
+        if (r == 2 && g == 3 && b == 4 && a == 5) return nullptr; // identity
+        if (!tex_) return nullptr;
+        uint32_t key = (uint32_t)r | ((uint32_t)g << 4) | ((uint32_t)b << 8) |
+                       ((uint32_t)a << 12);
+        auto it = swzCache_.find(key);
+        if (it != swzCache_.end()) return it->second;
+        @try {
+            uint32_t lv = (uint32_t)[tex_ mipmapLevelCount];
+            uint32_t sl = (uint32_t)[tex_ arrayLength];
+            if (!lv || !sl) return nullptr;
+            MTLTextureSwizzleChannels s = {SwzOf(r), SwzOf(g), SwzOf(b), SwzOf(a)};
+            id<MTLTexture> v =
+                [tex_ newTextureViewWithPixelFormat:[tex_ pixelFormat]
+                                       textureType:[tex_ textureType]
+                                            levels:NSMakeRange(0, lv)
+                                            slices:NSMakeRange(0, sl)
+                                           swizzle:s];
+            if (!v) return nullptr;
+            auto p = std::make_shared<AppleTexture>(v, w_, h_, f_);
+            p->trackDepthInit(depthInitSet_);
+            swzCache_[key] = p;
+            return p;
+        } @catch (NSException*) {
+            return nullptr;
+        }
+    }
 private:
+    static MTLTextureSwizzle SwzOf(uint8_t c) {
+        switch (c) {
+            case 0: return MTLTextureSwizzleZero;
+            case 1: return MTLTextureSwizzleOne;
+            case 3: return MTLTextureSwizzleGreen;
+            case 4: return MTLTextureSwizzleBlue;
+            case 5: return MTLTextureSwizzleAlpha;
+            default: return MTLTextureSwizzleRed; // 2 = Red
+        }
+    }
     id<MTLTexture> tex_;
     uint32_t w_, h_;
     PixelFormat f_;
     std::shared_ptr<struct DepthInitSet> depthInitSet_;
+    std::unordered_map<uint32_t, std::shared_ptr<AppleTexture>> swzCache_;
 };
 
 class AppleLibrary : public ILibrary {

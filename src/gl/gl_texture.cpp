@@ -898,11 +898,30 @@ void glTexSubImage3D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, G
 }
 void glTexParameterf(GLenum t, GLenum p, GLfloat v) { glTexParameteri(t, p, (GLint)v); }
 void glTexParameterfv(GLenum t, GLenum p, const GLfloat* v) { glTexParameteri(t, p, (GLint)v[0]); }
+// EXT_texture_swizzle: GL swizzle value → MTLTextureSwizzle code
+// (0=Zero,1=One,2=R,3=G,4=B,5=A) để ITexture::swizzledView áp lúc draw.
+static uint8_t SwzCode(GLint v) {
+    switch ((GLenum)v) {
+        case 0x0000: return 0; // GL_ZERO
+        case 0x0001: return 1; // GL_ONE
+        case 0x1904: return 3; // GL_GREEN
+        case 0x1905: return 4; // GL_BLUE
+        case 0x1906: return 5; // GL_ALPHA
+        default: return 2;     // GL_RED (và mọi giá trị lạ → spec RED)
+    }
+}
 void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     Context& c = Context::Current();
     TextureObject* tp = BoundTex(c, target);
     if (!tp) return;
     tp->params[pname] = param;
+    switch (pname) { // decode cho bind swizzled view (gl_apple_draw)
+        case 0x8E42: tp->swz[0] = SwzCode(param); break; // SWIZZLE_R
+        case 0x8E43: tp->swz[1] = SwzCode(param); break; // SWIZZLE_G
+        case 0x8E44: tp->swz[2] = SwzCode(param); break; // SWIZZLE_B
+        case 0x8E45: tp->swz[3] = SwzCode(param); break; // SWIZZLE_A
+        default: break;
+    }
 }
 void glTexParameteriv(GLenum t, GLenum p, const GLint* v) {
     // GL_TEXTURE_SWIZZLE_RGBA (0x8E46) nhận mảng 4 phần tử [R,G,B,A] → tách

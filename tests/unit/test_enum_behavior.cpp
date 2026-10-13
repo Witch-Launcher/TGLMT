@@ -7,7 +7,8 @@
 //  3. batch-5 vertex-format: glVertexAttribPointer chấp nhận HALF_FLOAT /
 //     INT_2_10_10_10_REV / UINT_2_10_10_10_REV / GL_BGRA không INVALID_ENUM
 //     và store type (ToMTLVertexFormat map Metal thật).
-// (texture_swizzle CHƯA advertise — cần texture-view swizzle trên Metal.)
+//  4. batch-6 EXT_texture_swizzle: mặc định identity, round-trip qua
+//     glTexParameteriv(0x8E46) + component lẻ (glTexParameteri) hiện trong mảng.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include <cstdio>
@@ -30,6 +31,7 @@ static const char* kBatch5[] = {
     "GL_ARB_half_float_vertex", "GL_ARB_vertex_type_2_10_10_10_rev",
     "GL_ARB_vertex_array_bgra", "GL_EXT_vertex_array_bgra",
 };
+static const char* kBatch6[] = {"GL_EXT_texture_swizzle"};
 
 int main() {
     Context ctx("null");
@@ -98,6 +100,63 @@ int main() {
         Check(got == t.want, "attrib type store đúng");
     }
     glBindVertexArray(0); glDeleteVertexArrays(1, &vao);
+
+    // --- P3 batch-6: GL_EXT_texture_swizzle round-trip.
+    for (const char* want : kBatch6) {
+        bool found = false;
+        for (GLint i = 0; i < n; ++i) {
+            const char* e = (const char*)glGetStringi(0x1F03, (GLuint)i);
+            if (e && std::string(e) == want) { found = true; break; }
+        }
+        Check(found, want);
+    }
+    while (glGetError() != 0) {}
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    // Spec: mặc định = identity (RED, GREEN, BLUE, ALPHA).
+    GLint got[4] = {-1, -1, -1, -1};
+    glGetTexParameteriv(GL_TEXTURE_2D, 0x8E46 /*SWIZZLE_RGBA*/, got);
+    Check(got[0] == 0x1903 && got[1] == 0x1904 && got[2] == 0x1905 &&
+              got[3] == 0x1906,
+          "swizzle mặc định identity");
+    // Đặt (ZERO, RED, GREEN, ALPHA) → round-trip qua glTexParm array.
+    const GLint set[4] = {0x0000, 0x1903, 0x1904, 0x1906};
+    glTexParameteriv(GL_TEXTURE_2D, 0x8E46, set);
+    Check(glGetError() == 0, "glTexParameteriv(0x8E46) không lỗi");
+    glGetTexParameteriv(GL_TEXTURE_2D, 0x8E46, got);
+    Check(got[0] == 0x0000 && got[1] == 0x1903 && got[2] == 0x1904 &&
+              got[3] == 0x1906,
+          "swizzle round-trip (ZERO,RED,GREEN,ALPHA)");
+    // Đặt component lẻ cũng phải hiện trong mảng 0x8E46.
+    glTexParameteri(GL_TEXTURE_2D, 0x8E45 /*SWIZZLE_A*/, 0x0001 /*ONE*/);
+    glGetTexParameteriv(GL_TEXTURE_2D, 0x8E46, got);
+    Check(got[3] == 0x0001, "glTexParameteri component lẻ hiện trong 0x8E46");
+
+    // swizzledView: identity → nullptr (dùng base); khác identity →
+    // Apple backend tạo MTLTextureSwizzle view THẬT, Null backend trung thực
+    // trả nullptr (không giả vờ có view).
+    GLubyte px[4] = {255, 0, 0, 255};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    {
+        Context& c = Context::Current();
+        auto it = c.textures.find(tex);
+        Check(it != c.textures.end() && it->second.gpu != nullptr, "gpu texture tạo");
+        if (it != c.textures.end() && it->second.gpu) {
+            auto idView = it->second.gpu->swizzledView(2, 3, 4, 5); // identity
+            Check(!idView, "swizzledView(identity) → nullptr (base)");
+            auto swz = it->second.gpu->swizzledView(0, 0, 0, 5); // ZERO,ZERO,ZERO,ALPHA
+            if (c.device && c.device->isNull()) {
+                Check(!swz, "Null backend: swizzledView → nullptr (trung thực)");
+            } else {
+                Check(swz != nullptr, "Metal: swizzledView tạo view");
+                if (swz) Check(swz->width() == it->second.gpu->width(),
+                               "view giữ kích thước gốc");
+            }
+        }
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDeleteTextures(1, &tex);
 
     if (gFails) return 1;
     printf("test_enum_behavior PASS\n");

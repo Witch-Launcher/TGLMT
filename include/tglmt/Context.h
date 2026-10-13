@@ -132,6 +132,10 @@ struct TextureObject {
     // đến từ render, CPU shadow luôn rỗng → probe iconatlas# đọc GPU trực tiếp.
     bool wasRT = false;
     std::unordered_map<GLenum, GLint> params; // MIN_FILTER/WRAP_S/...
+    // EXT_texture_swizzle: GL_TEXTURE_SWIZZLE_RGBA decode tại glTexParm.
+    // Code = MTLTextureSwizzle (0=Zero,1=One,2=R,3=G,4=B,5=A); mặc định
+    // identity {R,G,B,A}. Bind lúc draw → ITexture::swizzledView (gl_apple_draw).
+    uint8_t swz[4] = {2, 3, 4, 5};
     std::shared_ptr<metal::ITexture> gpu;
     // Như BufferObject::lastReadGen — encoder đã commit nhưng GPU chưa execute
     // (lastReadGen == Context::waitGen) → ghi replaceRegion sẽ đổi nội dung

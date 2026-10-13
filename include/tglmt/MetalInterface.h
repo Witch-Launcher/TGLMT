@@ -121,6 +121,13 @@ public:
     virtual PixelFormat pixelFormat() const = 0;
     // Số mip level trên GPU (quyết định lọc mip an toàn; default 1).
     virtual uint32_t levelCount() const { return 1; }
+    // GL_EXT_texture_swizzle: trả view texture áp MTLTextureSwizzle (0=Zero,
+    // 1=One, 2=Red, 3=Green, 4=Blue, 5=Alpha), cache theo combo.
+    // r==2,g==3,b==4,a==5 (identity) hoặc backend không hỗ trợ → nullptr
+    // (caller dùng texture gốc).
+    virtual std::shared_ptr<ITexture> swizzledView(uint8_t, uint8_t, uint8_t, uint8_t) {
+        return nullptr;
+    }
 };
 
 using LogFn = std::function<void(const std::string&)>;

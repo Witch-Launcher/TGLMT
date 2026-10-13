@@ -230,11 +230,18 @@ void glGetCompressedTextureImage(GLuint t, GLint l, GLsizei n, void* p) { (void)
 void glGetCompressedTextureSubImage(GLuint t, GLint l, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLsizei n, void* p) {
     (void)t;(void)l;(void)x;(void)y;(void)z;(void)w;(void)h;(void)d; if(p&&n>0) memset(p,0,(size_t)n);
 }
+// EXT_texture_swizzle: Metal code → GL swizzle value (round-trip glGet).
+static void SwzArray(const TextureObject& tx, GLint* v) {
+    static const GLint kGl[6] = {0x0000 /*ZERO*/, 0x0001 /*ONE*/, 0x1903 /*RED*/,
+                                 0x1904 /*GREEN*/, 0x1905 /*BLUE*/, 0x1906 /*ALPHA*/};
+    for (int i = 0; i < 4; ++i) v[i] = kGl[tx.swz[i] < 6 ? tx.swz[i] : 2];
+}
 void glGetTexParameteriv(GLenum t, GLenum p, GLint* v) {
     Context& c = Context::Current();
     GLuint id = c.state.BoundTexture(c.state.ActiveTexture(), t);
     auto it = c.textures.find(id);
     if (it == c.textures.end() || it->second.target != t) { c.errors.Record(0x0502); *v = 0; return; }
+    if (p == 0x8E46 && v) { SwzArray(it->second, v); return; } // SWIZZLE_RGBA (4 pt)
     auto f = it->second.params.find(p);
     *v = (f == it->second.params.end()) ? 0 : f->second;
 }
@@ -245,6 +252,7 @@ void glGetTextureParameteriv(GLuint t, GLenum p, GLint* v) {
     Context& c = Context::Current();
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    if (p == 0x8E46) { SwzArray(it->second, v); return; } // SWIZZLE_RGBA (4 pt)
     auto f = it->second.params.find(p);
     *v = (f == it->second.params.end()) ? 0 : f->second;
 }

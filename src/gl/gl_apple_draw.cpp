@@ -197,6 +197,19 @@ static inline void ConsumeDeferredClear(Context& c) {
     c.appleClearMask = 0;
 }
 
+// EXT_texture_swizzle: trả texture sẽ bind. Swizzle != identity → view
+// MTLTextureSwizzle (giữ sống trong `keep` suốt scope caller — setXxxTexture
+// của Metal giữ retain, nhưng giữ thủ công an toàn hơn); identity hoặc backend
+// không hỗ trợ (Null) → texture gốc.
+static metal::ITexture* SwzOrBase(const TextureObject& tx,
+                                  std::shared_ptr<metal::ITexture>& keep) {
+    if (!tx.gpu) return nullptr;
+    if (tx.swz[0] == 2 && tx.swz[1] == 3 && tx.swz[2] == 4 && tx.swz[3] == 5)
+        return tx.gpu.get();
+    keep = tx.gpu->swizzledView(tx.swz[0], tx.swz[1], tx.swz[2], tx.swz[3]);
+    return keep ? keep.get() : tx.gpu.get();
+}
+
 // glClear NGAY TRÊN FBO ĐANG BIND (đúng GL: clear không phụ thuộc draw tiêu thụ).
 // Thay thế cơ chế deferred cũ (applePendingClear): deferred bị ghi đè khi 2 glClear
 // liên tiếp (clear đầu mất) và bị áp lên draw FBO khác (clrmiss) → sky transparent,
@@ -1421,6 +1434,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
         }
         std::shared_ptr<metal::ISamplerState> ss;
+        std::shared_ptr<metal::ITexture> swzKeep; // view swizzle sống qua set
         if (!gpu) {
             gpu = (kind == 'C' ? FallbackBlackCube(c) : FallbackBlackTex(c)).get();
             if (!gpu) continue; // backend nghẽn, bỏ qua trung thực
@@ -1428,6 +1442,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             ss = SamplerForUnit(c, 0, dummyTex);
         } else {
             ss = SamplerForUnit(c, unit, *txp);
+            if (txp) { // EXT_texture_swizzle
+                auto* s = SwzOrBase(*txp, swzKeep);
+                if (s) gpu = s;
+            }
         }
         enc->setVertexTexture(gpu, (uint32_t)k);
         if (ss) enc->setVertexSamplerState(ss.get(), (uint32_t)k);
@@ -1593,6 +1611,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
         }
         std::shared_ptr<metal::ISamplerState> ss;
+        std::shared_ptr<metal::ITexture> swzKeep; // view swizzle sống qua set
         if (!gpu) {
             gpu = (kind == 'C' ? FallbackBlackCube(c) : FallbackBlackTex(c)).get();
             if (!gpu) continue; // backend nghẽn, bỏ qua trung thực
@@ -1600,6 +1619,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             ss = SamplerForUnit(c, 0, dummyTex);
         } else {
             ss = SamplerForUnit(c, unit, *txp);
+            if (txp) { // EXT_texture_swizzle
+                auto* s = SwzOrBase(*txp, swzKeep);
+                if (s) gpu = s;
+            }
         }
         enc->setFragmentTexture(gpu, (uint32_t)k);
         if (ss) enc->setFragmentSamplerState(ss.get(), (uint32_t)k);
@@ -1612,7 +1635,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             auto tit = c.textures.find(texId);
             if (tit == c.textures.end() || !tit->second.gpu) continue;
             c.NoteTextureUsed(texId);
-            enc->setFragmentTexture(tit->second.gpu.get(), unit);
+            std::shared_ptr<metal::ITexture> swzKeep; // EXT_texture_swizzle
+            auto* s = SwzOrBase(tit->second, swzKeep);
+            enc->setFragmentTexture(s ? s : tit->second.gpu.get(), unit);
             auto ss = SamplerForUnit(c, unit, tit->second);
             if (ss) enc->setFragmentSamplerState(ss.get(), unit);
         }

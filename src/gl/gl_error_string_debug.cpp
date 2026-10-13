@@ -141,8 +141,12 @@ static const char* const kExts[] = {
     "GL_ARB_vertex_type_2_10_10_10_rev",
     "GL_ARB_vertex_array_bgra",
     "GL_EXT_vertex_array_bgra",
+    // P3 batch-6: texture_swizzle ĐÃ implement (trước đây loại — sampler không
+    // swizzle được trên Metal; giờ dùng texture-view swizzle, xem AppleTexture::
+    // swizzledView + SwzOrBase trong gl_apple_draw): glTexParm decode swz[] →
+    // bind lúc draw qua MTLTextureSwizzle; glGetTexParameteriv(0x8E46) round-trip.
+    "GL_EXT_texture_swizzle",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
-    //  texture_swizzle (cần texture-view swizzle, sampler không swizzle trên Metal),
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),
     //  occlusion ANY_SAMPLES (cần GPU query), clear_texture (no-op),
