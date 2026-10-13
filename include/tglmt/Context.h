@@ -270,6 +270,10 @@ struct QueryObject {
     // glBeginQuery snapshot lại, glEndQuery tính delta (đúng spec §18.4.2 —
     // kết quả là số lần gọi GIỮA glBegin/glEnd, không phải tổng cả session).
     GLuint64 pipeSnapshot = 0;
+    // Occlusion ANY_SAMPLES: byte offset trong occlBuf (UINT64_MAX = không phải
+    // occlusion). Sau glEndQuery, GPU ghi 1 vào occlBuf[slot] nếu có fragment
+    // pass depth-test; đọc sau CommitAndWait.
+    uint64_t occlSlot = UINT64_MAX;
 };
 struct SyncObject { GLuint id = 0; bool signaled = false; };
 // Buffer range cho glBindBufferBase/Range (UBO index 0x8A11, SSBO 0x90D2).
@@ -441,6 +445,14 @@ public:
         uint64_t fsInvocations = 0;    // GL_FRAGMENT_SHADER_INVOCATIONS_ARB (0: không đo được)
         uint64_t csInvocations = 0;    // GL_COMPUTE_SHADER_INVOCATIONS
     } pipeStats;
+
+    // Occlusion ANY_SAMPLES (EXT_occlusion_query_boolean): buffer visibility
+    // do device sở hữu (IDevice::visibilityBuffer), đính trên render pass
+    // descriptor. Context chỉ track query active + slot offset.
+    static constexpr uint64_t kOcclNumSlots = 256;
+    GLuint occlActiveQ = 0;                     // id query occlusion đang active (0 = none)
+    uint64_t occlSlot = 0;                      // byte offset của slot active
+    bool occlPendingRead = false;               // đã glEndQuery, chờ đọc kết quả
 
     // RAII đo thời gian CPU của một pha: khai báo biến ở đầu hàm, huỷ tự cộng
     // thời gian vào AppleStats::*field. Không nhánh return nào bị sót.

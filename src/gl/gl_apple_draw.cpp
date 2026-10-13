@@ -1793,8 +1793,14 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             if (c.ringBuf[i] && ibHold == c.ringBuf[i]) { isRing = true; break; }
         if (!isRing) c.pendingKeep.push_back(ibHold);
     }
+    // Occlusion ANY_SAMPLES: nếu có query active, bật Metal visibility result
+    // mode trên encoder (buffer đã đính ở render pass descriptor qua attachVis).
+    // Tắt lại ngay sau draw để draw khác trong cùng encoder không ghi vào slot.
+    bool occOn = (c.occlActiveQ != 0 && c.device && !c.device->isNull());
+    if (occOn) enc->setVisibilityResult(c.device->visibilityBuffer(), c.occlSlot, true);
     if (indexed) enc->drawIndexed(prim, (uint32_t)count, ity, ibGet() ? ibGet() : ibHold.get(), ioff, (uint32_t)inst);
     else enc->drawPrimitives(prim, (uint32_t)first, (uint32_t)count, (uint32_t)inst);
+    if (occOn) enc->setVisibilityResult(nullptr, 0, false);
     // IR: KHÔNG commit mỗi draw. Encoder giữ mở để batch N draw → 1 commit ở flush
     // (ReadPixels/Blit/present/EndFrame/target đổi/glClear). Trước đây mỗi draw =
     // 1 commandBuffer + commit (1 GL → 3 Metal). Giờ N draw cùng pass = 1 encoder.

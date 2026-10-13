@@ -460,6 +460,23 @@ int main() {
         Check(sf == 0x0204, "ATI separate stencil back func round-trip");
         glGetIntegerv(0x8CA3 /*STENCIL_BACK_REF*/, &sf);
         Check(sf == 7, "ATI separate stencil back ref round-trip");
+
+        // 9e. Occlusion ANY_SAMPLES: glBegin/glEnd + QUERY_RESULT không lỗi.
+        // Null backend: không render → result 0 (trung thực: không có fragment
+        // pass depth-test). Metal backend: visibility buffer thật.
+        while (glGetError() != 0) {}
+        GLuint occl = 0;
+        glGenQueries(1, &occl);
+        glBeginQuery(0x8C2F /*ANY_SAMPLES_PASSED*/, occl);
+        Check(glGetError() == 0, "glBeginQuery ANY_SAMPLES không lỗi");
+        glEndQuery(0x8C2F);
+        Check(glGetError() == 0, "glEndQuery ANY_SAMPLES không lỗi");
+        GLint avail = 0, res = -1;
+        glGetQueryObjectiv(occl, 0x8867 /*QUERY_RESULT_AVAILABLE*/, &avail);
+        glGetQueryObjectiv(occl, 0x8866 /*QUERY_RESULT*/, &res);
+        Check(avail == 1, "occlusion QUERY_RESULT_AVAILABLE = 1");
+        Check(res == 0 || res == 1, "occlusion result boolean 0/1");
+        glDeleteQueries(1, &occl);
     }
 
     if (gFails) return 1;

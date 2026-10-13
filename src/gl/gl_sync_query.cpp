@@ -80,22 +80,51 @@ static bool PipeStatOf(const Context::PipeStats& s, GLenum t, GLuint64* out) {
     }
 }
 
+// Occlusion ANY_SAMPLES (EXT_occlusion_query_boolean): Metal visibility result.
+// Buffer shared unified-memory; GPU ghi non-zero nếu fragment pass depth-test.
+// SAMPLES_PASSED (ARB_occlusion_query) xấp xỉ boolean (đếm mẫu → 0/1).
+static bool IsOcclusionTarget(GLenum t) {
+    return t == 0x8C2F /*ANY_SAMPLES_PASSED*/ ||
+           t == 0x8D6A /*ANY_SAMPLES_PASSED_CONSERVATIVE*/ ||
+           t == 0x8896 /*SAMPLES_PASSED (boolean approximation)*/;
+}
+
 void glBeginQuery(GLenum t, GLuint id) {
     Context& c = Context::Current();
     auto it = c.queries.find(id);
     if (it == c.queries.end()) { c.errors.Record(0x0502); return; }
     it->second.target = t; it->second.active = true; it->second.ready = false;
+    it->second.occlSlot = UINT64_MAX;
     GLuint64 v = 0;
     if (PipeStatOf(c.pipeStats, t, &v)) it->second.pipeSnapshot = v;
+    // Occlusion: chỉ backend thật mới set visibility (Null không render → 0).
+    if (IsOcclusionTarget(t) && c.device && !c.device->isNull()) {
+        metal::IBuffer* vis = c.device->visibilityBuffer();
+        if (vis && vis->contents()) {
+            static uint64_t next = 0;
+            c.occlSlot = (next++ % Context::kOcclNumSlots) * 8;
+            *(volatile uint64_t*)((char*)vis->contents() + c.occlSlot) = 0;
+            c.occlActiveQ = id;
+            it->second.occlSlot = c.occlSlot;
+        }
+    }
 }
 void glEndQuery(GLenum t) {
     Context& c = Context::Current();
     for (auto& [id, q] : c.queries) if (q.target == t && q.active) {
-        q.active = false; q.ready = true;
-        // visibilityResultMode / GPUStartTime-EndTime → Null: result 0 + ready
-        GLuint64 v = 0;
-        if (PipeStatOf(c.pipeStats, t, &v)) q.result = v - q.pipeSnapshot; // delta
-        else q.result = 0;
+        q.active = false;
+        if (IsOcclusionTarget(t) && q.occlSlot != UINT64_MAX) {
+            // Chưa đọc được ngay — GPU có thể还在 encode. ready=false, đọc
+            // sau trong glGetQueryObjectiv (CommitAndWait trước).
+            q.ready = false;
+            c.occlPendingRead = true;
+            if (c.occlActiveQ == id) c.occlActiveQ = 0;
+        } else {
+            q.ready = true;
+            GLuint64 v = 0;
+            if (PipeStatOf(c.pipeStats, t, &v)) q.result = v - q.pipeSnapshot;
+            else q.result = 0;
+        }
     }
 }
 void glBeginQueryIndexed(GLenum t, GLuint idx, GLuint id) { (void)idx; glBeginQuery(t, id); }
@@ -117,8 +146,21 @@ void glGetQueryObjectiv(GLuint id, GLenum p, GLint* v) {
     Context& c = Context::Current();
     auto it = c.queries.find(id);
     if (it == c.queries.end()) { c.errors.Record(0x0502); return; }
-    if (p == 0x8867) *v = it->second.ready ? 1 : 0;       // QUERY_RESULT_AVAILABLE
-    else if (p == 0x8866) *v = (GLint)it->second.result;  // QUERY_RESULT
+    QueryObject& q = it->second;
+    // Occlusion ANY_SAMPLES: đọc kết quả thật từ visibility buffer. Cần GPU
+    // đã execute xong draw (CommitAndWait) rồi mới đọc shared memory.
+    if (!q.ready && q.occlSlot != UINT64_MAX && c.device && !c.device->isNull()) {
+        metal::IBuffer* vis = c.device->visibilityBuffer();
+        if (vis && vis->contents()) {
+            c.FlushPendingEncoder();       // end + commit các draw đang encode
+            c.CommitAndWait();             // chờ GPU xong
+            uint64_t w = *(volatile uint64_t*)((char*)vis->contents() + q.occlSlot);
+            q.result = w ? 1 : 0;          // boolean: 0 = fully occluded, 1 = visible
+            q.ready = true;
+        } else { q.result = 0; q.ready = true; } // Null: không render → 0
+    }
+    if (p == 0x8867) *v = q.ready ? 1 : 0;       // QUERY_RESULT_AVAILABLE
+    else if (p == 0x8866) *v = (GLint)q.result;  // QUERY_RESULT
     else *v = 0;
 }
 void glGetQueryObjectuiv(GLuint id, GLenum p, GLuint* v) { GLint t=0; glGetQueryObjectiv(id,p,&t); *v=(GLuint)t; }
@@ -126,8 +168,19 @@ void glGetQueryObjecti64v(GLuint id, GLenum p, GLint64* v) {
     Context& c = Context::Current();
     auto it = c.queries.find(id);
     if (it == c.queries.end()) { c.errors.Record(0x0502); return; }
-    if (p == 0x8867) *v = it->second.ready ? 1 : 0;
-    else *v = (GLint64)it->second.result;
+    QueryObject& q = it->second;
+    if (!q.ready && q.occlSlot != UINT64_MAX && c.device && !c.device->isNull()) {
+        metal::IBuffer* vis = c.device->visibilityBuffer();
+        if (vis && vis->contents()) {
+            c.FlushPendingEncoder();
+            c.CommitAndWait();
+            uint64_t w = *(volatile uint64_t*)((char*)vis->contents() + q.occlSlot);
+            q.result = w ? 1 : 0;
+            q.ready = true;
+        } else { q.result = 0; q.ready = true; }
+    }
+    if (p == 0x8867) *v = q.ready ? 1 : 0;
+    else *v = (GLint64)q.result;
 }
 void glGetQueryObjectui64v(GLuint id, GLenum p, GLuint64* v) { GLint64 t=0; glGetQueryObjecti64v(id,p,&t); *v=(GLuint64)t; }
 void glGetQueryBufferObjectiv(GLuint a, GLuint b, GLenum c_, GLintptr d) { (void)a;(void)b;(void)c_;(void)d; }

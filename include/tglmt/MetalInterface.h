@@ -198,6 +198,7 @@ public:
     virtual void setDepthStencilState(IDepthStencilState* s) { (void)s; } // glDepthFunc/Mask
     // glPolygonOffset / glPolygonOffsetClamp (ARB_polygon_offset_clamp):
     // Metal setDepthBias:slopeScale:clamp: — bias là hằng số, slopeScale nhân
+    // với derivative. Null backend: no-op.
     // max-depth-slope, clamp là giá trị lớn nhất bias được phép (0 = không clamp).
     virtual void setDepthBias(float bias, float slopeScale, float clamp) {
         (void)bias; (void)slopeScale; (void)clamp;
@@ -217,6 +218,12 @@ public:
     // GL_DEPTH_CLAMP (ARB_depth_clamp): clamp=true → MTLDepthClipModeClamp
     // (depth vượt near/far KHÔNG bị clip); false → clip (mặc định GL).
     virtual void setDepthClipMode(bool clamp) { (void)clamp; }
+    // Occlusion ANY_SAMPLES (EXT_occlusion_query_boolean): Metal
+    // setVisibilityResultMode:Boolean + setVisibilityResultBuffer. Buffer shared
+    // (unified memory A11) → CPU đọc được sau khi GPU xong. enable=false → ModeDisabled.
+    virtual void setVisibilityResult(IBuffer* b, uint64_t off, bool enable) {
+        (void)b; (void)off; (void)enable;
+    }
     // Blend color (glBlendColor) cho factors CONSTANT_*.
     virtual void setBlendColor(float r, float g, float b, float a) {
         (void)r; (void)g; (void)b; (void)a;
@@ -248,6 +255,10 @@ public:
     virtual bool isNull() const = 0;
     virtual std::shared_ptr<IBuffer> newBuffer(size_t len, StorageMode m) = 0;
     virtual std::shared_ptr<IBuffer> newBufferWithBytes(const void* p, size_t len, StorageMode m) = 0;
+    // Occlusion ANY_SAMPLES: buffer visibility dùng chung cho mọi render pass.
+    // Đính trên MTLRenderPassDescriptor (không set được sau khi tạo encoder);
+    // encoder chỉ đổi setVisibilityResultMode:offset:. Null backend → nullptr.
+    virtual IBuffer* visibilityBuffer() { return nullptr; }
     virtual std::shared_ptr<ITexture> newTexture(uint32_t w, uint32_t h, PixelFormat f) = 0;
     virtual std::shared_ptr<IEncoder> makeEncoder() = 0;
     virtual void commitAndWait() = 0;

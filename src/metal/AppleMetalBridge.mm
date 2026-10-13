@@ -522,6 +522,17 @@ public:
         if (!ok_) return;
         [enc_ setDepthBias:bias slopeScale:slopeScale clamp:clamp];
     }
+    void setVisibilityResult(IBuffer* b, uint64_t off, bool enable) override {
+        // Occlusion ANY_SAMPLES: buffer đã đính trên render pass descriptor
+        // (attachVis) — encoder chỉ đổi MODE. enable=false → ModeDisabled.
+        (void)b; // buffer luôn là device->visibilityBuffer(); mode quyết định ghi
+        if (!ok_) return;
+        if (!enable) {
+            [enc_ setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+            return;
+        }
+        [enc_ setVisibilityResultMode:MTLVisibilityResultModeBoolean offset:off];
+    }
     bool endAndCommitNoWait() override {
         if (!enc_ || !cb_) return false;
         [enc_ endEncoding];
@@ -640,6 +651,26 @@ public:
         id<MTLBuffer> b = [dev_ newBufferWithBytes:p length:(NSUInteger)n
                             options:MTLResourceStorageModeShared];
         return b ? std::make_shared<AppleBuffer>(b) : nullptr;
+    }
+    // Occlusion ANY_SAMPLES: buffer visibility dùng chung, đính trên mọi render
+    // pass descriptor (set được vì tạo trước encoder). Shared (unified memory)
+    // để CPU đọc kết quả sau khi GPU xong.
+    IBuffer* visibilityBuffer() override {
+        if (!visWrap_) {
+            NSUInteger len = 256 * 8; // 256 slot × 8 byte = 2KB
+            id<MTLBuffer> b = [dev_ newBufferWithLength:len
+                                options:MTLResourceStorageModeShared];
+            if (!b) return nullptr;
+            memset([b contents], 0, len);
+            visWrap_ = std::make_shared<AppleBuffer>(b);
+        }
+        return visWrap_.get();
+    }
+    // Gắn visibility buffer lên render pass descriptor (phải trước khi tạo
+    // encoder — Metal không setVisibilityResultBuffer trên encoder được).
+    void attachVis(MTLRenderPassDescriptor* rp) {
+        if (!rp || !visWrap_) return;
+        rp.visibilityResultBuffer = visWrap_->get();
     }
     std::shared_ptr<ITexture> newTexture(uint32_t w, uint32_t h, PixelFormat f) override {
         // Guard: validateWithDevice THIẾU width/height quá max là abort không
@@ -969,6 +1000,7 @@ public:
             rp.colorAttachments[0].texture = drawable.texture;
             rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            attachVis(rp);
             id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
             if (!enc) return false;
             [enc setRenderPipelineState:flipPipe_];
@@ -1598,6 +1630,7 @@ public:
             rp.depthAttachment.storeAction = MTLStoreActionStore;
             rp.depthAttachment.clearDepth = 1.0;
         }
+        attachVis(rp);
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
@@ -1638,6 +1671,7 @@ public:
             rp.depthAttachment.storeAction = MTLStoreActionStore; // TBDR: Load pass sau cần Store
             rp.depthAttachment.clearDepth = clearDepth;
         }
+        attachVis(rp);
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
@@ -1668,6 +1702,7 @@ public:
             rp.depthAttachment.loadAction = dl;
             rp.depthAttachment.storeAction = MTLStoreActionStore;
         }
+        attachVis(rp);
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
@@ -1717,6 +1752,7 @@ public:
             rp.depthAttachment.storeAction = MTLStoreActionStore;
             rp.depthAttachment.clearDepth = clearDepth;
         }
+        attachVis(rp);
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         if (scissor && scissor->w > 0 && scissor->h > 0) {
@@ -1743,6 +1779,7 @@ public:
             rp.colorAttachments[0].texture = b->get();
             rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            attachVis(rp);
             id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
             if (!enc) return false;
             [enc setRenderPipelineState:flipPipe_];
@@ -1933,6 +1970,7 @@ public:
                 rp.depthAttachment.loadAction = MTLLoadActionClear;
                 rp.depthAttachment.storeAction = MTLStoreActionStore;
                 rp.depthAttachment.clearDepth = clearDepth;
+                attachVis(rp);
                 id<MTLRenderCommandEncoder> de = [cb renderCommandEncoderWithDescriptor:rp];
                 if (de) [de endEncoding];
             }
@@ -1962,6 +2000,7 @@ private:
     int presentProbe_ = 0;
     id<MTLBuffer> clearBuf_ = nil;             // buffer cho fillRegionColor (tái sử dụng)
     size_t clearBufSize_ = 0;
+    std::shared_ptr<AppleBuffer> visWrap_;     // occlusion ANY_SAMPLES (256 slot × 8B)
     // p7: batch clear-ONLY. clrCB_ != nil ⟹ chưa commit; mọi method tạo CB khác
     // phải flushClearBatch() trước. kClearBatchMax chặn batch dài bất thường.
     static constexpr int kClearBatchMax = 16;
