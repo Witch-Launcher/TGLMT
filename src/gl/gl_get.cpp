@@ -76,6 +76,10 @@ void glGetIntegerv(GLenum p, GLint* v) {
         case 0x0BE2: *v = c.state.IsEnabled(0x0BE2) ? 1 : 0; return; // BLEND
         case 0x0B44: *v = c.state.IsEnabled(0x0B44) ? 1 : 0; return; // CULL_FACE
         case 0x0D3A: v[0] = 8192; v[1] = 8192; return;             // MAX_VIEWPORT_DIMS (2 giá trị)
+        // GL_NV_polygon_mode: glPolygonMode lưu polyMode_ (FRONT_AND_BACK chung).
+        // Refpage: POLYGON_MODE trả 2 phần tử [front, back] — TGLMT dùng chung 1 mode.
+        case 0x0B40: v[0] = (GLint)c.state.PolygonMode();
+                     v[1] = (GLint)c.state.PolygonMode(); return;  // POLYGON_MODE
         // GL_ARB_get_program_binary: TGLMT có 1 format duy nhất (GLSL gốc).
         case 0x87FE: *v = 1; return;                               // NUM_PROGRAM_BINARY_FORMATS
         case 0x87FD: *v = (GLint)0x54474D54; return;               // PROGRAM_BINARY_FORMATS[0] = 'TGMT'

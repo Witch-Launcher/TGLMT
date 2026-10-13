@@ -120,6 +120,8 @@ static MTLSamplerAddressMode ToMTLWrap(uint32_t g) {
         case 0x2901: return MTLSamplerAddressModeRepeat;
         case 0x8370: return MTLSamplerAddressModeMirrorRepeat;
         case 0x812D: return MTLSamplerAddressModeClampToBorderColor;
+        case 0x8743: // GL_MIRROR_CLAMP_TO_EDGE (mirror-clamp lặp, kẹp mép)
+            return MTLSamplerAddressModeMirrorClampToEdge;
         default: return MTLSamplerAddressModeClampToEdge; // 0x812F CLAMP_TO_EDGE
     }
 }

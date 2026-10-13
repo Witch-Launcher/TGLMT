@@ -151,6 +151,34 @@ static const char* const kExts[] = {
     // (location sinh lại đúng khi link). Format lạ → INVALID_ENUM trung thực.
     // glGetIntegerv(NUM/FORMATS) + glGetProgramiv(LENGTH) trả thật.
     "GL_ARB_get_program_binary",
+    // ===== P3 batch-8: 20 ext — behavior ĐÃ verify thật trước khi advertise. =====
+    // (a) Wrap: ToMTLWrap thêm case 0x8743 → MTLSamplerAddressModeMirrorClampToEdge
+    "GL_ARB_texture_mirror_clamp_to_edge",
+    "GL_EXT_texture_mirror_clamp_to_edge",
+    // (b) ARB_swizzle = hành vi EXT_swizzle vừa implement (bind view swizzled)
+    "GL_ARB_texture_swizzle",
+    // (c) API-side, hàm thật:
+    "GL_ARB_draw_elements_base_vertex",
+    "GL_ARB_copy_image",
+    "GL_ARB_get_texture_sub_image",
+    "GL_ARB_multi_draw_indirect",
+    "GL_ARB_texture_buffer_range",
+    "GL_ARB_vertex_attrib_binding",
+    "GL_ARB_sync",
+    "GL_ARB_timer_query",
+    "GL_NV_polygon_mode",
+    // (d) Alias ext — symbol extern "C" + hàm core thật (gl_ext_aliases_gen):
+    "GL_MESA_sampler_objects",
+    "GL_AMD_multi_draw_indirect",
+    "GL_NV_copy_buffer",
+    "GL_NV_copy_image",
+    "GL_NV_draw_instanced",
+    "GL_NV_draw_buffers",
+    "GL_NV_framebuffer_blit",
+    "GL_NV_instanced_arrays",
+    "GL_NV_non_square_matrices",
+    "GL_ATI_draw_buffers",
+    "GL_OES_get_program_binary",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),

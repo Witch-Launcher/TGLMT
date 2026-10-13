@@ -5,6 +5,8 @@
 #include "tglmt/gl46.h"
 using namespace tglmt;
 namespace tglmt { namespace gl {
+void glMultiDrawArraysIndirect(GLenum a0, const void * a1, GLsizei a2, GLsizei a3);
+void glMultiDrawElementsIndirect(GLenum a0, GLenum a1, const void * a2, GLsizei a3, GLsizei a4);
 GLenum glClientWaitSync(GLsync a0, GLbitfield a1, GLuint64 a2);
 void glDeleteSync(GLsync a0);
 GLsync glFenceSync(GLenum a0, GLbitfield a1);
@@ -122,6 +124,9 @@ void glVertexAttrib4ubv(GLuint a0, const GLubyte * a1);
 void glVertexAttrib4uiv(GLuint a0, const GLuint * a1);
 void glVertexAttrib4usv(GLuint a0, const GLushort * a1);
 void glVertexAttribPointer(GLuint a0, GLint a1, GLenum a2, GLboolean a3, GLsizei a4, const void * a5);
+void glDrawBuffers(GLsizei a0, const GLenum * a1);
+void glStencilFuncSeparate(GLenum a0, GLenum a1, GLint a2, GLuint a3);
+void glStencilOpSeparate(GLenum a0, GLenum a1, GLenum a2, GLenum a3);
 void glDrawArraysInstancedBaseInstance(GLenum a0, GLint a1, GLsizei a2, GLsizei a3, GLuint a4);
 void glDrawElementsInstancedBaseInstance(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4, GLuint a5);
 void glDrawElementsInstancedBaseVertexBaseInstance(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4, GLint a5, GLuint a6);
@@ -291,6 +296,59 @@ void glGetnUniformfv(GLuint a0, GLint a1, GLsizei a2, GLfloat * a3);
 void glGetnUniformiv(GLuint a0, GLint a1, GLsizei a2, GLint * a3);
 void glGetnUniformuiv(GLuint a0, GLint a1, GLsizei a2, GLuint * a3);
 void glReadnPixels(GLint a0, GLint a1, GLsizei a2, GLsizei a3, GLenum a4, GLenum a5, GLsizei a6, void * a7);
+void glFramebufferParameteri(GLenum a0, GLenum a1, GLint a2);
+void glGetFramebufferParameteriv(GLenum a0, GLenum a1, GLint * a2);
+void glBeginConditionalRender(GLuint a0, GLenum a1);
+void glEndConditionalRender(void);
+void glCopyBufferSubData(GLenum a0, GLenum a1, GLintptr a2, GLintptr a3, GLsizeiptr a4);
+void glCopyImageSubData(GLuint a0, GLenum a1, GLint a2, GLint a3, GLint a4, GLint a5, GLuint a6, GLenum a7, GLint a8, GLint a9, GLint a10, GLint a11, GLsizei a12, GLsizei a13, GLsizei a14);
+void glDrawBuffers(GLsizei a0, const GLenum * a1);
+void glDrawArraysInstanced(GLenum a0, GLint a1, GLsizei a2, GLsizei a3);
+void glDrawElementsInstanced(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4);
+void glBlitFramebuffer(GLint a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLint a7, GLbitfield a8, GLenum a9);
+void glRenderbufferStorageMultisample(GLenum a0, GLsizei a1, GLenum a2, GLsizei a3, GLsizei a4);
+void glVertexAttribDivisor(GLuint a0, GLuint a1);
+void glUniformMatrix2x3fv(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3);
+void glUniformMatrix2x4fv(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3);
+void glUniformMatrix3x2fv(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3);
+void glUniformMatrix3x4fv(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3);
+void glUniformMatrix4x2fv(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3);
+void glUniformMatrix4x3fv(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3);
+void glPointParameteri(GLenum a0, GLint a1);
+void glPointParameteriv(GLenum a0, const GLint * a1);
+void glPolygonMode(GLenum a0, GLenum a1);
+void glReadBuffer(GLenum a0);
+void glTextureBarrier(void);
+void glBindTransformFeedback(GLenum a0, GLuint a1);
+void glDeleteTransformFeedbacks(GLsizei a0, const GLuint * a1);
+void glDrawTransformFeedback(GLenum a0, GLuint a1);
+void glGenTransformFeedbacks(GLsizei a0, GLuint * a1);
+GLboolean glIsTransformFeedback(GLuint a0);
+void glPauseTransformFeedback(void);
+void glResumeTransformFeedback(void);
+void glGetVertexAttribIiv(GLuint a0, GLenum a1, GLint * a2);
+void glGetVertexAttribIuiv(GLuint a0, GLenum a1, GLuint * a2);
+void glVertexAttribI1i(GLuint a0, GLint a1);
+void glVertexAttribI1iv(GLuint a0, const GLint * a1);
+void glVertexAttribI1ui(GLuint a0, GLuint a1);
+void glVertexAttribI1uiv(GLuint a0, const GLuint * a1);
+void glVertexAttribI2i(GLuint a0, GLint a1, GLint a2);
+void glVertexAttribI2iv(GLuint a0, const GLint * a1);
+void glVertexAttribI2ui(GLuint a0, GLuint a1, GLuint a2);
+void glVertexAttribI2uiv(GLuint a0, const GLuint * a1);
+void glVertexAttribI3i(GLuint a0, GLint a1, GLint a2, GLint a3);
+void glVertexAttribI3iv(GLuint a0, const GLint * a1);
+void glVertexAttribI3ui(GLuint a0, GLuint a1, GLuint a2, GLuint a3);
+void glVertexAttribI3uiv(GLuint a0, const GLuint * a1);
+void glVertexAttribI4bv(GLuint a0, const GLbyte * a1);
+void glVertexAttribI4i(GLuint a0, GLint a1, GLint a2, GLint a3, GLint a4);
+void glVertexAttribI4iv(GLuint a0, const GLint * a1);
+void glVertexAttribI4sv(GLuint a0, const GLshort * a1);
+void glVertexAttribI4ubv(GLuint a0, const GLubyte * a1);
+void glVertexAttribI4ui(GLuint a0, GLuint a1, GLuint a2, GLuint a3, GLuint a4);
+void glVertexAttribI4uiv(GLuint a0, const GLuint * a1);
+void glVertexAttribI4usv(GLuint a0, const GLushort * a1);
+void glVertexAttribIPointer(GLuint a0, GLint a1, GLenum a2, GLsizei a3, const void * a4);
 void glBlendEquationSeparate(GLenum a0, GLenum a1);
 void glBlendFuncSeparate(GLenum a0, GLenum a1, GLenum a2, GLenum a3);
 void glBlendEquation(GLenum a0);
@@ -324,6 +382,7 @@ GLboolean glIsRenderbuffer(GLuint a0);
 void glRenderbufferStorage(GLenum a0, GLenum a1, GLsizei a2, GLsizei a3);
 void glFramebufferTexture(GLenum a0, GLenum a1, GLuint a2, GLint a3);
 void glGetProgramBinary(GLuint a0, GLsizei a1, GLsizei * a2, GLenum * a3, void * a4);
+void glProgramBinary(GLuint a0, GLenum a1, const void * a2, GLsizei a3);
 void glGetBufferPointerv(GLenum a0, GLenum a1, void ** a2);
 void * glMapBuffer(GLenum a0, GLenum a1);
 GLboolean glUnmapBuffer(GLenum a0);
@@ -350,9 +409,13 @@ void glBindVertexArray(GLuint a0);
 void glDeleteVertexArrays(GLsizei a0, const GLuint * a1);
 void glGenVertexArrays(GLsizei a0, GLuint * a1);
 GLboolean glIsVertexArray(GLuint a0);
+void glPointParameterf(GLenum a0, GLfloat a1);
+void glPointParameterfv(GLenum a0, const GLfloat * a1);
 } }
 
 extern "C" {
+void glMultiDrawArraysIndirectAMD(GLenum a0, const void * a1, GLsizei a2, GLsizei a3) { tglmt::gl::glMultiDrawArraysIndirect(a0, a1, a2, a3); }
+void glMultiDrawElementsIndirectAMD(GLenum a0, GLenum a1, const void * a2, GLsizei a3, GLsizei a4) { tglmt::gl::glMultiDrawElementsIndirect(a0, a1, a2, a3, a4); }
 GLenum glClientWaitSyncAPPLE(GLsync a0, GLbitfield a1, GLuint64 a2) { tglmt::gl::glClientWaitSync(a0, a1, a2); }
 void glDeleteSyncAPPLE(GLsync a0) { tglmt::gl::glDeleteSync(a0); }
 GLsync glFenceSyncAPPLE(GLenum a0, GLbitfield a1) { tglmt::gl::glFenceSync(a0, a1); }
@@ -470,6 +533,9 @@ void glVertexAttrib4ubvARB(GLuint a0, const GLubyte * a1) { tglmt::gl::glVertexA
 void glVertexAttrib4uivARB(GLuint a0, const GLuint * a1) { tglmt::gl::glVertexAttrib4uiv(a0, a1); }
 void glVertexAttrib4usvARB(GLuint a0, const GLushort * a1) { tglmt::gl::glVertexAttrib4usv(a0, a1); }
 void glVertexAttribPointerARB(GLuint a0, GLint a1, GLenum a2, GLboolean a3, GLsizei a4, const void * a5) { tglmt::gl::glVertexAttribPointer(a0, a1, a2, a3, a4, a5); }
+void glDrawBuffersATI(GLsizei a0, const GLenum * a1) { tglmt::gl::glDrawBuffers(a0, a1); }
+void glStencilFuncSeparateATI(GLenum a0, GLenum a1, GLint a2, GLuint a3) { tglmt::gl::glStencilFuncSeparate(a0, a1, a2, a3); }
+void glStencilOpSeparateATI(GLenum a0, GLenum a1, GLenum a2, GLenum a3) { tglmt::gl::glStencilOpSeparate(a0, a1, a2, a3); }
 void glDrawArraysInstancedBaseInstanceEXT(GLenum a0, GLint a1, GLsizei a2, GLsizei a3, GLuint a4) { tglmt::gl::glDrawArraysInstancedBaseInstance(a0, a1, a2, a3, a4); }
 void glDrawElementsInstancedBaseInstanceEXT(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4, GLuint a5) { tglmt::gl::glDrawElementsInstancedBaseInstance(a0, a1, a2, a3, a4, a5); }
 void glDrawElementsInstancedBaseVertexBaseInstanceEXT(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4, GLint a5, GLuint a6) { tglmt::gl::glDrawElementsInstancedBaseVertexBaseInstance(a0, a1, a2, a3, a4, a5, a6); }
@@ -626,6 +692,36 @@ void glGetnUniformfvKHR(GLuint a0, GLint a1, GLsizei a2, GLfloat * a3) { tglmt::
 void glGetnUniformivKHR(GLuint a0, GLint a1, GLsizei a2, GLint * a3) { tglmt::gl::glGetnUniformiv(a0, a1, a2, a3); }
 void glGetnUniformuivKHR(GLuint a0, GLint a1, GLsizei a2, GLuint * a3) { tglmt::gl::glGetnUniformuiv(a0, a1, a2, a3); }
 void glReadnPixelsKHR(GLint a0, GLint a1, GLsizei a2, GLsizei a3, GLenum a4, GLenum a5, GLsizei a6, void * a7) { tglmt::gl::glReadnPixels(a0, a1, a2, a3, a4, a5, a6, a7); }
+void glFramebufferParameteriMESA(GLenum a0, GLenum a1, GLint a2) { tglmt::gl::glFramebufferParameteri(a0, a1, a2); }
+void glGetFramebufferParameterivMESA(GLenum a0, GLenum a1, GLint * a2) { tglmt::gl::glGetFramebufferParameteriv(a0, a1, a2); }
+void glBeginConditionalRenderNV(GLuint a0, GLenum a1) { tglmt::gl::glBeginConditionalRender(a0, a1); }
+void glEndConditionalRenderNV(void) { tglmt::gl::glEndConditionalRender(); }
+void glCopyBufferSubDataNV(GLenum a0, GLenum a1, GLintptr a2, GLintptr a3, GLsizeiptr a4) { tglmt::gl::glCopyBufferSubData(a0, a1, a2, a3, a4); }
+void glCopyImageSubDataNV(GLuint a0, GLenum a1, GLint a2, GLint a3, GLint a4, GLint a5, GLuint a6, GLenum a7, GLint a8, GLint a9, GLint a10, GLint a11, GLsizei a12, GLsizei a13, GLsizei a14) { tglmt::gl::glCopyImageSubData(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14); }
+void glDrawBuffersNV(GLsizei a0, const GLenum * a1) { tglmt::gl::glDrawBuffers(a0, a1); }
+void glDrawArraysInstancedNV(GLenum a0, GLint a1, GLsizei a2, GLsizei a3) { tglmt::gl::glDrawArraysInstanced(a0, a1, a2, a3); }
+void glDrawElementsInstancedNV(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4) { tglmt::gl::glDrawElementsInstanced(a0, a1, a2, a3, a4); }
+void glBlitFramebufferNV(GLint a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLint a7, GLbitfield a8, GLenum a9) { tglmt::gl::glBlitFramebuffer(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9); }
+void glRenderbufferStorageMultisampleNV(GLenum a0, GLsizei a1, GLenum a2, GLsizei a3, GLsizei a4) { tglmt::gl::glRenderbufferStorageMultisample(a0, a1, a2, a3, a4); }
+void glVertexAttribDivisorNV(GLuint a0, GLuint a1) { tglmt::gl::glVertexAttribDivisor(a0, a1); }
+void glUniformMatrix2x3fvNV(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3) { tglmt::gl::glUniformMatrix2x3fv(a0, a1, a2, a3); }
+void glUniformMatrix2x4fvNV(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3) { tglmt::gl::glUniformMatrix2x4fv(a0, a1, a2, a3); }
+void glUniformMatrix3x2fvNV(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3) { tglmt::gl::glUniformMatrix3x2fv(a0, a1, a2, a3); }
+void glUniformMatrix3x4fvNV(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3) { tglmt::gl::glUniformMatrix3x4fv(a0, a1, a2, a3); }
+void glUniformMatrix4x2fvNV(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3) { tglmt::gl::glUniformMatrix4x2fv(a0, a1, a2, a3); }
+void glUniformMatrix4x3fvNV(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3) { tglmt::gl::glUniformMatrix4x3fv(a0, a1, a2, a3); }
+void glPointParameteriNV(GLenum a0, GLint a1) { tglmt::gl::glPointParameteri(a0, a1); }
+void glPointParameterivNV(GLenum a0, const GLint * a1) { tglmt::gl::glPointParameteriv(a0, a1); }
+void glPolygonModeNV(GLenum a0, GLenum a1) { tglmt::gl::glPolygonMode(a0, a1); }
+void glReadBufferNV(GLenum a0) { tglmt::gl::glReadBuffer(a0); }
+void glTextureBarrierNV(void) { tglmt::gl::glTextureBarrier(); }
+void glBindTransformFeedbackNV(GLenum a0, GLuint a1) { tglmt::gl::glBindTransformFeedback(a0, a1); }
+void glDeleteTransformFeedbacksNV(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteTransformFeedbacks(a0, a1); }
+void glDrawTransformFeedbackNV(GLenum a0, GLuint a1) { tglmt::gl::glDrawTransformFeedback(a0, a1); }
+void glGenTransformFeedbacksNV(GLsizei a0, GLuint * a1) { tglmt::gl::glGenTransformFeedbacks(a0, a1); }
+GLboolean glIsTransformFeedbackNV(GLuint a0) { tglmt::gl::glIsTransformFeedback(a0); }
+void glPauseTransformFeedbackNV(void) { tglmt::gl::glPauseTransformFeedback(); }
+void glResumeTransformFeedbackNV(void) { tglmt::gl::glResumeTransformFeedback(); }
 void glBlendEquationSeparateOES(GLenum a0, GLenum a1) { tglmt::gl::glBlendEquationSeparate(a0, a1); }
 void glBlendFuncSeparateOES(GLenum a0, GLenum a1, GLenum a2, GLenum a3) { tglmt::gl::glBlendFuncSeparate(a0, a1, a2, a3); }
 void glBlendEquationOES(GLenum a0) { tglmt::gl::glBlendEquation(a0); }
@@ -658,6 +754,7 @@ GLboolean glIsRenderbufferOES(GLuint a0) { tglmt::gl::glIsRenderbuffer(a0); }
 void glRenderbufferStorageOES(GLenum a0, GLenum a1, GLsizei a2, GLsizei a3) { tglmt::gl::glRenderbufferStorage(a0, a1, a2, a3); }
 void glFramebufferTextureOES(GLenum a0, GLenum a1, GLuint a2, GLint a3) { tglmt::gl::glFramebufferTexture(a0, a1, a2, a3); }
 void glGetProgramBinaryOES(GLuint a0, GLsizei a1, GLsizei * a2, GLenum * a3, void * a4) { tglmt::gl::glGetProgramBinary(a0, a1, a2, a3, a4); }
+void glProgramBinaryOES(GLuint a0, GLenum a1, const void * a2, GLint a3) { tglmt::gl::glProgramBinary(a0, a1, a2, a3); }
 void glGetBufferPointervOES(GLenum a0, GLenum a1, void ** a2) { tglmt::gl::glGetBufferPointerv(a0, a1, a2); }
 void * glMapBufferOES(GLenum a0, GLenum a1) { tglmt::gl::glMapBuffer(a0, a1); }
 GLboolean glUnmapBufferOES(GLenum a0) { tglmt::gl::glUnmapBuffer(a0); }
@@ -684,4 +781,6 @@ void glBindVertexArrayOES(GLuint a0) { tglmt::gl::glBindVertexArray(a0); }
 void glDeleteVertexArraysOES(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteVertexArrays(a0, a1); }
 void glGenVertexArraysOES(GLsizei a0, GLuint * a1) { tglmt::gl::glGenVertexArrays(a0, a1); }
 GLboolean glIsVertexArrayOES(GLuint a0) { tglmt::gl::glIsVertexArray(a0); }
+void glPointParameterfSGIS(GLenum a0, GLfloat a1) { tglmt::gl::glPointParameterf(a0, a1); }
+void glPointParameterfvSGIS(GLenum a0, const GLfloat * a1) { tglmt::gl::glPointParameterfv(a0, a1); }
 } // extern "C"

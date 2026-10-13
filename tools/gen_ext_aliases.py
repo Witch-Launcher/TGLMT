@@ -19,7 +19,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 GLXML = ROOT / "docs/khronos/gl.xml"
 SRC = ROOT / "src/gl"
 OUT = ROOT / "src/gl/gl_ext_aliases_gen.cpp"
-MOBILE_VENDOR = {"ARB", "KHR", "EXT", "OES", "APPLE", "ARM", "IMG"}
+MOBILE_VENDOR = {"ARB", "KHR", "EXT", "OES", "APPLE", "ARM", "IMG",
+                 "NV", "AMD", "ATI", "MESA", "SGIS", "3DFX", "IBM", "WIN"}
 
 
 def vendor(name):
@@ -90,7 +91,7 @@ def implemented_funcs():
 
 
 def alias_base(fn):
-    m = re.match(r"^(gl.+?)(ARB|EXT|APPLE|OES|KHR)$", fn)
+    m = re.match(r"^(gl.+?)(ARB|EXT|APPLE|OES|KHR|NV|AMD|ATI|MESA|SGIS)$", fn)
     return m.group(1) if m else None
 
 
@@ -118,12 +119,18 @@ def main():
             bases[f] = b
         if not is_alias_ready:
             continue
-        # verify signature từng alias
+        # verify signature từng alias. So sánh sau chuẩn hoá: TGLMT typedef
+        # GLint==GLsizei==int32_t, GLintptr==GLsizeiptr — lệch tên nhưng C ABI
+        # giống hệt → forward an toàn (vd glProgramBinaryOES GLint vs GLsizei).
+        def nsig(s):
+            ret, pr = s
+            m = {"GLsizei": "GLint", "GLsizeiptr": "GLintptr"}
+            return (ret, tuple(m.get(p, p) for p in pr))
         for f, b in bases.items():
             if f not in sig or b not in sig:
                 review.append((name, f, b, "no-sig"))
                 continue
-            if sig[f] == sig[b]:
+            if nsig(sig[f]) == nsig(sig[b]):
                 forward.append((f, b, name))
             else:
                 review.append((name, f, b, f"sig-mismatch {sig[f]} vs {sig[b]}"))

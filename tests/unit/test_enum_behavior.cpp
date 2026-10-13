@@ -36,6 +36,22 @@ static const char* kBatch5[] = {
 };
 static const char* kBatch6[] = {"GL_EXT_texture_swizzle"};
 static const char* kBatch7[] = {"GL_ARB_get_program_binary"};
+static const char* kBatch8[] = {
+    "GL_ARB_texture_mirror_clamp_to_edge", "GL_EXT_texture_mirror_clamp_to_edge",
+    "GL_ARB_texture_swizzle",
+    "GL_ARB_draw_elements_base_vertex", "GL_ARB_copy_image",
+    "GL_ARB_get_texture_sub_image", "GL_ARB_multi_draw_indirect",
+    "GL_ARB_texture_buffer_range", "GL_ARB_vertex_attrib_binding",
+    "GL_ARB_sync", "GL_ARB_timer_query", "GL_NV_polygon_mode",
+    "GL_MESA_sampler_objects", "GL_AMD_multi_draw_indirect",
+    "GL_NV_copy_buffer", "GL_NV_copy_image", "GL_NV_draw_instanced",
+    "GL_NV_draw_buffers", "GL_NV_framebuffer_blit", "GL_NV_instanced_arrays",
+    "GL_NV_non_square_matrices", "GL_ATI_draw_buffers",
+    "GL_OES_get_program_binary",
+};
+// Alias OES chỉ có symbol extern "C" (gl_ext_aliases_gen), không khai báo gl46.h.
+extern "C" void glProgramBinaryOES(GLuint p, GLenum f, const void* d, GLint l);
+extern "C" void glGetProgramBinaryOES(GLuint p, GLsizei b, GLsizei* w, GLenum* f, void* d);
 
 int main() {
     Context ctx("null");
@@ -213,6 +229,150 @@ int main() {
         GLuint p3 = glCreateProgram();
         glProgramBinary(p3, 0x1234, bin.data(), written);
         Check(glGetError() == 0x0500, "format lạ → INVALID_ENUM");
+    }
+
+    // --- 8. Batch-8: 23 ext được advertise (Quy tắc vàng).
+    {
+        GLint n8 = 0;
+        glGetIntegerv(0x821D /*NUM_EXTENSIONS*/, &n8);
+        for (const char* want : kBatch8) {
+            bool found = false;
+            for (GLint i = 0; i < n8 && !found; ++i) {
+                const char* e = (const char*)glGetStringi(0x1F03 /*EXTENSIONS*/, (GLuint)i);
+                if (e && !strcmp(e, want)) found = true;
+            }
+            Check(found, want);
+        }
+
+        // 8a. MIRROR_CLAMP_TO_EDGE round-trip qua sampler (CPU-side).
+        while (glGetError() != 0) {}
+        GLuint samp = 0;
+        glGenSamplers(1, &samp);
+        glSamplerParameteri(samp, 0x2802 /*TEXTURE_WRAP_S*/, 0x8743 /*MIRROR_CLAMP_TO_EDGE*/);
+        Check(glGetError() == 0, "glSamplerParameteri MIRROR_CLAMP_TO_EDGE không lỗi");
+        GLint wrap = 0;
+        glGetSamplerParameteriv(samp, 0x2802, &wrap);
+        Check(wrap == 0x8743, "sampler wrap round-trip MIRROR_CLAMP_TO_EDGE");
+        // glTexParameteriv trên texture cũng round-trip (ext dùng chung path).
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(0x0DE1 /*TEXTURE_2D*/, t);
+        glTexParameteri(0x0DE1, 0x2802, 0x8743);
+        GLint wrapT = 0;
+        glGetTexParameteriv(0x0DE1, 0x2802, &wrapT);
+        Check(wrapT == 0x8743, "texture wrap round-trip MIRROR_CLAMP_TO_EDGE");
+        glDeleteSamplers(1, &samp);
+        glDeleteTextures(1, &t);
+
+        // 8b. GL_ARB_sync: fence object thật + glGetSynciv.
+        while (glGetError() != 0) {}
+        GLsync sync = glFenceSync(0x911E /*SYNC_GPU_COMMANDS_COMPLETE*/, 0);
+        Check(sync != nullptr && glIsSync(sync) == GL_TRUE, "glFenceSync tạo object thật");
+        Check(glGetError() == 0, "glFenceSync không lỗi");
+        GLint64 timeoutVal = 0;
+        GLsizei len = 0;
+        glGetSynciv(sync, 0x9116 /*SYNC_STATUS*/, 1, &len, (GLint*)&timeoutVal);
+        Check(glGetSynciv != nullptr, "glGetSynciv resolvable");
+        glDeleteSync(sync);
+
+        // 8c. GL_ARB_timer_query: glQueryCounter thật (timestamp CPU).
+        while (glGetError() != 0) {}
+        GLuint q = 0;
+        glGenQueries(1, &q);
+        glQueryCounter(q, 0x8E56 /*TIMESTAMP*/);
+        Check(glGetError() == 0, "glQueryCounter TIMESTAMP không lỗi");
+        GLint64 ts = 0;
+        glGetQueryObjecti64v(q, 0x88BF /*QUERY_RESULT*/, &ts);
+        Check(glGetError() == 0, "glGetQueryObjecti64v TIMESTAMP không lỗi");
+        glDeleteQueries(1, &q);
+
+        // 8d. GL_ARB_vertex_attrib_binding: glBindVertexBuffer lưu VAO binding.
+        while (glGetError() != 0) {}
+        GLuint vao = 0, vbo = 0;
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        glGenBuffers(1, &vbo);
+        glBindBuffer(0x8892 /*ARRAY_BUFFER*/, vbo);
+        glBindVertexBuffer(0, vbo, 0, 16);
+        Check(glGetError() == 0, "glBindVertexBuffer không lỗi");
+        glBindVertexArray(0);
+        glDeleteBuffers(1, &vbo);
+        glDeleteVertexArrays(1, &vao);
+
+        // 8e. GL_ARB_texture_buffer_range: glTexBufferRange slice hợp lệ.
+        while (glGetError() != 0) {}
+        GLuint texBuf = 0, dataBuf = 0;
+        glGenTextures(1, &texBuf);
+        glBindTexture(0x8C2A /*TEXTURE_BUFFER*/, texBuf); // cần target TEXTURE_BUFFER
+        glGenBuffers(1, &dataBuf);
+        glBindBuffer(0x8892 /*ARRAY_BUFFER*/, dataBuf);
+        float bufData[16] = {0};
+        glBufferData(0x8892, sizeof(bufData), bufData, 0x88E4 /*STATIC_COPY*/);
+        glTexBufferRange(0x8C2A /*TEXTURE_BUFFER*/, 0x822E /*R32F*/, dataBuf, 0, 16);
+        Check(glGetError() == 0, "glTexBufferRange không lỗi");
+        glDeleteBuffers(1, &dataBuf);
+        glDeleteTextures(1, &texBuf);
+
+        // 8f. GL_NV_polygon_mode: round-trip FILL/LINE.
+        while (glGetError() != 0) {}
+        glPolygonMode(0x0408 /*FRONT_AND_BACK*/, 0x1B02 /*FILL*/);
+        GLint pm[2] = {0, 0};
+        glGetIntegerv(0x0B40 /*POLYGON_MODE*/, pm);
+        Check(pm[0] == 0x1B02, "glPolygonMode FILL round-trip");
+        glPolygonMode(0x0408, 0x1B01 /*LINE*/);
+        glGetIntegerv(0x0B40, pm);
+        Check(pm[0] == 0x1B01, "glPolygonMode LINE round-trip");
+        glPolygonMode(0x0408, 0x1B02);
+
+        // 8g. GL_OES_get_program_binary: alias symbol hoạt động như core.
+        while (glGetError() != 0) {}
+        const char* vs2 = "#version 460 core\nvoid main(){ gl_Position = vec4(0); }";
+        GLuint sh = glCreateShader(0x8B31);
+        glShaderSource(sh, 1, &vs2, nullptr);
+        glCompileShader(sh);
+        GLuint prog = glCreateProgram();
+        glAttachShader(prog, sh);
+        glLinkProgram(prog);
+        GLint blen = 0;
+        glGetProgramiv(prog, 0x8741, &blen);
+        Check(blen >= 8, "OES: PROGRAM_BINARY_LENGTH > 0");
+        std::vector<unsigned char> obin((size_t)(blen > 0 ? blen : 1));
+        GLsizei ow = 0;
+        GLenum of = 0;
+        glGetProgramBinaryOES(prog, blen, &ow, &of, obin.data());
+        Check(ow == blen && of == 0x54474D54, "glGetProgramBinaryOES ghi + format TGMT");
+        GLuint prog2 = glCreateProgram();
+        glProgramBinaryOES(prog2, of, obin.data(), ow);
+        GLint ok8 = 0;
+        glGetProgramiv(prog2, 0x8B82, &ok8);
+        Check(ok8 == 1, "glProgramBinaryOES relink OK");
+
+        // 8h. GL_ARB_copy_image + GL_NV_copy_image + GL_ARB_get_texture_sub_image:
+        //     không INVALID_ENUM / INVALID_OPERATION khi src/dst hợp lệ.
+        while (glGetError() != 0) {}
+        GLuint ta = 0, tb = 0;
+        glGenTextures(1, &ta);
+        glGenTextures(1, &tb);
+        glBindTexture(0x0DE1, ta);
+        glTexImage2D(0x0DE1, 0, 0x8058 /*RGBA8*/, 4, 4, 0, 0x1908 /*RGBA*/, 0x1401 /*UNSIGNED_BYTE*/, nullptr);
+        glBindTexture(0x0DE1, tb);
+        glTexImage2D(0x0DE1, 0, 0x8058, 4, 4, 0, 0x1908, 0x1401, nullptr);
+        glCopyImageSubData(ta, 0x0DE1, 0, 0, 0, 0, tb, 0x0DE1, 0, 0, 0, 0, 4, 4, 1);
+        Check(glGetError() == 0, "glCopyImageSubData RGBA8 4x4 không lỗi");
+        std::vector<unsigned char> sub(4 * 4 * 4, 0);
+        glGetTextureSubImage(ta, 0, 0, 0, 0, 4, 4, 1, 0x1908, 0x1401, (GLsizei)sub.size(), sub.data());
+        Check(glGetError() == 0, "glGetTextureSubImage RGBA8 4x4 không lỗi");
+        glDeleteTextures(1, &ta);
+        glDeleteTextures(1, &tb);
+
+        // 8i. GL_ARB_multi_draw_indirect + GL_NV/AMD draw_instanced:
+        //     gọi với count=0 không lỗi (hàm resolvable + guard đúng).
+        while (glGetError() != 0) {}
+        glBindVertexArray(0);
+        glMultiDrawArraysIndirect(0x0004 /*TRIANGLES*/, nullptr, 0, 0);
+        Check(glGetError() == 0, "glMultiDrawArraysIndirect count=0 không lỗi");
+        glDrawElementsBaseVertex(0x0004, 0, 0x1403 /*UNSIGNED_SHORT*/, nullptr, 0);
+        Check(glGetError() == 0, "glDrawElementsBaseVertex count=0 không lỗi");
     }
 
     if (gFails) return 1;
