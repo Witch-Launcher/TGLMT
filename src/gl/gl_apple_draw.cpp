@@ -1627,6 +1627,35 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         enc->setFragmentTexture(gpu, (uint32_t)k);
         if (ss) enc->setFragmentSamplerState(ss.get(), (uint32_t)k);
     }
+    // P6g image: bind texture từ imageBindPoints[unit] vào texture(slot).
+    // Vertex images → setVertexTexture; fragment → setFragmentTexture.
+    // Image KHÔNG cần sampler state. Unbound → fallback đen.
+    for (auto& isl : pr.vsImages) {
+        metal::ITexture* gpu = nullptr;
+        auto bit = c.imageBindPoints.find((GLuint)isl.binding);
+        if (bit != c.imageBindPoints.end() && bit->second.texture) {
+            auto tit = c.textures.find(bit->second.texture);
+            if (tit != c.textures.end() && tit->second.gpu) {
+                gpu = tit->second.gpu.get();
+                c.NoteTextureUsed(bit->second.texture);
+            }
+        }
+        if (!gpu) gpu = FallbackBlackTex(c).get();
+        if (gpu) enc->setVertexTexture(gpu, (uint32_t)isl.slot);
+    }
+    for (auto& isl : pr.fsImages) {
+        metal::ITexture* gpu = nullptr;
+        auto bit = c.imageBindPoints.find((GLuint)isl.binding);
+        if (bit != c.imageBindPoints.end() && bit->second.texture) {
+            auto tit = c.textures.find(bit->second.texture);
+            if (tit != c.textures.end() && tit->second.gpu) {
+                gpu = tit->second.gpu.get();
+                c.NoteTextureUsed(bit->second.texture);
+            }
+        }
+        if (!gpu) gpu = FallbackBlackTex(c).get();
+        if (gpu) enc->setFragmentTexture(gpu, (uint32_t)isl.slot);
+    }
     // Tương thích ngược: program cũ không có sampler list (link trước fix) → bind legacy theo unit
     if (pr.fsSamplers.empty() && pr.vsSamplers.empty()) {
         for (GLuint unit = 0; unit < 32; ++unit) {

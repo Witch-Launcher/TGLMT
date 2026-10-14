@@ -60,6 +60,34 @@ int main() {
          CS("layout(std430) buffer B{float v[];} buf;\nvoid main(){ }"), false},
         {"ssbo_graphics_neg", FS,
          CS("out vec4 c;\nlayout(std430) buffer B{float v[];};\nvoid main(){ c=vec4(1);}"), false},
+        // --- P6g image: layout(format) + imageLoad/Store/Size → MSL read_write ---
+        {"img_store", CMP,
+         CS("layout(local_size_x=8) in;\nlayout(rgba8, binding=0) uniform image2D img;\n"
+            "void main(){ imageStore(img, ivec2(0), vec4(1)); }"), true},
+        {"img_load", CMP,
+         CS("layout(local_size_x=8) in;\nlayout(rgba8, binding=0) uniform readonly image2D img;\n"
+            "layout(std430,binding=1) buffer B{float v[];};\n"
+            "void main(){ v[0]=imageLoad(img, ivec2(0)).r; }"), true},
+        {"img_frag", FS,
+         CS("layout(rgba8, binding=0) uniform image2D img;\nout vec4 c;\n"
+            "void main(){ c=imageLoad(img, ivec2(gl_FragCoord.xy)); }"), true},
+        {"img_size", FS,
+         CS("layout(rgba8, binding=0) uniform image2D img;\nout vec4 c;\n"
+            "void main(){ ivec2 s=imageSize(img); c=vec4(float(s.x), float(s.y), 0, 1); }"), true},
+        {"img_iimage", CMP,
+         CS("layout(local_size_x=8) in;\nlayout(r32i, binding=0) uniform writeonly iimage2D img;\n"
+            "void main(){ imageStore(img, ivec2(0), ivec4(1)); }"), true},
+        {"img_array", CMP,
+         CS("layout(local_size_x=8) in;\nlayout(rgba8, binding=0) uniform image2DArray img;\n"
+            "void main(){ imageStore(img, ivec3(0,0,0), vec4(1)); }"), true},
+        {"img_3d", CMP,
+         CS("layout(local_size_x=8) in;\nlayout(rgba8, binding=0) uniform image3D img;\n"
+            "void main(){ imageStore(img, ivec3(0), vec4(1)); }"), true},
+        {"img_atomic_neg", CMP,
+         CS("layout(local_size_x=8) in;\nlayout(r32ui, binding=0) uniform uimage2D img;\n"
+            "void main(){ imageAtomicAdd(img, ivec2(0), 1u); }"), false},
+        {"img_cube_neg", FS,
+         CS("layout(rgba8, binding=0) uniform imageCube img;\nout vec4 c;\nvoid main(){ c=vec4(1); }"), false},
     };
 
     int fail = 0;

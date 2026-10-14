@@ -123,5 +123,39 @@ int main() {
     }
 
     printf("test_compute_dispatch: all cases OK (SSBO + uniform + texture)\n");
+
+    // --- Case 4: P6g image — compute imageStore → texture readback ---
+    {
+        GLuint tex; glGenTextures(1, &tex);
+        glActiveTexture(0x84C0); glBindTexture(0x0DE1, tex);
+        unsigned char z4[8 * 8 * 4] = {0};
+        glTexImage2D(0x0DE1, 0, 0x8058, 8, 8, 0, 0x1908, 0x1401, z4);
+        glBindImageTexture(0, tex, 0, 0, 0, 0x88B9, 0x8058); // unit0 READ_WRITE RGBA8
+        const char* src4 = "#version 460 core\n"
+            "layout(local_size_x=8, local_size_y=8) in;\n"
+            "layout(rgba8, binding=0) uniform writeonly image2D img;\n"
+            "void main(){ ivec2 p=ivec2(gl_GlobalInvocationID.xy);"
+            " imageStore(img, p, vec4(float(p.x)/7.0, 0, 0, 1)); }\n";
+        GLuint sh4 = glCreateShader(0x91B9);
+        glShaderSource(sh4, 1, &src4, nullptr); glCompileShader(sh4);
+        GLuint pr4 = glCreateProgram(); glAttachShader(pr4, sh4); glLinkProgram(pr4);
+        GLint ok4 = 0; glGetProgramiv(pr4, 0x8B82, &ok4);
+        if (!ok4) { printf("test_compute_dispatch FAIL image link\n"); return 1; }
+        glUseProgram(pr4);
+        glDispatchCompute(1, 1, 1); glMemoryBarrier(0x00002000 | 0x00000020);
+        unsigned char out4[8 * 8 * 4] = {0};
+        glBindTexture(0x0DE1, tex); glGetTexImage(0x0DE1, 0, 0x1908, 0x1401, out4);
+        int bad4 = 0;
+        for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) {
+            int i = (y * 8 + x) * 4;
+            unsigned char expectR = (unsigned char)(float(x) / 7.0f * 255.0f + 0.5f);
+            if (out4[i] < expectR - 2 || out4[i] > expectR + 2) ++bad4;
+            if (out4[i + 3] != 255) ++bad4;
+        }
+        if (bad4) { printf("test_compute_dispatch FAIL image: %d pixels wrong\n", bad4); return 1; }
+        printf("test_compute_dispatch: image OK (8x8 red gradient)\n");
+    }
+
+    printf("test_compute_dispatch: all cases OK (SSBO + uniform + texture + image)\n");
     return 0;
 }

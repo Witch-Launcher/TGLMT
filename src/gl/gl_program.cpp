@@ -74,6 +74,7 @@ void glLinkProgram(GLuint p) {
     pr.attribLoc.clear(); pr.appleVS.reset(); pr.appleFS.reset();
     pr.appleCS.reset(); pr.appleCSPipeline.reset(); pr.computeMSL.clear();
     pr.computeBlockSlots.clear(); pr.computeSamplers.clear(); pr.computeUBSize = 0;
+    pr.vsImages.clear(); pr.fsImages.clear(); pr.computeImages.clear();
     pr.vsUBSize = pr.fsUBSize = 0;
     ShaderObject *vs = nullptr, *fs = nullptr;
     bool hasV = false, hasF = false;
@@ -105,6 +106,18 @@ void glLinkProgram(GLuint p) {
                 pr.uniformLayout.push_back({u.name, u.uniformOffset, u.uniformSize, -1, true});
             }
             pr.computeUBSize = its->second.conv.uniformBufferSize;
+            // P6g images: slot = samplerCount + index, binding = layout hoặc units.
+            for (size_t k = 0; k < its->second.conv.images.size(); ++k) {
+                auto& im = its->second.conv.images[k];
+                int slot = (int)pr.computeSamplers.size() + (int)k;
+                int binding = im.imageBinding;
+                if (binding < 0) {
+                    auto uit = pr.samplerUnits.find(im.name);
+                    binding = (uit == pr.samplerUnits.end()) ? 0 : (int)uit->second;
+                }
+                pr.computeImages.push_back({im.name, slot, binding});
+                if (!pr.samplerUnits.count(im.name)) pr.samplerUnits[im.name] = (GLuint)binding;
+            }
         }
         if (its->second.type == 0x8E88 || its->second.type == 0x8E87) // TCS/TES
             pr.hasTessStages = true;
@@ -258,6 +271,30 @@ void glLinkProgram(GLuint p) {
             pr.fsSamplers.push_back(s.name);
             pr.samplerKind[s.name] = kindOf(s);
             if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
+        }
+        // P6g images: slot = samplerCount + index (chung texture index space).
+        pr.vsImages.clear(); pr.fsImages.clear();
+        for (size_t k = 0; k < vsC.images.size(); ++k) {
+            auto& im = vsC.images[k];
+            int slot = (int)pr.vsSamplers.size() + (int)k;
+            int binding = im.imageBinding;
+            if (binding < 0) {
+                auto uit = pr.samplerUnits.find(im.name);
+                binding = (uit == pr.samplerUnits.end()) ? 0 : (int)uit->second;
+            }
+            pr.vsImages.push_back({im.name, slot, binding});
+            if (!pr.samplerUnits.count(im.name)) pr.samplerUnits[im.name] = (GLuint)binding;
+        }
+        for (size_t k = 0; k < fsC.images.size(); ++k) {
+            auto& im = fsC.images[k];
+            int slot = (int)pr.fsSamplers.size() + (int)k;
+            int binding = im.imageBinding;
+            if (binding < 0) {
+                auto uit = pr.samplerUnits.find(im.name);
+                binding = (uit == pr.samplerUnits.end()) ? 0 : (int)uit->second;
+            }
+            pr.fsImages.push_back({im.name, slot, binding});
+            if (!pr.samplerUnits.count(im.name)) pr.samplerUnits[im.name] = (GLuint)binding;
         }
     }
     // 4c. Uniform blocks (UBO read-only): gộp vs+fs theo thứ tự khai báo, index ổn định.

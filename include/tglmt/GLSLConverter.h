@@ -43,6 +43,12 @@ struct GLSLVar {
     bool isCube = false;   // samplerCube → texturecube (panorama)
     bool isArray = false;  // sampler2DArray → texture2d_array
     bool isShadow = false; // sampler2DShadow → texture2D approx (bỏ compare ref)
+    // P6g image: `layout(rgba8[, binding=N]) uniform [readonly|writeonly] image2D img;`
+    // → texture2d<T, access::RW> (imageLoad/Store → .read/.write). access: 'R' read,
+    // 'W' write, 'B' read_write (mặc định). binding: layout binding, -1 = glUniform1i.
+    bool isImage = false;
+    char imageAccess = 'B';
+    int imageBinding = -1;
 };
 // Uniform block (UBO read-only): `layout(std140[, binding=N]) uniform Block { ... }`.
 struct GLSLBlock {
@@ -66,6 +72,7 @@ struct GLSLConvertResult {
     std::vector<GLSLVar> outputs;    // varyings-out (vs) / color-out (fs)
     std::vector<GLSLVar> uniforms;   // cả sampler2D (isSampler=true)
     std::vector<GLSLVar> samplers;   // tách riêng cho tiện bind
+    std::vector<GLSLVar> images;     // P6g: image vars (thứ tự khai báo = texture slot)
     std::vector<GLSLBlock> blocks;   // UBO blocks (read-only)
     size_t uniformBufferSize = 0;    // sizeof(TGLMTUniforms), đã align
     bool usesPointSize = false;

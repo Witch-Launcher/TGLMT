@@ -73,7 +73,13 @@ static bool StaticLimit(GLenum p, GLint* v) {
         case 0x90EB: *v = 1024; break;   // MAX_COMPUTE_WORK_GROUP_INVOCATIONS (A11)
         case 0x91BB: *v = 14; break;     // MAX_COMPUTE_UNIFORM_BLOCKS
         case 0x91BC: *v = 16; break;     // MAX_COMPUTE_TEXTURE_IMAGE_UNITS
-        case 0x91BD: *v = 0; break;      // MAX_COMPUTE_IMAGE_UNIFORMS (chưa impl)
+        case 0x91BD: *v = 8; break;      // MAX_COMPUTE_IMAGE_UNIFORMS (P6g: image OK)
+        // ===== P6g image (ARB_shader_image_load_store) =====
+        case 0x8F38: *v = 8; break;      // MAX_IMAGE_UNITS
+        case 0x90CF: *v = 8; break;      // MAX_COMBINED_IMAGE_UNIFORMS
+        case 0x906D: *v = 4; break;      // MAX_IMAGE_SAMPLES
+        case 0x90CA: *v = 8; break;      // MAX_VERTEX_IMAGE_UNIFORMS
+        case 0x90CE: *v = 8; break;      // MAX_FRAGMENT_IMAGE_UNIFORMS
         // ===== P6f SSBO (ARB_shader_storage_buffer_object) — binding 0..15 compute =====
         case 0x90DD: *v = 16; break;     // MAX_SHADER_STORAGE_BUFFER_BINDINGS
         case 0x90DE: *v = 134217728; break; // MAX_SHADER_STORAGE_BLOCK_SIZE (128MB)

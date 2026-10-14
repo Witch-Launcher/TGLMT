@@ -214,6 +214,13 @@ static const char* const kExts[] = {
     //  - glGet limit compute (COUNT/SIZE indexed + SHARED/UNIFORM/TEXTURE/INVOC) thật.
     //  - atomic counters / image uniforms = 0 (chưa impl — app fallback đường khác).
     "GL_ARB_compute_shader",
+    // ===== P6g: image load/store (ARB_shader_image_load_store) — texel RW THẬT. =====
+    //  - converter layout(format,binding) image2D/Array/3D → texture RW MSL
+    //    (imageLoad/Store/Size → .read/.write/get_*) + backend glBindImageTexture
+    //    + bind ở dispatch/draw (e2e compute imageStore→texture PASS).
+    //  - imageCube/Buffer/1D/Rect/MS + imageAtomic* → fail trung thực (MSL không có).
+    //  - glGet MAX_IMAGE_UNITS/COMBINED/VERTEX/FRAGMENT/COMPUTE_IMAGE_UNIFORMS thật.
+    "GL_ARB_shader_image_load_store",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),

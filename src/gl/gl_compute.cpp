@@ -3,6 +3,7 @@
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include <cstring>
+#include <cstdio>
 using namespace tglmt;
 
 namespace tglmt::gl {
@@ -132,6 +133,21 @@ void glDispatchCompute(GLuint x, GLuint y, GLuint z) {
         if (gpu) enc->setTexture(gpu, (uint32_t)k);
         if (ssDef) enc->setSamplerState(ssDef.get(), (uint32_t)k);
     }
+    // P6g image: bind texture từ imageBindPoints[unit] vào texture(slot).
+    // Image texture KHÔNG cần sampler state (texel access, không sample).
+    for (auto& isl : pr.computeImages) {
+        metal::ITexture* gpu = nullptr;
+        auto bit = c.imageBindPoints.find((GLuint)isl.binding);
+        if (bit != c.imageBindPoints.end() && bit->second.texture) {
+            auto tit = c.textures.find(bit->second.texture);
+            if (tit != c.textures.end() && tit->second.gpu) gpu = tit->second.gpu.get();
+        }
+        if (!gpu) {
+            c.LogDebug(0, 0, 0, 0, "glDispatchCompute: image unbound, fallback đen");
+            if (black) gpu = black.get();
+        }
+        if (gpu) enc->setTexture(gpu, (uint32_t)isl.slot);
+    }
     // Dispatch: GL glDispatchCompute(x,y,z) = x*y*z WORKGROUP; Metal
     // dispatchThreads:grid = TỔNG thread → grid = workgroup * localSize.
     uint32_t ls0 = (uint32_t)(pr.computeLocalSize[0] > 0 ? pr.computeLocalSize[0] : 1);
@@ -149,7 +165,23 @@ void glMemoryBarrier(GLbitfield b) {
 }
 void glMemoryBarrierByRegion(GLbitfield b) { glMemoryBarrier(b); }
 void glBindImageTexture(GLuint u, GLuint t, GLint l, GLboolean lay, GLint layer, GLenum acc, GLenum f) {
-    (void)u;(void)t;(void)l;(void)lay;(void)layer;(void)acc;(void)f;
+    Context& c = Context::Current();
+    if (t && !c.textures.count(t)) { c.errors.Record(0x0502); return; }
+    // P6g: ghi image binding (unit → texture + params). Backend bind texture thật
+    // vào image slot ở dispatch/draw. Level/layer != 0 → log (dùng base texture).
+    c.imageBindPoints[u] = {t, l, lay, layer, acc, f};
+    if ((l != 0 || layer != 0) && c.DiagOn()) {
+        fprintf(stderr, "[TGLMT] imagebind unit %u tex %u level=%d layer=%d (dùng base)\n",
+                u, t, (int)l, (int)layer);
+        fflush(stderr);
+    }
 }
-void glBindImageTextures(GLuint f, GLsizei n, const GLuint* t) { (void)f;(void)n;(void)t; }
+void glBindImageTextures(GLuint f, GLsizei n, const GLuint* t) {
+    Context& c = Context::Current();
+    for (GLsizei i = 0; i < n; ++i) {
+        GLuint tex = (t && i >= 0) ? t[i] : 0;
+        if (tex && !c.textures.count(tex)) { c.errors.Record(0x0502); continue; }
+        c.imageBindPoints[f + i] = {tex, 0, 0, 0, 0x88B9 /*READ_WRITE*/, 0};
+    }
+}
 } // namespace tglmt::gl

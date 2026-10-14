@@ -218,6 +218,11 @@ struct ProgramObject {
     // P6f: compute sampler list (thứ tự khai báo = texture slot) + uniform size.
     std::vector<std::string> computeSamplers;
     size_t computeUBSize = 0;
+    // P6g image: (tên, texture slot, binding unit) theo thứ tự khai báo.
+    // Slot = samplerCount + imageIndex (chung index space texture).
+    // Binding = layout binding, hoặc samplerUnits[tên] nếu layout không có.
+    struct ImageSlot { std::string name; int slot; int binding; };
+    std::vector<ImageSlot> vsImages, fsImages, computeImages;
     std::unordered_map<std::string, GLuint> attribBind; // glBindAttribLocation (trước link)
     std::unordered_map<std::string, GLint> attribLoc;   // location sau link
     // Sampler mapping (fix unit vs MSL slot): tên sampler theo thứ tự khai báo
@@ -331,6 +336,11 @@ public:
     // A11: upload shadow + bind Metal buffer(17+k) mỗi draw (xem AppleDrawGL).
     std::unordered_map<GLuint, BufferRange> uniformBindPoints;
     std::unordered_map<GLuint, BufferRange> storageBindPoints;
+    // P6g image binding: unit → (texture, level, layered, layer, access, format).
+    // glBindImageTexture ghi; dispatch/draw bind texture vào image slot.
+    struct ImageBind { GLuint texture = 0; GLint level = 0; GLboolean layered = 0;
+                       GLint layer = 0; GLenum access = 0; GLenum format = 0; };
+    std::unordered_map<GLuint, ImageBind> imageBindPoints;
     std::map<GLenum, ProxyTex> proxyTex; // target PROXY → spec probe gần nhất
 
     // clear color/depth/stencil shadow (glClearColor/... + glClear)

@@ -66,6 +66,24 @@ static std::vector<Stmt> SplitTopLevel(const std::string& s) {
     }
     return out;
 }
+// P6g image helpers (file-scope, dùng ở parser + rewrite + emission).
+// Kind từ tên kiểu GLSL ('2' 2D, 'A' 2DArray, 'C' Cube, '3' 3D; 0 = 1D/Rect/Buffer/MS).
+static char ImageKind(const std::string& t) {
+    std::string u = t;
+    if (u.rfind("iimage", 0) == 0 || u.rfind("uimage", 0) == 0) u = u.substr(1);
+    else if (u.rfind("image", 0) != 0) return 0;
+    std::string suf = u.substr(5); // sau "image"
+    if (suf == "2D") return '2';
+    if (suf == "2DArray") return 'A';
+    // Cube: MSL texturecube KHÔNG có .read/.write (probe thật) → 0 = ngoài subset.
+    if (suf == "3D") return '3';
+    return 0;
+}
+static std::string ImageElem(const std::string& t) {
+    if (t.rfind("iimage", 0) == 0) return "int";
+    if (t.rfind("uimage", 0) == 0) return "uint";
+    return "float";
+}
 static std::string MSLType(const std::string& t, bool& ok) {
     ok = true;
     if (t == "float") return "float";
@@ -693,6 +711,106 @@ struct SampEntry {
     std::string elem = "float";
 };
 using SampTable = std::map<std::string, SampEntry>;
+// P6g: bảng image (tên → kind '2'/'A'/'C'/'3') cho rewrite imageLoad/Store/Size.
+using ImgTable = std::map<std::string, char>;
+// Viết lại imageLoad(img, coord) → img.read(uintN(coord)),
+// imageStore(img, coord, v) → img.write(v, uintN(coord)),
+// imageSize(img) → intN(get_width/height/depth).
+// imageAtomic* → fail trung thực (MSL không có image atomics).
+static bool RewriteImageCalls(std::string& io, const ImgTable& tab, std::string& err) {
+    std::string& body = io;
+    auto splitArgs = [&](size_t lp, size_t& kend, std::vector<std::string>& args) -> bool {
+        int d = 0;
+        size_t k = lp, a0 = lp + 1;
+        for (; k < body.size(); ++k) {
+            if (body[k] == '(') ++d;
+            else if (body[k] == ')') {
+                if (--d == 0) break;
+            } else if (body[k] == ',' && d == 1) {
+                args.push_back(Trim(body.substr(a0, k - a0)));
+                a0 = k + 1;
+            }
+        }
+        if (k >= body.size()) return false;
+        args.push_back(Trim(body.substr(a0, k - a0)));
+        kend = k;
+        return true;
+    };
+    auto isHead = [&](size_t p, const char* name) -> bool {
+        size_t n = strlen(name);
+        if (body.compare(p, n, name) != 0) return false;
+        if (p > 0 && IsIdentChar(body[p - 1], false)) return false;
+        size_t e = p + n;
+        if (e < body.size() && IsIdentChar(body[e], false)) return false;
+        return true;
+    };
+    // imageAtomic* → fail rõ (không rewrite, không để lọt sang MSL).
+    for (const char* an : {"imageAtomicAdd", "imageAtomicMin", "imageAtomicMax",
+                           "imageAtomicAnd", "imageAtomicOr", "imageAtomicXor",
+                           "imageAtomicExchange", "imageAtomicCompSwap"}) {
+        size_t p = 0;
+        while ((p = body.find(an, p)) != std::string::npos) {
+            if (isHead(p, an)) { err = std::string(an) + " ngoài subset (MSL không có image atomics)"; return false; }
+            p += strlen(an);
+        }
+    }
+    std::string out;
+    size_t i = 0;
+    while (i < body.size()) {
+        bool matched = false;
+        for (const char* fn : {"imageLoad", "imageStore", "imageSize"}) {
+            if (!isHead(i, fn)) continue;
+            size_t lp = i + strlen(fn);
+            while (lp < body.size() && isspace((unsigned char)body[lp])) ++lp;
+            if (lp >= body.size() || body[lp] != '(') continue;
+            size_t kend = 0;
+            std::vector<std::string> args;
+            if (!splitArgs(lp, kend, args)) { err = std::string(fn) + " cú pháp lỗi"; return false; }
+            if (args.empty()) { err = std::string(fn) + " thiếu image"; return false; }
+            std::string img = args[0];
+            auto it = tab.find(img);
+            if (it == tab.end()) { err = std::string(fn) + " image không khai báo: " + img; return false; }
+            char kind = it->second;
+            // Cube: MSL texturecube KHÔNG có .read/.write (probe: no matching member)
+            // → imageCube ngoài subset.
+            if (kind == 'C') { err = "imageCube ngoài subset (MSL texturecube không có .read/.write)"; return false; }
+            bool isArr = (kind == 'A');
+            bool is3 = (kind == '3');
+            // 2D: uint2(coord); 3D: uint3(coord); Array: tách ivec3 → uint2(.xy)+uint(.z).
+            if (!strcmp(fn, "imageLoad")) {
+                if (args.size() != 2) { err = "imageLoad cần 2 args"; return false; }
+                if (isArr)
+                    out += img + ".read(uint2((" + args[1] + ").xy), uint((" + args[1] + ").z))";
+                else if (is3)
+                    out += img + ".read(uint3(" + args[1] + "))";
+                else
+                    out += img + ".read(uint2(" + args[1] + "))";
+            } else if (!strcmp(fn, "imageStore")) {
+                if (args.size() != 3) { err = "imageStore cần 3 args"; return false; }
+                if (isArr)
+                    out += img + ".write((" + args[2] + "), uint2((" + args[1] + ").xy), uint((" + args[1] + ").z))";
+                else if (is3)
+                    out += img + ".write((" + args[2] + "), uint3(" + args[1] + "))";
+                else
+                    out += img + ".write((" + args[2] + "), uint2(" + args[1] + "))";
+            } else { // imageSize
+                if (args.size() != 1) { err = "imageSize cần 1 arg"; return false; }
+                if (kind == '2')
+                    out += "int2(int(" + img + ".get_width()), int(" + img + ".get_height()))";
+                else if (kind == 'A')
+                    out += "int3(int(" + img + ".get_width()), int(" + img + ".get_height()), int(" + img + ".get_array_size()))";
+                else // '3'
+                    out += "int3(int(" + img + ".get_width()), int(" + img + ".get_height()), int(" + img + ".get_depth()))";
+            }
+            i = kend + 1;
+            matched = true;
+            break;
+        }
+        if (!matched) out += body[i++];
+    }
+    body = out;
+    return true;
+}
 // Viết lại texture()/texelFetch()/textureGrad() trong text (body hoặc helper).
 // Trả false + err khi ngoài subset. Table phải chứa MỌI sampler dùng trong text
 // (global R.samplers + sampler params của helper chứa text đó).
@@ -1919,6 +2037,14 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     }
     // Quét khai báo top-level (bao gồm UBO blocks cho vanilla 1.17+/Sodium read-only)
     std::vector<GLSLVar> ins, outs, uniforms;
+    // P6e subroutine: type decls, impls (type→func), uniforms (var→type).
+    // Dispatch fn sinh sau scan (switch trên uniform int, MSL không có fn pointer).
+    struct SubType { std::string name, ret, params; };
+    struct SubImpl { std::string type, name; };
+    struct SubVar { std::string var, type; };
+    std::vector<SubType> subTypes;
+    std::vector<SubImpl> subImpls;
+    std::vector<SubVar> subVars;
     std::vector<GLSLBlock> blocks;
     std::vector<HoistedGlobal> hoisted; // global mutable → main-local + thread-ref
     std::string rest; // phần còn lại (hàm, main, const global)
@@ -2031,6 +2157,59 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             out.members = mems;
             return true;
         };
+        // P6g image: kind từ tên kiểu GLSL ('2' 2D, 'A' 2DArray, 'C' Cube, '3' 3D).
+        // Buffer/1D/Rect/MS hiếm → ngoài subset (fail rõ ở parser).
+        // (ImageKind/ImageElem là static file-scope, dùng ở parser + rewrite.)
+        // P6g: `layout(fmt[, binding=N]) uniform [readonly|writeonly] image2D img;`
+        // → GLSLVar isImage. Format bắt buộc theo GLSL (không validate chi tiết,
+        // backend bind texture thật). Binding -1 = chưa khai báo → glUniform1i.
+        auto tryParseImage = [&](const std::string& t, GLSLVar& out) -> bool {
+            std::string s = Trim(t);
+            if (!s.empty() && s.back() == ';') s.pop_back();
+            s = Trim(s);
+            int binding = -1;
+            if (s.rfind("layout", 0) == 0) {
+                size_t lp = s.find('('), rp = s.find(')');
+                if (lp == std::string::npos || rp == std::string::npos || rp <= lp) return false;
+                std::string inside = s.substr(lp + 1, rp - lp - 1);
+                size_t bp = inside.find("binding");
+                if (bp != std::string::npos) {
+                    size_t eq = inside.find('=', bp);
+                    if (eq != std::string::npos) binding = atoi(inside.c_str() + eq + 1);
+                }
+                s = Trim(s.substr(rp + 1));
+            }
+            std::istringstream iss(s);
+            std::vector<std::string> w; std::string tok;
+            while (iss >> tok) w.push_back(tok);
+            if (w.empty() || w[0] != "uniform") return false;
+            size_t k = 1;
+            char access = 'B';
+            while (k < w.size()) {
+                if (w[k] == "readonly") { access = 'R'; ++k; }
+                else if (w[k] == "writeonly") { access = 'W'; ++k; }
+                else if (w[k] == "coherent" || w[k] == "volatile" || w[k] == "restrict" ||
+                         w[k] == "highp" || w[k] == "mediump" || w[k] == "lowp") { ++k; }
+                else break;
+            }
+            if (k + 1 >= w.size()) return false;
+            std::string itype = w[k], iname = w[k + 1];
+            if (!iname.empty() && iname.back() == ';') iname.pop_back();
+            if (iname.find('[') != std::string::npos) return false; // image array ngoài subset
+            char kind = ImageKind(itype);
+            if (!kind) return false;
+            // chỉ 1 declarator (image đơn, không `image2D a, b;`)
+            if (k + 2 < w.size()) return false;
+            out.glslType = itype; out.name = iname;
+            out.isImage = true; out.imageAccess = access; out.imageBinding = binding;
+            std::string elem = ImageElem(itype);
+            std::string acc = (access == 'R') ? "access::read"
+                            : (access == 'W') ? "access::write" : "access::read_write";
+            std::string base = (kind == '2') ? "texture2d" : (kind == 'A') ? "texture2d_array"
+                             : (kind == 'C') ? "texturecube" : "texture3d";
+            out.mslType = base + "<" + elem + ", " + acc + ">";
+            return true;
+        };
         // Hàng đợi xử lý: SplitTopLevel cắt theo `;` depth 0 nên `hàm...} decl;`
         // dính nhau; splitSegments bên dưới tách tiếp theo khối cân bằng.
         std::vector<std::string> queue;
@@ -2101,6 +2280,69 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                      t.rfind("buffer", 0) == 0) &&
                     t.find('{') != std::string::npos && tryParseUBO(t, b)) {
                     blocks.push_back(b);
+                    continue;
+                }
+            }
+            // P6g image: `layout(...) uniform image2D img;` (không `{`, không phải UBO).
+            {
+                GLSLVar iv;
+                if ((t.rfind("layout", 0) == 0 || t.rfind("uniform", 0) == 0) &&
+                    t.find("image") != std::string::npos && t.find('{') == std::string::npos &&
+                    tryParseImage(t, iv)) {
+                    R.images.push_back(iv);
+                    continue;
+                }
+            }
+            // P6e subroutine: 3 dạng (type decl / impl / uniform).
+            // Impl `subroutine(T) ret f(...) {...}` → strip prefix, hàm thường + ghi nhận.
+            if (t.rfind("subroutine(", 0) == 0 && t.find('{') != std::string::npos) {
+                size_t rp = t.find(')');
+                if (rp == std::string::npos) return fail("subroutine impl thiếu ): " + t);
+                std::string stype = Trim(t.substr(11, rp - 11)); // sau "subroutine("
+                std::string stripped = Trim(t.substr(rp + 1)); // `ret f(...) {...}`
+                // tách tên hàm: `ret name(` → name
+                size_t lp2 = stripped.find('(');
+                if (lp2 == std::string::npos) return fail("subroutine impl thiếu (: " + t);
+                std::string before = Trim(stripped.substr(0, lp2));
+                size_t sp = before.find_last_of(" \t*");
+                if (sp == std::string::npos) return fail("subroutine impl thiếu tên: " + t);
+                std::string fname = Trim(before.substr(sp + 1));
+                subImpls.push_back({stype, fname});
+                rest += stripped;
+                if (!stripped.empty() && stripped.back() != ';' && stripped.back() != '}') rest += ";";
+                rest += "\n";
+                continue;
+            }
+            // Type `subroutine ret Type(params);` / uniform `subroutine uniform Type var;`
+            // (không `{` — xử lý trước ParseDecls).
+            if (t.rfind("subroutine", 0) == 0 && t.find('{') == std::string::npos) {
+                std::string s = Trim(t);
+                if (!s.empty() && s.back() == ';') s.pop_back();
+                s = Trim(s);
+                if (s.rfind("subroutine uniform", 0) == 0) {
+                    // `subroutine uniform Type var;` → uniform int var (index cho dispatch).
+                    std::string rr = Trim(s.substr(18));
+                    std::istringstream iss(rr);
+                    std::string stype, svar;
+                    iss >> stype >> svar;
+                    if (stype.empty() || svar.empty()) return fail("subroutine uniform lỗi: " + t);
+                    subVars.push_back({svar, stype});
+                    GLSLVar uv; uv.glslType = "int"; uv.mslType = "int"; uv.name = svar;
+                    uniforms.push_back(uv); // vào tglmt_u, app set bằng glUniform1i
+                    continue;
+                } else {
+                    // `subroutine ret Type(params);` → ghi nhận signature, không emit.
+                    std::string rr = Trim(s.substr(10)); // sau "subroutine"
+                    size_t lp2 = rr.find('('), rp2 = rr.find(')');
+                    if (lp2 == std::string::npos || rp2 == std::string::npos || rp2 <= lp2)
+                        return fail("subroutine type lỗi: " + t);
+                    std::string before = Trim(rr.substr(0, lp2)); // `ret Type`
+                    size_t sp = before.find_last_of(" \t*");
+                    if (sp == std::string::npos) return fail("subroutine type thiếu tên: " + t);
+                    std::string tret = Trim(before.substr(0, sp));
+                    std::string tname = Trim(before.substr(sp + 1));
+                    std::string tparams = Trim(rr.substr(lp2 + 1, rp2 - lp2 - 1));
+                    subTypes.push_back({tname, tret, tparams});
                     continue;
                 }
             }
@@ -3104,6 +3346,52 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         std::string err;
         if (!RewriteSamplingCalls(body, tab, err)) return fail(err);
     }
+    // P6g image calls (imageLoad/Store/Size) trên body. Helper dùng image → fail
+    // rõ (thread image params phức tạp, hiếm gặp). `rest` còn chứa main nên strip
+    // main trước khi check helper.
+    {
+        ImgTable itab;
+        for (auto& im : R.images) {
+            char kind = ImageKind(im.glslType);
+            if (kind) itab[im.name] = kind;
+        }
+        std::string err;
+        if (!RewriteImageCalls(body, itab, err)) return fail(err);
+        // Strip main khỏi rest → helpersOnly, rồi check image trong helper.
+        std::string helpersOnly = rest;
+        {
+            size_t p = helpersOnly.find("void");
+            while (p != std::string::npos) {
+                size_t q = p + 4;
+                while (q < helpersOnly.size() && isspace((unsigned char)helpersOnly[q])) ++q;
+                if (helpersOnly.compare(q, 4, "main") == 0) {
+                    size_t b = helpersOnly.find('{', q);
+                    if (b != std::string::npos) {
+                        int dd = 0;
+                        size_t m = b;
+                        for (; m < helpersOnly.size(); ++m) {
+                            if (helpersOnly[m] == '{') ++dd;
+                            else if (helpersOnly[m] == '}') {
+                                if (--dd == 0) break;
+                            }
+                        }
+                        if (m < helpersOnly.size()) { helpersOnly.erase(p, m - p + 1); break; }
+                    }
+                }
+                p = helpersOnly.find("void", p + 1);
+            }
+        }
+        for (const char* fn : {"imageLoad", "imageStore", "imageSize"}) {
+            size_t p = 0;
+            while ((p = helpersOnly.find(fn, p)) != std::string::npos) {
+                bool l = p > 0 && IsIdentChar(helpersOnly[p - 1], false);
+                size_t e = p + strlen(fn);
+                bool r = e < helpersOnly.size() && IsIdentChar(helpersOnly[e], false);
+                if (!l && !r) return fail("image trong helper function ngoài subset");
+                p = e;
+            }
+        }
+    }
     // gl_FragData[0] → tglmt_fragColor (trước RewriteIdents để không còn `[0]` lẻ).
     if (!R.isVertex && legacyFrag) {
         std::string nb;
@@ -3153,6 +3441,94 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         body = nb;
     }
     body = RewriteIdents(RewriteArrayCtors(body), mp);
+    // P6e subroutine dispatch: sinh hàm `tglmt_sub_<var>(params, idx)` switch trên
+    // uniform int (MSL không có function pointer). Call `tglmt_u.var(` (sau RI)
+    // → `tglmt_sub_var(args, tglmt_u.var)`. Dispatch append vào rest (sau impls).
+    if (!subVars.empty()) {
+        for (auto& sv : subVars) {
+            // Tìm signature type.
+            const SubType* st = nullptr;
+            for (auto& t : subTypes) if (t.name == sv.type) { st = &t; break; }
+            if (!st) return fail("subroutine type chưa khai báo: " + sv.type);
+            // Impls của type (theo thứ tự khai báo = index).
+            std::vector<std::string> impls;
+            for (auto& im : subImpls) if (im.type == sv.type) impls.push_back(im.name);
+            if (impls.empty()) return fail("subroutine không có implementation: " + sv.type);
+            // Convert ret + params sang MSL.
+            bool okT = false;
+            std::string mslRet = MSLType(st->ret, okT);
+            if (!okT && st->ret != "void") return fail("subroutine ret ngoài subset: " + st->ret);
+            // Parse params `vec4 v, float f` → [(mslType, name)].
+            std::vector<std::pair<std::string,std::string>> mparams;
+            {
+                std::string ps = Trim(st->params);
+                if (!ps.empty() && ps != "void") {
+                    std::istringstream pss(ps);
+                    std::string seg;
+                    while (std::getline(pss, seg, ',')) {
+                        seg = Trim(seg);
+                        if (seg.empty()) continue;
+                        size_t sp = seg.find_last_of(" \t*");
+                        if (sp == std::string::npos) return fail("subroutine param lỗi: " + seg);
+                        std::string pt = Trim(seg.substr(0, sp));
+                        std::string pn = Trim(seg.substr(sp + 1));
+                        // bỏ mảng param (ngoài subset)
+                        if (pn.find('[') != std::string::npos) return fail("subroutine param mảng ngoài subset");
+                        bool okP = false;
+                        std::string mpt = MSLType(pt, okP);
+                        if (!okP) return fail("subroutine param type ngoài subset: " + pt);
+                        mparams.emplace_back(mpt, pn);
+                    }
+                }
+            }
+            // Sinh dispatch fn.
+            std::string dfn = "tglmt_sub_" + sv.var;
+            std::string dsig = (st->ret == "void" ? "void" : mslRet) + " " + dfn + "(";
+            std::string argNames;
+            for (size_t k = 0; k < mparams.size(); ++k) {
+                if (k) { dsig += ", "; argNames += ", "; }
+                dsig += mparams[k].first + " " + mparams[k].second;
+                argNames += mparams[k].second;
+            }
+            if (!mparams.empty()) dsig += ", ";
+            dsig += "int tglmt_sub_idx)";
+            std::string dbody = dsig + " {\n";
+            for (size_t k = 0; k < impls.size(); ++k) {
+                dbody += (k ? "  else " : "  ") + std::string("if (tglmt_sub_idx == ") +
+                         std::to_string(k) + ") " +
+                         (st->ret == "void" ? "" : "return ") + impls[k] + "(" + argNames + ");\n";
+            }
+            if (st->ret != "void") dbody += "  return " + mslRet + "(0);\n";
+            dbody += "}\n";
+            rest += dbody;
+            // Rewrite call trong body: `tglmt_u.var(` → `tglmt_sub_var(args, tglmt_u.var)`.
+            std::string target = "tglmt_u." + sv.var + "(";
+            std::string nb2;
+            size_t i2 = 0;
+            while (i2 < body.size()) {
+                size_t p = body.find(target, i2);
+                if (p == std::string::npos) { nb2 += body.substr(i2); break; }
+                // word-boundary trước `tglmt_u` (tránh `xtglmt_u.var(`).
+                if (p > 0 && IsIdentChar(body[p - 1], false)) { nb2 += body.substr(i2, p - i2 + 1); i2 = p + 1; continue; }
+                nb2 += body.substr(i2, p - i2);
+                // match parens từ `(` cuối target.
+                size_t lp = p + target.size() - 1; // vị trí `(`
+                int dd = 0;
+                size_t m = lp;
+                for (; m < body.size(); ++m) {
+                    if (body[m] == '(') ++dd;
+                    else if (body[m] == ')') { if (--dd == 0) break; }
+                }
+                if (m >= body.size()) return fail("subroutine call ngoặc lỗi: " + sv.var);
+                std::string args = body.substr(lp + 1, m - lp - 1);
+                nb2 += dfn + "(" + args;
+                if (!Trim(args).empty()) nb2 += ", ";
+                nb2 += "tglmt_u." + sv.var + ")";
+                i2 = m + 1;
+            }
+            body = nb2;
+        }
+    }
     // Chỉ attribute ACTIVE (đọc trong main) mới vào TGLMT_VIn.
     // Desktop GL: attribute khai báo nhưng không dùng là inactive — không tốn
     // location, GetAttribLocation → -1. Blaze3D (GlProgram.link, kiểm chứng bằng
@@ -3442,6 +3818,15 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                           : s.isArray ? "texture2d_array<float>" : "texture2d<float>";
         texParams += ", " + ttype + " " + s.name + "_tex [[texture(" + ks +
                      ")]], sampler " + s.name + "_smp [[sampler(" + ks + ")]]";
+    }
+    // P6g image params: texture slot nối tiếp sampler (không sampler state —
+    // imageLoad/Store là texel access, không sample). Param tên = tên image GLSL
+    // (body đã rewrite `imageLoad(img,..)` → `img.read(..)` giữ tên).
+    for (size_t k = 0; k < R.images.size(); ++k) {
+        auto& im = R.images[k];
+        std::string ks = std::to_string(R.samplers.size() + k);
+        // mslType đã là `texture2d<float, access::read_write>` từ parser.
+        texParams += ", " + im.mslType + " " + im.name + " [[texture(" + ks + ")]]";
     }
     // Phần rest: engine post-mp đã xử lý helpers (split/thread) + RI mpShared.
     // Chỉ còn kiểm tra an toàn rồi phát nguyên văn (KHÔNG RewriteIdents lại
