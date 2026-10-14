@@ -61,6 +61,67 @@ int main() {
         printf("test_compute_dispatch FAIL: %d/64 values wrong (r0=%f r63=%f)\n", bad, r0, r63);
         return 1;
     }
-    printf("test_compute_dispatch: 64/64 values OK (0.5..63.5)\n");
+    printf("test_compute_dispatch: 64/64 SSBO values OK (0.5..63.5)\n");
+
+    // --- Case 2: compute + uniform (uoff) → v[g]=uoff+g ---
+    {
+        const char* src2 = "#version 460 core\n"
+            "layout(local_size_x=8) in;\nuniform float uoff;\n"
+            "layout(std430,binding=0) buffer B{float v[];};\n"
+            "void main(){ v[gl_GlobalInvocationID.x]=uoff+float(gl_GlobalInvocationID.x); }\n";
+        GLuint sh2 = glCreateShader(0x91B9);
+        glShaderSource(sh2, 1, &src2, nullptr); glCompileShader(sh2);
+        GLuint pr2 = glCreateProgram(); glAttachShader(pr2, sh2); glLinkProgram(pr2);
+        GLint ok2 = 0; glGetProgramiv(pr2, 0x8B82, &ok2);
+        if (!ok2) { printf("test_compute_dispatch FAIL uniform link\n"); return 1; }
+        glUseProgram(pr2);
+        GLint loc = glGetUniformLocation(pr2, "uoff");
+        glUniform1f(loc, 100.0f);
+        float z2[64] = {0}; GLuint buf2; glGenBuffers(1, &buf2);
+        glBindBuffer(0x90D2, buf2); glBufferData(0x90D2, sizeof(z2), z2, 0x88E4);
+        glBindBufferBase(0x90D2, 0, buf2);
+        glDispatchCompute(8, 1, 1); glMemoryBarrier(0x0020 | 0x0040);
+        glBindBuffer(0x90D2, buf2);
+        const float* r2 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z2), 0x0008 | 0x0010);
+        if (!r2) { printf("test_compute_dispatch FAIL uniform map\n"); return 1; }
+        int bad2 = 0;
+        for (int i = 0; i < 64; ++i) if (r2[i] != 100.0f + (float)i) ++bad2;
+        glUnmapBuffer(0x90D2);
+        if (bad2) { printf("test_compute_dispatch FAIL uniform: %d/64 wrong\n", bad2); return 1; }
+        printf("test_compute_dispatch: uniform OK (r0=100 r63=163)\n");
+    }
+
+    // --- Case 3: compute + texture sampler → v[g]=texel.r (white 1x1 → 1.0) ---
+    {
+        const char* src3 = "#version 460 core\n"
+            "layout(local_size_x=8) in;\nuniform sampler2D t;\n"
+            "layout(std430,binding=0) buffer B{float v[];};\n"
+            "void main(){ v[gl_GlobalInvocationID.x]=texelFetch(t,ivec2(0),0).r; }\n";
+        GLuint sh3 = glCreateShader(0x91B9);
+        glShaderSource(sh3, 1, &src3, nullptr); glCompileShader(sh3);
+        GLuint pr3 = glCreateProgram(); glAttachShader(pr3, sh3); glLinkProgram(pr3);
+        GLint ok3 = 0; glGetProgramiv(pr3, 0x8B82, &ok3);
+        if (!ok3) { printf("test_compute_dispatch FAIL texture link\n"); return 1; }
+        GLuint tex; glGenTextures(1, &tex);
+        glActiveTexture(0x84C0); glBindTexture(0x0DE1, tex);
+        unsigned char white[4] = {255, 255, 255, 255};
+        glTexImage2D(0x0DE1, 0, 0x8058, 1, 1, 0, 0x1908, 0x1401, white);
+        glUseProgram(pr3);
+        GLint uloc = glGetUniformLocation(pr3, "t"); glUniform1i(uloc, 0);
+        float z3[64] = {0}; GLuint buf3; glGenBuffers(1, &buf3);
+        glBindBuffer(0x90D2, buf3); glBufferData(0x90D2, sizeof(z3), z3, 0x88E4);
+        glBindBufferBase(0x90D2, 0, buf3);
+        glDispatchCompute(8, 1, 1); glMemoryBarrier(0x0020 | 0x0040);
+        glBindBuffer(0x90D2, buf3);
+        const float* r3 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z3), 0x0008 | 0x0010);
+        if (!r3) { printf("test_compute_dispatch FAIL texture map\n"); return 1; }
+        int bad3 = 0;
+        for (int i = 0; i < 64; ++i) if (r3[i] < 0.99f) ++bad3;
+        glUnmapBuffer(0x90D2);
+        if (bad3) { printf("test_compute_dispatch FAIL texture: %d/64 wrong\n", bad3); return 1; }
+        printf("test_compute_dispatch: texture OK (r0=1.0)\n");
+    }
+
+    printf("test_compute_dispatch: all cases OK (SSBO + uniform + texture)\n");
     return 0;
 }

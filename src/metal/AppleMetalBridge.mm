@@ -300,6 +300,12 @@ public:
         if (!at) return;
         [enc_ setTexture:at->get() atIndex:idx];
     }
+    void setSamplerState(ISamplerState* s, uint32_t idx) override {
+        if (!enc_ || !s) return;
+        AppleSampler* as = dynamic_cast<AppleSampler*>(s);
+        if (!as) return;
+        [enc_ setSamplerState:as->get() atIndex:idx];
+    }
     void setBuffer(IBuffer* b, uint32_t idx) override {
         if (!enc_ || !b) return;
         AppleBuffer* ab = dynamic_cast<AppleBuffer*>(b);

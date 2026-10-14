@@ -208,6 +208,12 @@ static const char* const kExts[] = {
     //  - clip_control: SetClipControl + áp viewport Y-flip / clear depth /
     //    shader depth map (ClipOrigin/ClipDepth được consume) + glGet round-trip
     "GL_ARB_clip_control",
+    // ===== P6f: compute shader (ARB_compute_shader) — dispatch THẬT trên Metal. =====
+    //  - converter GLSL→kernel MSL (localSize + gl_*ID + SSBO/uniform/texture) +
+    //    link tạo compute pipeline + glDispatchCompute → dispatchThreads (e2e 64/64 PASS).
+    //  - glGet limit compute (COUNT/SIZE indexed + SHARED/UNIFORM/TEXTURE/INVOC) thật.
+    //  - atomic counters / image uniforms = 0 (chưa impl — app fallback đường khác).
+    "GL_ARB_compute_shader",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),

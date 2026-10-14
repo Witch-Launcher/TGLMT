@@ -243,6 +243,7 @@ public:
     virtual ~IComputeEncoder() = default;
     virtual void setPipeline(IComputePipeline* p) { (void)p; }
     virtual void setTexture(ITexture* t, uint32_t idx) { (void)t; (void)idx; }
+    virtual void setSamplerState(ISamplerState* s, uint32_t idx) { (void)s; (void)idx; }
     virtual void setBuffer(IBuffer* b, uint32_t idx) { (void)b; (void)idx; }
     virtual void dispatch2D(uint32_t w, uint32_t h) { (void)w; (void)h; }
     // P6f: dispatch 3D với threadsPerThreadgroup từ layout(local_size) của compute shader.

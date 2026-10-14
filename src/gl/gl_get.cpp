@@ -13,6 +13,11 @@ static void OutI(Context& c, GLenum p, GLint* v, GLuint idx = 0) {
     switch (p) {
         case 0x0D33: *v = 4; break; // MAX_TEXTURE_SIZE default expose
         case 0x0B70: *v = 0; break;
+        // P6f compute indexed limits (ARB_compute_shader): theo dimension (idx 0/1/2).
+        case 0x91BE: // MAX_COMPUTE_WORK_GROUP_COUNT
+            *v = (idx == 0) ? 65535 : (idx == 1) ? 65535 : 65535; break;
+        case 0x91BF: // MAX_COMPUTE_WORK_GROUP_SIZE
+            *v = (idx == 0) ? 1024 : (idx == 1) ? 1024 : 64; break;
         default: *v = 0; break;
     }
 }
@@ -59,6 +64,20 @@ static bool StaticLimit(GLenum p, GLint* v) {
         case 0x8C2B: *v = 65536; break;  // MAX_TEXTURE_BUFFER_SIZE
         case 0x80E8: *v = 1048576; break;// MAX_ELEMENTS_VERTICES
         case 0x80E9: *v = 1048576; break;// MAX_ELEMENTS_INDICES
+        // ===== P6f compute (ARB_compute_shader) — limit thật, atomic/image = 0 =====
+        case 0x8262: *v = 32768; break;  // MAX_COMPUTE_SHARED_MEMORY_SIZE (32KB A11)
+        case 0x8263: *v = 1024; break;   // MAX_COMPUTE_UNIFORM_COMPONENTS
+        case 0x8264: *v = 0; break;      // MAX_COMPUTE_ATOMIC_COUNTER_BUFFERS (chưa impl)
+        case 0x8265: *v = 0; break;      // MAX_COMPUTE_ATOMIC_COUNTERS (chưa impl)
+        case 0x8266: *v = 1024; break;   // MAX_COMBINED_COMPUTE_UNIFORM_COMPONENTS
+        case 0x90EB: *v = 1024; break;   // MAX_COMPUTE_WORK_GROUP_INVOCATIONS (A11)
+        case 0x91BB: *v = 14; break;     // MAX_COMPUTE_UNIFORM_BLOCKS
+        case 0x91BC: *v = 16; break;     // MAX_COMPUTE_TEXTURE_IMAGE_UNITS
+        case 0x91BD: *v = 0; break;      // MAX_COMPUTE_IMAGE_UNIFORMS (chưa impl)
+        // ===== P6f SSBO (ARB_shader_storage_buffer_object) — binding 0..15 compute =====
+        case 0x90DD: *v = 16; break;     // MAX_SHADER_STORAGE_BUFFER_BINDINGS
+        case 0x90DE: *v = 134217728; break; // MAX_SHADER_STORAGE_BLOCK_SIZE (128MB)
+        case 0x90DF: *v = 4; break;      // SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT
         default: return false;
     }
     return true;

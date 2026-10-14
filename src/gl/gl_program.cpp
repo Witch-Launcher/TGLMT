@@ -73,7 +73,7 @@ void glLinkProgram(GLuint p) {
     pr.uniformLayout.clear();
     pr.attribLoc.clear(); pr.appleVS.reset(); pr.appleFS.reset();
     pr.appleCS.reset(); pr.appleCSPipeline.reset(); pr.computeMSL.clear();
-    pr.computeBlockSlots.clear();
+    pr.computeBlockSlots.clear(); pr.computeSamplers.clear(); pr.computeUBSize = 0;
     pr.vsUBSize = pr.fsUBSize = 0;
     ShaderObject *vs = nullptr, *fs = nullptr;
     bool hasV = false, hasF = false;
@@ -90,6 +90,21 @@ void glLinkProgram(GLuint p) {
             pr.computeLocalSize[1] = its->second.conv.localSize[1];
             pr.computeLocalSize[2] = its->second.conv.localSize[2];
             pr.computeBlockSlots = its->second.conv.blockSlots;
+            // P6f: compute samplers (thứ tự khai báo = texture slot) + uniforms.
+            auto kindOf = [](const GLSLVar& s) {
+                return s.isBuffer ? 'B' : s.isCube ? 'C' : s.isArray ? 'A' : s.isShadow ? 'S' : '2';
+            };
+            for (auto& s : its->second.conv.samplers) {
+                pr.computeSamplers.push_back(s.name);
+                pr.samplerKind[s.name] = kindOf(s);
+                if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
+            }
+            // Uniforms: 1 stage (isVS=true), offset/size từ converter.
+            for (auto& u : its->second.conv.uniforms) {
+                if (u.isSampler) continue;
+                pr.uniformLayout.push_back({u.name, u.uniformOffset, u.uniformSize, -1, true});
+            }
+            pr.computeUBSize = its->second.conv.uniformBufferSize;
         }
         if (its->second.type == 0x8E88 || its->second.type == 0x8E87) // TCS/TES
             pr.hasTessStages = true;

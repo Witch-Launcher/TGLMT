@@ -2,6 +2,7 @@
 // gl_memory.cpp gộp chung: MemoryBarrier → MTLBarrier/memoryBarrierWithScope.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <cstring>
 using namespace tglmt;
 
 namespace tglmt::gl {
@@ -22,6 +23,35 @@ metal::IBuffer* BufOf(Context& c, GLuint id) {
     if (!id) return nullptr;
     auto it = c.buffers.find(id);
     return (it == c.buffers.end() || !it->second.gpu) ? nullptr : it->second.gpu.get();
+}
+// Fallback 1x1 đen (compute sampler thiếu texture → bind đen, không fault).
+std::shared_ptr<metal::ITexture> BlackTex(Context& c) {
+    static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::ITexture>> cache;
+    auto it = cache.find(c.device.get());
+    if (it != cache.end() && it->second) return it->second;
+    uint8_t black[4] = {0, 0, 0, 255};
+    auto t = c.device->newTextureWithBytes(1, 1, metal::PixelFormat::RGBA8Unorm, black, 4);
+    if (t) cache[c.device.get()] = t;
+    return t;
+}
+// Default sampler (LINEAR/REPEAT) cache theo device — compute không cần param phức tạp.
+std::shared_ptr<metal::ISamplerState> DefSampler(Context& c) {
+    static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::ISamplerState>> cache;
+    auto it = cache.find(c.device.get());
+    if (it != cache.end() && it->second) return it->second;
+    metal::SamplerDesc d;
+    auto s = c.device->makeSampler(d);
+    if (s) cache[c.device.get()] = s;
+    return s;
+}
+// Target cho kind char ('2' TEXTURE_2D, 'C' CUBE, 'A' ARRAY).
+GLenum KindTarget(char k) {
+    switch (k) {
+        case 'C': return 0x8513; // TEXTURE_CUBE_MAP
+        case 'A': return 0x8C1A; // TEXTURE_2D_ARRAY
+        case 'B': return 0x8C2A; // TEXTURE_BUFFER
+        default:  return 0x0DE1; // TEXTURE_2D
+    }
 }
 } // namespace
 
@@ -44,9 +74,29 @@ void glDispatchCompute(GLuint x, GLuint y, GLuint z) {
     if (!enc) { c.errors.Record(0x0502); return; }
     enc->setPipeline(pr.appleCSPipeline.get());
     auto zero = ZeroBuf(c);
-    // buffer(16) = uniforms. Compute chưa có uniformLayout (link trả về sớm) →
-    // zero fallback (kernel luôn khai báo tglmt_u [[buffer(16)]] → phải bind gì đó).
-    if (zero) enc->setBuffer(zero.get(), 16);
+    // buffer(16) = uniforms. Build bytes từ uniformLayout (e.loc>=0, đã điền bởi
+    // glGetUniformLocation + glUniform*). Rỗng → zero fallback (tglmt_u luôn bind).
+    {
+        size_t ubSize = pr.computeUBSize ? pr.computeUBSize : 16;
+        thread_local std::vector<uint8_t> ub;
+        if (ub.size() != ubSize) ub.assign(ubSize, 0); else std::fill(ub.begin(), ub.end(), 0);
+        for (auto& e : pr.uniformLayout) {
+            if (e.loc < 0) continue;
+            auto uit = pr.uniforms.find(e.loc);
+            if (uit == pr.uniforms.end()) continue;
+            size_t n = std::min(e.size, uit->second.size());
+            if (e.offset + n <= ub.size()) memcpy(ub.data() + e.offset, uit->second.data(), n);
+        }
+        // Upload (compute hiếm → newBuffer mỗi dispatch chấp nhận được; cache theo nội dung).
+        static thread_local std::vector<uint8_t> lastUB;
+        static thread_local std::shared_ptr<metal::IBuffer> lastBuf;
+        if (!lastBuf || lastUB.size() != ub.size() || memcmp(lastUB.data(), ub.data(), ub.size()) != 0) {
+            lastBuf = c.device->newBufferWithBytes(ub.data(), ub.size(), metal::StorageMode::Shared);
+            lastUB = ub;
+        }
+        if (lastBuf) enc->setBuffer(lastBuf.get(), 16);
+        else if (zero) enc->setBuffer(zero.get(), 16);
+    }
     // Block bind: bindingPoint → MSL slot (từ computeBlockSlots của converter).
     for (auto& bs : pr.computeBlockSlots) {
         metal::IBuffer* b = nullptr;
@@ -62,6 +112,25 @@ void glDispatchCompute(GLuint x, GLuint y, GLuint z) {
             b = zero.get();
         }
         if (b) enc->setBuffer(b, (uint32_t)bs.slot);
+    }
+    // Texture + sampler: computeSamplers theo thứ tự khai báo = texture/sampler slot k.
+    auto ssDef = DefSampler(c);
+    auto black = BlackTex(c);
+    for (size_t k = 0; k < pr.computeSamplers.size(); ++k) {
+        const std::string& name = pr.computeSamplers[k];
+        auto uit = pr.samplerUnits.find(name);
+        GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+        auto kit = pr.samplerKind.find(name);
+        char kind = (kit == pr.samplerKind.end()) ? '2' : kit->second;
+        metal::ITexture* gpu = nullptr;
+        if (unit < 32) {
+            GLuint texId = c.state.BoundTexture(unit, KindTarget(kind));
+            auto tit = c.textures.find(texId);
+            if (tit != c.textures.end() && tit->second.gpu) gpu = tit->second.gpu.get();
+        }
+        if (!gpu && black) gpu = black.get();
+        if (gpu) enc->setTexture(gpu, (uint32_t)k);
+        if (ssDef) enc->setSamplerState(ssDef.get(), (uint32_t)k);
     }
     // Dispatch: GL glDispatchCompute(x,y,z) = x*y*z WORKGROUP; Metal
     // dispatchThreads:grid = TỔNG thread → grid = workgroup * localSize.

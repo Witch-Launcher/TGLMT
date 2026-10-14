@@ -215,6 +215,9 @@ struct ProgramObject {
     int computeLocalSize[3] = {1, 1, 1};
     // Map block → MSL buffer slot (bindingPoint → slot) cho compute dispatch bind.
     std::vector<GLSLConvertResult::BlockSlot> computeBlockSlots;
+    // P6f: compute sampler list (thứ tự khai báo = texture slot) + uniform size.
+    std::vector<std::string> computeSamplers;
+    size_t computeUBSize = 0;
     std::unordered_map<std::string, GLuint> attribBind; // glBindAttribLocation (trước link)
     std::unordered_map<std::string, GLint> attribLoc;   // location sau link
     // Sampler mapping (fix unit vs MSL slot): tên sampler theo thứ tự khai báo
