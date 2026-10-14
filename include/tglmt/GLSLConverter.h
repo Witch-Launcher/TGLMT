@@ -73,6 +73,10 @@ struct GLSLConvertResult {
     bool usesVertexID = false;
     bool usesInstanceID = false;
     bool isVertex = true;
+    // P6f: compute shader (stage 0x91B9). localSize = workgroup size đọc từ
+    // `layout(local_size_x/y/z) in;` — backend cần để dispatch threadsPerThreadgroup.
+    bool isCompute = false;
+    int localSize[3] = {1, 1, 1};
 };
 
 // Convert 1 shader stage. stage = 0x8B31 (VERTEX) hoặc 0x8B30 (FRAGMENT).

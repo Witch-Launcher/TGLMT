@@ -39,17 +39,18 @@ void glCompileShader(GLuint s) {
     if (it == c.shaders.end()) { c.errors.Record(0x0502); return; }
     if (it->second.source.empty()) { it->second.compiled = false; it->second.infoLog = "error: empty source"; return; }
     uint32_t stage = it->second.type;
-    if (stage != 0x8B31 && stage != 0x8B30) {
-        // TCS/TES/GS/COMPUTE: converter M5-vanilla chỉ VS/FS.
+    // P6f: compute (0x91B9) đã có converter → kernel. TCS/TES/GS vẫn fail trung thực.
+    if (stage != 0x8B31 && stage != 0x8B30 && stage != 0x91B9) {
+        // TCS/TES/GS: converter M5-vanilla chỉ VS/FS/COMPUTE.
         // Trung thực: COMPILE_STATUS false + log rõ (trước đây true giả → link sai).
-        // Tess/GS/compute thật là mục tiêu Sodium/Iris (xem ROADMAP tess-GS-compute).
+        // Tess/GS thật là mục tiêu Sodium/Iris (xem ROADMAP tess-GS).
         it->second.conv = GLSLConvertResult{};
         it->second.msl.clear();
         it->second.compiled = false;
         const char* nm = (stage == 0x8E88 || stage == 0x8E87) ? "tessellation"
-            : (stage == 0x8DD9) ? "geometry" : (stage == 0x91B9) ? "compute" : "unknown-stage";
+            : (stage == 0x8DD9) ? "geometry" : "unknown-stage";
         it->second.infoLog = std::string("error: ") + nm +
-            " shader ngoài subset vanilla (TCS/TES/GS/COMPUTE cần đường tess/mesh/compute riêng)";
+            " shader ngoài subset vanilla (TCS/TES/GS cần đường tess/mesh riêng)";
         return;
     }
     GLSLConvertResult r = ConvertGLSLtoMSL(it->second.source, stage);

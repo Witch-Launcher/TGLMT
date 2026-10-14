@@ -1728,7 +1728,8 @@ static bool ExtractMainBody(const std::string& src, std::string& inner, std::str
 GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     GLSLConvertResult R;
     R.isVertex = (stage == 0x8B31);
-    R.entryPoint = R.isVertex ? "TGLMT_vs" : "TGLMT_fs";
+    R.isCompute = (stage == 0x91B9);
+    R.entryPoint = R.isVertex ? "TGLMT_vs" : (R.isCompute ? "TGLMT_cs" : "TGLMT_fs");
     auto fail = [&](const std::string& m) { R.ok = false; R.log = m; return R; };
 
     std::string src = StripComments(glsl);
@@ -1861,6 +1862,23 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             }
             if (!active()) continue; // nhánh ifdef tắt
             if (t.rfind("precision", 0) == 0) continue; // MSL bỏ qua precision
+            // P6f compute: `layout(local_size_x=8[,y,z]) in;` → bắt localSize, bỏ dòng
+            // (MSL không có local_size declaration; dispatch dùng threadsPerThreadgroup).
+            if (R.isCompute && t.rfind("layout", 0) == 0 && t.find("local_size") != std::string::npos) {
+                auto grab = [&](const char* key, int def) {
+                    size_t p = t.find(key);
+                    if (p == std::string::npos) return def;
+                    p = t.find('=', p);
+                    if (p == std::string::npos) return def;
+                    return atoi(t.c_str() + p + 1);
+                };
+                R.localSize[0] = grab("local_size_x", 1);
+                R.localSize[1] = grab("local_size_y", 1);
+                R.localSize[2] = grab("local_size_z", 1);
+                if (R.localSize[0] < 1 || R.localSize[1] < 1 || R.localSize[2] < 1)
+                    return fail("local_size phải >= 1: " + t);
+                continue; // bỏ dòng layout local_size
+            }
             kept += line + "\n";
         }
         if (!activeStack.empty()) return fail("#ifdef/#if không đóng");
@@ -2261,7 +2279,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // Fragment: 1..8 out vec4 (MRT cho vanilla deferred/Iris; location = attachment).
     // Legacy gl_FragColor / gl_FragData[0] (end_portal compat): map về out duy nhất.
     bool legacyFrag = false;
-    if (!R.isVertex) {
+    if (!R.isVertex && !R.isCompute) { // P6f: compute không có out
         if (outs.empty()) {
             auto hasWord = [&](const char* w) {
                 size_t n = strlen(w), p = 0;
@@ -2783,6 +2801,9 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // Local (không thêm vào public struct) — detect trước, emit param ở assembly.
     bool useStencilRef = false, useSampleID = false, useSamplePos = false;
     bool useBaseInstance = false, useFragDepth = false, useSampleMask = false;
+    // P6f compute thread-position params (chỉ emit param khi body dùng — probe thật).
+    bool useGlobalID = false, useLocalID = false, useWorkGroupID = false;
+    bool useNumWG = false, useLocalIndex = false, useWorkGroupSize = false;
     if (R.isVertex) {
         for (auto& a : ins) mpVary.emplace_back(a.name, "_in." + a.name);
         for (auto& v : outs) mpVary.emplace_back(v.name, "_out." + v.name);
@@ -2804,6 +2825,35 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         // fail trung thực tại convert thay vì lỗi MSL mơ hồ ở link.
         if (body.find("gl_DrawID") != std::string::npos)
             return fail("gl_DrawID ngoài subset (Metal không có [[draw_index]])");
+    } else if (R.isCompute) {
+        // P6f compute: gl_*ID → kernel thread-position params (probe Metal thật OK).
+        // localSize bắt ở preprocessor (dòng layout local_size bị bỏ).
+        if (body.find("gl_GlobalInvocationID") != std::string::npos) {
+            useGlobalID = true;
+            mpVary.emplace_back("gl_GlobalInvocationID", "tglmt_globalID");
+        }
+        if (body.find("gl_LocalInvocationID") != std::string::npos) {
+            useLocalID = true;
+            mpVary.emplace_back("gl_LocalInvocationID", "tglmt_localID");
+        }
+        if (body.find("gl_WorkGroupID") != std::string::npos) {
+            useWorkGroupID = true;
+            mpVary.emplace_back("gl_WorkGroupID", "tglmt_workGroupID");
+        }
+        if (body.find("gl_NumWorkGroups") != std::string::npos) {
+            useNumWG = true;
+            mpVary.emplace_back("gl_NumWorkGroups", "tglmt_numWorkGroups");
+        }
+        // [[thread_index_in_threadgroup]] = local linear index (gl_LocalInvocationIndex).
+        if (body.find("gl_LocalInvocationIndex") != std::string::npos) {
+            useLocalIndex = true;
+            mpVary.emplace_back("gl_LocalInvocationIndex", "tglmt_localIndex");
+        }
+        // gl_WorkGroupSize: không có builtin MSL → hằng uint3 emit trong kernel.
+        if (body.find("gl_WorkGroupSize") != std::string::npos) {
+            useWorkGroupSize = true;
+            mpVary.emplace_back("gl_WorkGroupSize", "tglmt_workGroupSize");
+        }
     } else {
         for (auto& v : ins) mpVary.emplace_back(v.name, "_in." + v.name);
         mpVary.emplace_back("gl_PointCoord", "tglmt_pointCoord");
@@ -3087,7 +3137,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         std::string out;
         std::string retV = kZConv + " return _out;";
         std::string retF = isMRT ? "return _out;" : "return tglmt_fragColor;";
-        std::string ret = R.isVertex ? retV : retF;
+        std::string ret = R.isVertex ? retV : (R.isCompute ? "return;" : retF);
         size_t i = 0;
         while (i < body.size()) {
             if (body.compare(i, 6, "return") == 0 &&
@@ -3237,6 +3287,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (R.usesPointSize) msl_out << "  float pointSize [[point_size]];\n";
         for (auto& v : outs) msl_out << "  " << v.mslType << " " << v.name << " [[user(locn" << v.location << ")]];\n";
         msl_out << "};\n";
+    } else if (R.isCompute) {
+        // P6f: compute không có in/varying struct (gl_*ID là kernel params).
     } else {
         msl_out << "struct TGLMT_FIn {\n";
         for (auto& v : ins) msl_out << "  " << v.mslType << " " << v.name << " [[user(locn" << v.location << ")]];\n";
@@ -3367,6 +3419,24 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (R.usesInstanceID) msl_out << ",\n    uint tglmt_instanceID [[instance_id]]";
         if (useBaseInstance) msl_out << ",\n    uint tglmt_baseInstance [[base_instance]]";
         msl_out << texParams << ") {\n  TGLMT_VOut _out = {};\n" << body << "\n" << kZConv << "\n  return _out;\n}\n";
+    } else if (R.isCompute) {
+        // P6f: compute → kernel. Thread-position params emit theo mức body dùng
+        // (đã probe Metal thật: thread_position_in_grid/threadgroup/thread_index OK).
+        msl_out << "kernel void TGLMT_cs(constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
+        for (size_t bi = 0; bi < blocks.size(); ++bi)
+            msl_out << ",\n    constant TGLMTUBO_" << blocks[bi].name << "& ubo_" << blocks[bi].name
+                    << " [[buffer(" << (17 + bi) << ")]]";
+        if (useGlobalID) msl_out << ",\n    uint3 tglmt_globalID [[thread_position_in_grid]]";
+        if (useLocalID) msl_out << ",\n    uint3 tglmt_localID [[thread_position_in_threadgroup]]";
+        if (useWorkGroupID) msl_out << ",\n    uint3 tglmt_workGroupID [[threadgroup_position_in_grid]]";
+        if (useNumWG) msl_out << ",\n    uint3 tglmt_numWorkGroups [[threadgroups_per_grid]]";
+        if (useLocalIndex) msl_out << ",\n    uint tglmt_localIndex [[thread_index_in_threadgroup]]";
+        msl_out << texParams << ") {\n";
+        // gl_WorkGroupSize: hằng localSize đọc từ layout(local_size_x/y/z) in;
+        if (useWorkGroupSize)
+            msl_out << "  const uint3 tglmt_workGroupSize = uint3(" << R.localSize[0] << "u, "
+                    << R.localSize[1] << "u, " << R.localSize[2] << "u);\n";
+        msl_out << body << "\n}\n";
     } else if (isMRT || useFragDepth || useSampleMask) {
         // Fragment trả STRUCT khi: MRT, hoặc có output builtin depth/sample_mask.
         // (gl_FragDepth → _out.depth; gl_SampleMask[0] → _out.smask.)
