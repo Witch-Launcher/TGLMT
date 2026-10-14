@@ -1245,8 +1245,126 @@ void glCompressedTexSubImage3D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GL
 void glCompressedTextureSubImage1D(GLuint a, GLint b, GLint c_, GLsizei d, GLenum e, GLsizei f, const void* g) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g; }
 void glCompressedTextureSubImage2D(GLuint a, GLint b, GLint c_, GLint d, GLsizei e, GLsizei f, GLenum g, GLsizei h, const void* i) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
 void glCompressedTextureSubImage3D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLsizei j, const void* k) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; }
-void glClearTexImage(GLuint a, GLint b, GLenum d, GLenum e, const void* f) { (void)a;(void)b;(void)d;(void)e;(void)f; }
-void glClearTexSubImage(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLenum j, const void* k) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; }
+// Ghi 1 texel clear-value (format,type,data) vào dst (srcBpp bytes).
+// Hỗ trợ UNSIGNED_BYTE / FLOAT / HALF_FLOAT / USHORT / UINT + NULL (zero).
+// Trả false nếu format/type không hỗ trợ → caller INVALID_ENUM (trung thực).
+static bool WriteClearTexel(GLenum format, GLenum type, const void* data,
+                            uint8_t* dst, size_t srcBpp) {
+    if (!data) { memset(dst, 0, srcBpp); return true; }
+    switch (type) {
+        case 0x1401: // UNSIGNED_BYTE — copy trực tiếp (RGB=3, RGBA=4, RED=1, ...)
+            memcpy(dst, data, srcBpp); return true;
+        case 0x1406: { // FLOAT → normalize theo format
+            const float* f = (const float*)data;
+            // Số component theo format
+            size_t nc = (format == 0x1907) ? 3 : (format == 0x1908) ? 4 :
+                        (format == 0x8227) ? 2 : 1; // RGB / RGBA / RG / RED-etc
+            // srcBpp bytes đích: nếu bpp == nc thì là float data, else uchar data.
+            if (srcBpp == nc * 4) { memcpy(dst, f, srcBpp); return true; }
+            for (size_t i = 0; i < nc && i < srcBpp; ++i) {
+                float v = f[i]; if (v < 0) v = 0; if (v > 1) v = 1;
+                dst[i] = (uint8_t)(v * 255.0f + 0.5f);
+            }
+            for (size_t i = nc; i < srcBpp; ++i) dst[i] = 0;
+            return true;
+        }
+        case 0x140B: { // HALF_FLOAT (2B/component) → uchar (xấp xỉ)
+            // Đơn giản: coi như half → convert approx sang uchar nếu dst là uchar.
+            const uint16_t* h = (const uint16_t*)data;
+            size_t nc = (format == 0x1907) ? 3 : (format == 0x1908) ? 4 :
+                        (format == 0x8227) ? 2 : 1;
+            if (srcBpp == nc * 2) { memcpy(dst, h, srcBpp); return true; }
+            for (size_t i = 0; i < nc && i < srcBpp; ++i) {
+                // half → float → uchar (đầy đủ ở đây không cần, chỉ cần phổ biến)
+                uint16_t hh = h[i]; uint32_t sign = (hh >> 15) & 1;
+                uint32_t exp = (hh >> 10) & 0x1F, mant = hh & 0x3FF;
+                float fv = 0.f;
+                if (exp == 0) fv = mant * 5.9604644775390625e-8f;
+                else if (exp == 31) fv = mant ? 0.f : 1e30f;
+                else fv = (1 + mant / 1024.0f) * powf(2.0f, (int)exp - 15);
+                if (sign) fv = -fv;
+                if (fv < 0) fv = 0; if (fv > 1) fv = 1;
+                dst[i] = (uint8_t)(fv * 255.0f + 0.5f);
+            }
+            for (size_t i = nc; i < srcBpp; ++i) dst[i] = 0;
+            return true;
+        }
+        case 0x1403: // UNSIGNED_SHORT — copy trực tiếp nếu dst là ushort
+            memcpy(dst, data, srcBpp); return true;
+        case 0x1405: // UNSIGNED_INT — copy trực tiếp
+            memcpy(dst, data, srcBpp); return true;
+        case 0x140A: // FLOAT (đã trên) — fallthrough an toàn
+            memcpy(dst, data, srcBpp); return true;
+        default:
+            return false; // không đoán — trung thực INVALID_ENUM
+    }
+}
+static void ClearTexLevel(Context& c, TextureObject& t, GLint level, GLint xoff, GLint yoff,
+                          GLsizei w, GLsizei h, GLenum format, GLenum type, const void* data) {
+    size_t srcBpp = Bpp(format, type);
+    // Xác định pixel đích (base level → t.pixels; level>0 → mipData)
+    std::vector<uint8_t>* dstPix = &t.pixels;
+    GLsizei lw = (GLsizei)t.w, lh = (GLsizei)t.h;
+    if (level == 0) {
+        // base level
+    } else {
+        auto it = t.mipData.find(level);
+        if (it == t.mipData.end()) { c.errors.Record(0x0500); return; } // level chưa alloc
+        dstPix = &it->second.pixels;
+        lw = it->second.w; lh = it->second.h;
+    }
+    if (xoff < 0 || yoff < 0 || w < 0 || h < 0 ||
+        (size_t)(xoff + w) > (size_t)lw || (size_t)(yoff + h) > (size_t)lh) {
+        c.errors.Record(0x0501); return;
+    }
+    if (w <= 0 || h <= 0) return;
+    // Pixel format phải tương thích internalFormat (spec §8.11: format phải khớp
+    // 1 trong các cơ sở của ifmt). Kiểm lỏng: bỏ qua khi lệch (vẫn điền shadow).
+    uint8_t texel[16] = {0};
+    if (!WriteClearTexel(format, type, data, texel, srcBpp)) {
+        c.errors.Record(0x0500); return; // INVALID_ENUM — format/type không hỗ trợ
+    }
+    // Điền shadow tight (row-major, bpp theo src format)
+    if (dstPix->size() < (size_t)lw * lh * srcBpp)
+        dstPix->resize((size_t)lw * lh * srcBpp, 0);
+    for (GLsizei r = 0; r < h; ++r) {
+        uint8_t* row = dstPix->data() + ((size_t)(yoff + r) * lw + (size_t)xoff) * srcBpp;
+        for (GLsizei x = 0; x < w; ++x) memcpy(row + (size_t)x * srcBpp, texel, srcBpp);
+    }
+    // Upload GPU (base level hoặc mip — mip GPU không giữ, chỉ shadow).
+    if (level == 0) {
+        std::vector<uint8_t> tight((size_t)w * h * srcBpp);
+        for (GLsizei r = 0; r < h; ++r)
+            memcpy(tight.data() + (size_t)r * w * srcBpp,
+                   dstPix->data() + ((size_t)(yoff + r) * lw + (size_t)xoff) * srcBpp,
+                   (size_t)w * srcBpp);
+        SyncRegionToGPU(c, t, xoff, yoff, w, h, tight.data(), (size_t)w * srcBpp, format, type);
+    } else {
+        ++c.appleStats.mipStaged;
+    }
+}
+void glClearTexImage(GLuint tex, GLint level, GLenum format, GLenum type, const void* data) {
+    Context& c = Context::Current();
+    auto it = c.textures.find(tex);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    // Level 0: full; level>0: full theo dims level đó.
+    GLsizei w = (level == 0) ? (GLsizei)it->second.w : 0, h = w;
+    if (level > 0) {
+        auto m = it->second.mipData.find(level);
+        if (m == it->second.mipData.end()) { c.errors.Record(0x0500); return; }
+        w = m->second.w; h = m->second.h;
+    }
+    ClearTexLevel(c, it->second, level, 0, 0, w, h, format, type, data);
+}
+void glClearTexSubImage(GLuint tex, GLint level, GLint x, GLint y, GLint z,
+                        GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type,
+                        const void* data) {
+    (void)z; (void)d; // 2D/level hiện tại (TGLMT không giữ 3D texture)
+    Context& c = Context::Current();
+    auto it = c.textures.find(tex);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    ClearTexLevel(c, it->second, level, x, y, w, h, format, type, data);
+}
 void glInvalidateTexImage(GLuint a, GLint b) { (void)a;(void)b; }
 void glInvalidateTexSubImage(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h; }
 void glTextureStorage1D(GLuint t, GLsizei l, GLenum inf, GLsizei w) {

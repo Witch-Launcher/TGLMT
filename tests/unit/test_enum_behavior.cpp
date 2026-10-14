@@ -57,6 +57,7 @@ static const char* kBatch10[] = {
     "GL_ARB_occlusion_query2", "GL_ARB_multi_bind",
     "GL_ARB_map_buffer_alignment", "GL_ARB_explicit_uniform_location",
 };
+static const char* kBatch11[] = {"GL_EXT_clear_texture", "GL_ARB_clear_texture"};
 // Alias OES chỉ có symbol extern "C" (gl_ext_aliases_gen), không khai báo gl46.h.
 extern "C" void glProgramBinaryOES(GLuint p, GLenum f, const void* d, GLint l);
 extern "C" void glGetProgramBinaryOES(GLuint p, GLsizei b, GLsizei* w, GLenum* f, void* d);
@@ -510,6 +511,47 @@ int main() {
             Check(glGetError() == 0, "glBindBuffersBase không lỗi");
             glDeleteBuffers(2, mbb);
             // occlusion_query2: ANY_SAMPLES_PASSED đã test ở 9e (cùng target).
+        }
+
+        // --- 11. Batch-11: GL_EXT_clear_texture / GL_ARB_clear_texture.
+        {
+            GLint n11 = 0;
+            glGetIntegerv(0x821D, &n11);
+            for (const char* want : kBatch11) {
+                bool found = false;
+                for (GLint i = 0; i < n11 && !found; ++i) {
+                    const char* e = (const char*)glGetStringi(0x1F03, (GLuint)i);
+                    if (e && !strcmp(e, want)) found = true;
+                }
+                Check(found, want);
+            }
+            // Tạo RGBA8 texture, upload 1 pixel, rồi ClearTexImage → đọc lại.
+            while (glGetError() != 0) {}
+            GLuint ct = 0;
+            glGenTextures(1, &ct);
+            glBindTexture(0x0DE1, ct);
+            unsigned char init[4] = {10, 20, 30, 40};
+            glTexImage2D(0x0DE1, 0, 0x8058 /*RGBA8*/, 2, 2, 0, 0x1908, 0x1401, init);
+            unsigned char clr[4] = {200, 150, 100, 255};
+            glClearTexImage(ct, 0, 0x1908 /*RGBA*/, 0x1401 /*UNSIGNED_BYTE*/, clr);
+            Check(glGetError() == 0, "glClearTexImage RGBA8 không lỗi");
+            unsigned char out[2 * 2 * 4] = {0};
+            glGetTexImage(0x0DE1, 0, 0x1908, 0x1401, out);
+            Check(out[0] == 200 && out[1] == 150 && out[2] == 100 && out[3] == 255,
+                  "glClearTexImage điền pixel[0] = clr");
+            Check(out[4] == 200 && out[15] == 255, "glClearTexImage điền đủ 2x2");
+            // Sub: clear vùng 1x1 ở (1,1).
+            unsigned char clr2[4] = {1, 2, 3, 4};
+            glClearTexSubImage(ct, 0, 1, 1, 0, 1, 1, 1, 0x1908, 0x1401, clr2);
+            Check(glGetError() == 0, "glClearTexSubImage không lỗi");
+            glGetTexImage(0x0DE1, 0, 0x1908, 0x1401, out);
+            Check(out[(1 * 2 + 1) * 4 + 0] == 1, "glClearTexSubImage (1,1) = 1");
+            Check(out[0] == 200, "ClearTexSub không ảnh hưởng pixel khác");
+            // Format lạ → INVALID_ENUM trung thực.
+            while (glGetError() != 0) {}
+            glClearTexImage(ct, 0, 0x1908, 0x9999 /*type lạ*/, clr);
+            Check(glGetError() == 0x0500, "type lạ → INVALID_ENUM");
+            glDeleteTextures(1, &ct);
         }
     }
 

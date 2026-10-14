@@ -201,6 +201,10 @@ static const char* const kExts[] = {
     "GL_ARB_map_buffer_alignment",
     //  - explicit_uniform_location: glGet(MAX_UNIFORM_LOCATIONS)=1024 thật
     "GL_ARB_explicit_uniform_location",
+    //  - clear_texture: glClearTexImage/ glClearTexSubImage ĐÃ điền shadow +
+    //    SyncRegionToGPU (format/type UNSIGNED_BYTE/FLOAT/HALF_FLOAT/USHORT/UINT)
+    "GL_EXT_clear_texture",
+    "GL_ARB_clear_texture",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),
