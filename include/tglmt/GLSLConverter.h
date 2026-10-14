@@ -37,6 +37,9 @@ struct GLSLVar {
     size_t uniformOffset = 0; // chỉ cho uniforms
     size_t uniformSize = 0;
     int arraySize = 0;      // 0 = không mảng, >0 = uniform array[N] (vanilla/Sodium)
+    // P-Tess T1: mảng per-vertex TCS `in/out T x[]` (unsized) → -1 lúc parse,
+    // chuẩn hoá = tessVertices sau đó. SSBO unsized cũng dùng -1 (quy ước chung).
+    bool isPatch = false;  // P-Tess: `patch out/in` (per-patch, khác per-vertex)
     bool isSampler = false;
     bool isBuffer = false;       // samplerBuffer/isamplerBuffer/usamplerBuffer
     std::string sampleType = "float"; // float/int/uint (cho buffer + read)
@@ -93,6 +96,26 @@ struct GLSLConvertResult {
     // `layout(local_size_x/y/z) in;` — backend cần để dispatch threadsPerThreadgroup.
     bool isCompute = false;
     int localSize[3] = {1, 1, 1};
+    // P-Tess: tessellation control (0x8E88) / evaluation (0x8E87, T2).
+    // TCS → MSL kernel (MoltenVK/SPIRV-Cross pattern): thread = (invocation, patch).
+    bool isTessControl = false;
+    bool isTessEval = false;
+    // layout(vertices=N) out (TCS bắt buộc): số invocation/patch, stride cho
+    // buffer per-vertex. T4 dispatch grid=(N, numPatches,1), threadgroup=(N,1,1).
+    int tessVertices = 0;
+    // Buffer slot cho tess I/O (T4 bind theo bảng này; tess I/O không có GL binding).
+    struct TessIOSlot {
+        std::string name;   // tên var GLSL (gl_in.* ghi "gl_Position"/"gl_PointSize")
+        int slot = -1;      // [[buffer(slot)]]
+        bool isInput = false;
+        bool isPatch = false;
+        bool isGlIn = false; // từ khối gl_in (vị trí VS stage, T4 điền)
+        std::string mslType; // kiểu phần tử (cho T4 tính sizeof)
+        int count = 0;       // số phần tử mỗi patch (= tessVertices hoặc size patch array)
+    };
+    std::vector<TessIOSlot> tessSlots;
+    // Factor buffer (MTLTriangleTessellationFactorsHalf, 8B/patch): -1 = không dùng.
+    int tessFactorSlot = -1;
     // P6f backend: map block → MSL buffer slot. GL bind theo bindingPoint
     // (glBindBufferBase), converter gán slot theo thứ tự khai báo → backend
     // cần bảng này để bind storageBindPoints[binding] → buffer(slot).
@@ -103,7 +126,8 @@ struct GLSLConvertResult {
     std::vector<AtomicSlot> atomicSlots;
 };
 
-// Convert 1 shader stage. stage = 0x8B31 (VERTEX) hoặc 0x8B30 (FRAGMENT).
+// Convert 1 shader stage. stage = 0x8B31 (VERTEX), 0x8B30 (FRAGMENT),
+// 0x91B9 (COMPUTE), 0x8E88 (TESS_CONTROL). 0x8E87 (TESS_EVAL, T2) hiện fail rõ.
 GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage);
 
 } // namespace tglmt

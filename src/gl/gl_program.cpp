@@ -152,6 +152,14 @@ void glLinkProgram(GLuint p) {
             pr.hasGeometryStage = true;
     }
     if (pr.shaders.empty()) { pr.infoLog = "error: no shaders attached"; return; }
+    // P-Tess T1: TCS compile được (kernel MSL hợp lệ) nhưng link/draw cần T3/T4
+    // (pipeline tess descriptor + TCS compute pre-pass + drawPatches). Fail rõ ở
+    // link thay vì link OK nhưng vẽ sai/câm (trung thực, đúng nếp P6f).
+    // Draw path cũng đã từ chối hasTessStages + PATCHES (trace-only, xem AppleDrawGL).
+    if (pr.hasTessStages) {
+        pr.infoLog = "error: tessellation link chưa hỗ trợ (P-Tess T3: pipeline tess descriptor + drawPatches)";
+        return;
+    }
     if (!pr.computeMSL.empty()) {
         // P6f: compute program — biên dịch MTLLibrary + tạo compute pipeline ngay
         // tại link (lỗi → link fail thật, đúng cam kết advertise ⇔ implement).

@@ -156,7 +156,8 @@ struct HoistedGlobal {
 // giá trị từ glUniform, không từ source). Tên mảng macro đã thay xong ở
 // preprocessor nên [N] luôn là số ở đây.
 static bool SplitDeclarators(const std::string& rest,
-                             std::vector<std::pair<std::string, int>>& out) {
+                             std::vector<std::pair<std::string, int>>& out,
+                             bool allowUnsized = false) {
     std::vector<std::string> pieces;
     int pd = 0, bd = 0;
     size_t start = 0;
@@ -187,11 +188,16 @@ static bool SplitDeclarators(const std::string& rest,
             size_t rb = nm.find(']', lb);
             if (rb == std::string::npos) return false;
             std::string ns = Trim(nm.substr(lb + 1, rb - lb - 1));
-            if (ns.empty()) return false; // mảng unsized ngoài subset
-            for (char c : ns)
-                if (!isdigit((unsigned char)c)) return false;
-            arr = atoi(ns.c_str());
-            if (arr <= 0 || arr > 4096) return false;
+            if (ns.empty()) {
+                // mảng unsized: chỉ TCS per-vertex `in/out T x[]` (chuẩn hoá = N sau).
+                if (!allowUnsized) return false; // giữ nghiêm chỗ khác (hoisted/const/...)
+                arr = -1;
+            } else {
+                for (char c : ns)
+                    if (!isdigit((unsigned char)c)) return false;
+                arr = atoi(ns.c_str());
+                if (arr <= 0 || arr > 4096) return false;
+            }
             nm = Trim(nm.substr(0, lb));
         }
         if (nm.empty()) return false;
@@ -204,9 +210,11 @@ static bool SplitDeclarators(const std::string& rest,
 }
 // Parse "layout(location=N) in|out TYPE decls" / "in|out TYPE decls" /
 // "uniform TYPE decls" (nhiều declarator, vd `uniform vec2 A, B[4];`).
+// allowTessArrays: TCS per-vertex `in/out` dạng mảng (unsized `[]` → -1, sized giữ).
 // Trả false nếu không khớp.
 static bool ParseDecls(const std::string& stmt, bool isVertex,
-                       std::string& dir, std::vector<GLSLVar>& vars, bool& isUniform) {
+                       std::string& dir, std::vector<GLSLVar>& vars, bool& isUniform,
+                       bool allowTessArrays = false) {
     std::string s = Trim(stmt);
     if (!s.empty() && s.back() == ';') s.pop_back();
     s = Trim(s);
@@ -276,11 +284,12 @@ static bool ParseDecls(const std::string& stmt, bool isVertex,
         return false;
     }
     std::vector<std::pair<std::string, int>> ds;
-    if (!SplitDeclarators(restDecls, ds)) return false;
+    if (!SplitDeclarators(restDecls, ds, allowTessArrays)) return false;
     for (auto& [nm, arr] : ds) {
         // mảng in/out (vd `out vec4 c[2]`) ngoài subset MRT đơn giản → từ chối rõ
         // (MRT dùng nhiều `out` riêng, không phải array).
-        if (!isUniform && arr != 0) return false;
+        // P-Tess T1: TCS per-vertex BẮT BUỘC mảng (unsized `[]`→-1, sized giữ số).
+        if (!isUniform && arr != 0 && !allowTessArrays) return false;
         GLSLVar v;
         v.glslType = type;
         v.name = nm;
@@ -713,6 +722,322 @@ struct SampEntry {
 using SampTable = std::map<std::string, SampEntry>;
 // P6g: bảng image (tên → kind '2'/'A'/'C'/'3') cho rewrite imageLoad/Store/Size.
 using ImgTable = std::map<std::string, char>;
+// P-Tess T1: rewrite TCS body → MSL kernel body.
+// Thread = (invocation, patch): tglmt_tcs_tid=[[thread_position_in_grid]].x/y,
+// tglmt_patchID (= .y) do entry emit. N = layout(vertices).
+// Quy ước buffer (T4 bind theo): in/out per-vertex `tcs_in|out_<nm>[patchID*N+e]`,
+// patch `tcs_patch_<nm>[patchID]` (array patch: [patchID*M+e]), gl_in position/
+// PointSize `tcs_in_gl_Position|PointSize[...]`, TessLevel → tcs_factors[pid].edge|inside.
+struct TessVar {
+    std::string name;
+    bool isInput = false;  // ins (false = outs)
+    bool isPatch = false;
+    int arraySize = 0;     // per-vertex: N (đã chuẩn hoá); patch array: M; patch scalar: 0
+};
+static bool RewriteTessControl(std::string& io, int N, const std::vector<TessVar>& vars,
+                               bool hasGlIn, std::string& err) {
+    std::string& body = io;
+    auto isHead = [&](size_t p, const std::string& w) -> bool {
+        if (body.compare(p, w.size(), w) != 0) return false;
+        if (p > 0 && IsIdentChar(body[p - 1], false)) return false;
+        size_t e = p + w.size();
+        if (e < body.size() && IsIdentChar(body[e], false)) return false;
+        return true;
+    };
+    auto isHeadC = [&](size_t p, const char* w) -> bool {
+        return isHead(p, std::string(w));
+    };
+    // 1. gl_PatchVerticesIn → N literal.
+    {
+        std::string out;
+        size_t i = 0;
+        const std::string k = "gl_PatchVerticesIn";
+        while (i < body.size()) {
+            size_t p = body.find(k, i);
+            if (p == std::string::npos) { out += body.substr(i); break; }
+            if (!isHead(p, k)) { out += body.substr(i, p - i + 1); i = p + 1; continue; }
+            out += body.substr(i, p - i);
+            out += std::to_string(N);
+            i = p + k.size();
+        }
+        body = out;
+    }
+    // 2. gl_InvocationID → tid.x ; gl_PrimitiveID → tid.y (patch ID).
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            bool matched = false;
+            for (auto [g, m] : {std::pair<const char*, const char*>{"gl_InvocationID", "tglmt_tcs_tid.x"},
+                                {"gl_PrimitiveID", "tglmt_tcs_tid.y"}}) {
+                if (isHeadC(i, g)) { out += m; i += strlen(g); matched = true; break; }
+            }
+            if (!matched) out += body[i++];
+        }
+        body = out;
+    }
+    // 3. barrier() → threadgroup_barrier (đồng bộ invocation trong patch;
+    // T4 dispatch threadgroup=(N,1,1)).
+    {
+        std::string out;
+        size_t i = 0;
+        const std::string k = "barrier";
+        while (i < body.size()) {
+            size_t p = body.find(k, i);
+            if (p == std::string::npos) { out += body.substr(i); break; }
+            if (!isHead(p, k)) { out += body.substr(i, p - i + 1); i = p + 1; continue; }
+            size_t lp = p + k.size();
+            while (lp < body.size() && isspace((unsigned char)body[lp])) ++lp;
+            if (lp + 1 >= body.size() || body[lp] != '(' || body[lp + 1] != ')')
+                { err = "barrier() TCS không tham số"; return false; }
+            out += body.substr(i, p - i);
+            out += "threadgroup_barrier(mem_flags::mem_device);";
+            i = lp + 2;
+        }
+        body = out;
+    }
+    // 4. gl_TessLevelOuter[k]/Inner[k] → tcs_factors[pid].edge|inside[k].
+    // Chỉ số literal (pattern thực tế); Outer 0..2, Inner 0 (triangles).
+    // [3]/[1] là quad-only → fail (T1 triangles). Non-literal/bare → fail rõ.
+    auto rewriteTessLevel = [&](const std::string& nm, bool isOuter) -> bool {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            size_t p = body.find(nm, i);
+            if (p == std::string::npos) { out += body.substr(i); break; }
+            if (!isHead(p, nm)) { out += body.substr(i, p - i + 1); i = p + 1; continue; }
+            size_t q = p + nm.size();
+            while (q < body.size() && isspace((unsigned char)body[q])) ++q;
+            if (q >= body.size() || body[q] != '[') {
+                err = nm + " phải có chỉ số [...] literal";
+                return false;
+            }
+            size_t rb = body.find(']', q);
+            if (rb == std::string::npos) { err = nm + " thiếu ]"; return false; }
+            std::string idxs = Trim(body.substr(q + 1, rb - q - 1));
+            bool allDigit = !idxs.empty();
+            for (char c : idxs) if (!isdigit((unsigned char)c)) allDigit = false;
+            if (!allDigit) { err = nm + " chỉ số phải literal (T1): " + idxs; return false; }
+            int k = atoi(idxs.c_str());
+            out += body.substr(i, p - i);
+            if (isOuter) {
+                if (k < 0 || k > 2) { err = "gl_TessLevelOuter[3] là quad-only (T1 triangles)"; return false; }
+                out += "tcs_factors[tglmt_patchID].edgeTessellationFactor[" + idxs + "]";
+            } else {
+                if (k != 0) { err = "gl_TessLevelInner[1] là quad-only (T1 triangles)"; return false; }
+                out += "tcs_factors[tglmt_patchID].insideTessellationFactor";
+            }
+            i = rb + 1;
+        }
+        body = out;
+        return true;
+    };
+    if (!rewriteTessLevel("gl_TessLevelOuter", true)) return false;
+    if (!rewriteTessLevel("gl_TessLevelInner", false)) return false;
+    // 5. gl_in[e].gl_Position|gl_PointSize → tcs_in_gl_*[...]; .length() → N.
+    // Member khác (gl_ClipDistance...) → fail rõ.
+    {
+        std::string out;
+        size_t i = 0;
+        const std::string k = "gl_in";
+        while (i < body.size()) {
+            size_t p = body.find(k, i);
+            if (p == std::string::npos) { out += body.substr(i); break; }
+            if (!isHead(p, k)) { out += body.substr(i, p - i + 1); i = p + 1; continue; }
+            if (!hasGlIn) { err = "gl_in chưa khai báo (thiếu khối `in gl_PerVertex {...} gl_in[];`)"; return false; }
+            size_t q = p + k.size();
+            while (q < body.size() && isspace((unsigned char)body[q])) ++q;
+            if (q < body.size() && body[q] == '.') {
+                // gl_in.length() → N
+                size_t r = q + 1;
+                while (r < body.size() && isspace((unsigned char)body[r])) ++r;
+                std::string what;
+                size_t rr = r;
+                while (rr < body.size() && IsIdentChar(body[rr], rr == r)) ++rr;
+                what = body.substr(r, rr - r);
+                if (what == "length" && rr < body.size() && body[rr] == '(') {
+                    size_t rb = body.find(')', rr);
+                    if (rb == std::string::npos) { err = "gl_in.length() thiếu )"; return false; }
+                    out += body.substr(i, p - i);
+                    out += std::to_string(N);
+                    i = rb + 1;
+                    continue;
+                }
+                err = "gl_in dùng sai (cần gl_in[e].member hoặc gl_in.length())";
+                return false;
+            }
+            if (q >= body.size() || body[q] != '[') { err = "gl_in trần ngoài subset (cần gl_in[e].member)"; return false; }
+            int dd = 0;
+            size_t m = q;
+            for (; m < body.size(); ++m) {
+                if (body[m] == '[') ++dd;
+                else if (body[m] == ']') { if (--dd == 0) break; }
+            }
+            if (m >= body.size()) { err = "gl_in[...] thiếu ]"; return false; }
+            std::string idx = Trim(body.substr(q + 1, m - q - 1));
+            size_t d = m + 1;
+            while (d < body.size() && isspace((unsigned char)body[d])) ++d;
+            if (d >= body.size() || body[d] != '.') { err = "gl_in[...] phải đi với .member"; return false; }
+            size_t mn = d + 1;
+            while (mn < body.size() && isspace((unsigned char)body[mn])) ++mn;
+            size_t me = mn;
+            while (me < body.size() && IsIdentChar(body[me], me == mn)) ++me;
+            std::string mem = body.substr(mn, me - mn);
+            out += body.substr(i, p - i);
+            if (mem == "gl_Position")
+                out += "tcs_in_gl_Position[tglmt_patchID*" + std::to_string(N) + " + (" + idx + ")]";
+            else if (mem == "gl_PointSize")
+                out += "tcs_in_gl_PointSize[tglmt_patchID*" + std::to_string(N) + " + (" + idx + ")]";
+            else { err = "gl_in." + mem + " ngoài subset T1 (chỉ gl_Position/gl_PointSize)"; return false; }
+            i = me;
+        }
+        body = out;
+    }
+    // 6. Mảng per-vertex đã khai báo: `nm[e]` → tcs_in|out_nm[PID*N + (e)];
+    // `nm.length()` → N. Bare `nm` còn sót → fail (truyền mảng vào helper — T1).
+    // Same-name in+out (passthrough Iris): LHS gán (=,++,--,op=) → out-form,
+    // còn lại → in-form (đọc thường là input; ghi input là lỗi GLSL).
+    for (auto& v : vars) {
+        if (v.isPatch) continue;
+        std::string inForm = "tcs_in_" + v.name + "[tglmt_patchID*" + std::to_string(N) + " + (";
+        std::string outForm = "tcs_out_" + v.name + "[tglmt_patchID*" + std::to_string(N) + " + (";
+        bool hasIn = v.isInput, hasOut = !v.isInput;
+        // (vars chứa 2 entry cùng tên khi vừa in vừa out — tìm cả hai.)
+        for (auto& w : vars) {
+            if (w.name != v.name || w.isPatch) continue;
+            if (w.isInput) hasIn = true; else hasOut = true;
+        }
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            size_t p = body.find(v.name, i);
+            if (p == std::string::npos) { out += body.substr(i); break; }
+            if (!isHead(p, v.name)) { out += body.substr(i, p - i + 1); i = p + 1; continue; }
+            size_t q = p + v.name.size();
+            size_t qs = q;
+            while (qs < body.size() && isspace((unsigned char)body[qs])) ++qs;
+            // `.length()` → N (trước check `[`, vì `length` không phải index).
+            if (qs < body.size() && body[qs] == '.') {
+                size_t r = qs + 1;
+                while (r < body.size() && isspace((unsigned char)body[r])) ++r;
+                size_t rr = r;
+                while (rr < body.size() && IsIdentChar(body[rr], rr == r)) ++rr;
+                if (body.substr(r, rr - r) == "length" && rr < body.size() && body[rr] == '(') {
+                    size_t rb = body.find(')', rr);
+                    if (rb == std::string::npos) { err = v.name + ".length() thiếu )"; return false; }
+                    out += body.substr(i, p - i);
+                    out += std::to_string(N);
+                    i = rb + 1;
+                    continue;
+                }
+                // `.xyz` swizzle trên mảng?? invalid GLSL — để lọt sẽ lỗi MSL khó hiểu.
+                // Fail rõ luôn (an toàn hơn để RewriteIdents/MSL báo mơ hồ).
+                err = v.name + " dùng như scalar (mảng per-vertex phải index [e]): " + v.name;
+                return false;
+            }
+            if (qs >= body.size() || body[qs] != '[') {
+                err = "mảng per-vertex `" + v.name + "` dùng không index (truyền mảng vào helper?) ngoài subset T1";
+                return false;
+            }
+            int dd = 0;
+            size_t m = qs;
+            for (; m < body.size(); ++m) {
+                if (body[m] == '[') ++dd;
+                else if (body[m] == ']') { if (--dd == 0) break; }
+            }
+            if (m >= body.size()) { err = v.name + "[...] thiếu ]"; return false; }
+            std::string idx = Trim(body.substr(qs + 1, m - qs - 1));
+            // LHS gán? (sau `]`: `=` (không `==`), `++`, `--`, `op=`).
+            size_t a = m + 1;
+            while (a < body.size() && isspace((unsigned char)body[a])) ++a;
+            bool isWrite = false;
+            if (a < body.size()) {
+                if (body[a] == '=') isWrite = !(a + 1 < body.size() && body[a + 1] == '=');
+                else if ((body[a] == '+' || body[a] == '-') && a + 1 < body.size() && body[a + 1] == body[a]) isWrite = true;
+                else if ((body[a] == '+' || body[a] == '-' || body[a] == '*' || body[a] == '/' ||
+                          body[a] == '%' || body[a] == '&' || body[a] == '|' || body[a] == '^') &&
+                         a + 1 < body.size() && body[a + 1] == '=') isWrite = true;
+            }
+            out += body.substr(i, p - i);
+            if (isWrite && hasOut) out += outForm + idx + ")]";
+            else if (!isWrite && hasIn) out += inForm + idx + ")]";
+            else if (hasOut) out += outForm + idx + ")]";
+            else out += inForm + idx + ")]";
+            i = m + 1;
+        }
+        body = out;
+    }
+    // 7. Patch vars: scalar `pn` → tcs_patch_pn[pid] (`pn[` → fail);
+    // array `pa[e]` → tcs_patch_pa[pid*M + (e)] ; bare → fail ; `.length()` → M.
+    for (auto& v : vars) {
+        if (!v.isPatch) continue;
+        if (v.arraySize == 0) {
+            std::string out;
+            size_t i = 0;
+            while (i < body.size()) {
+                size_t p = body.find(v.name, i);
+                if (p == std::string::npos) { out += body.substr(i); break; }
+                if (!isHead(p, v.name)) { out += body.substr(i, p - i + 1); i = p + 1; continue; }
+                size_t q = p + v.name.size();
+                size_t qs = q;
+                while (qs < body.size() && isspace((unsigned char)body[qs])) ++qs;
+                if (qs < body.size() && body[qs] == '[') {
+                    err = "patch scalar `" + v.name + "` không index được";
+                    return false;
+                }
+                out += body.substr(i, p - i);
+                out += "tcs_patch_" + v.name + "[tglmt_patchID]";
+                i = q;
+            }
+            body = out;
+        } else {
+            std::string form = "tcs_patch_" + v.name + "[tglmt_patchID*" + std::to_string(v.arraySize) + " + (";
+            std::string out;
+            size_t i = 0;
+            while (i < body.size()) {
+                size_t p = body.find(v.name, i);
+                if (p == std::string::npos) { out += body.substr(i); break; }
+                if (!isHead(p, v.name)) { out += body.substr(i, p - i + 1); i = p + 1; continue; }
+                size_t q = p + v.name.size();
+                size_t qs = q;
+                while (qs < body.size() && isspace((unsigned char)body[qs])) ++qs;
+                if (qs < body.size() && body[qs] == '.') {
+                    size_t r = qs + 1;
+                    while (r < body.size() && isspace((unsigned char)body[r])) ++r;
+                    size_t rr = r;
+                    while (rr < body.size() && IsIdentChar(body[rr], rr == r)) ++rr;
+                    if (body.substr(r, rr - r) == "length" && rr < body.size() && body[rr] == '(') {
+                        size_t rb = body.find(')', rr);
+                        if (rb == std::string::npos) { err = v.name + ".length() thiếu )"; return false; }
+                        out += body.substr(i, p - i);
+                        out += std::to_string(v.arraySize);
+                        i = rb + 1;
+                        continue;
+                    }
+                    err = "patch array `" + v.name + "` dùng như scalar";
+                    return false;
+                }
+                if (qs >= body.size() || body[qs] != '[') {
+                    err = "patch array `" + v.name + "` dùng không index ngoài subset T1";
+                    return false;
+                }
+                int dd = 0;
+                size_t m = qs;
+                for (; m < body.size(); ++m) {
+                    if (body[m] == '[') ++dd;
+                    else if (body[m] == ']') { if (--dd == 0) break; }
+                }
+                if (m >= body.size()) { err = v.name + "[...] thiếu ]"; return false; }
+                std::string idx = Trim(body.substr(qs + 1, m - qs - 1));
+                out += body.substr(i, p - i);
+                out += form + idx + ")]";
+                i = m + 1;
+            }
+            body = out;
+        }
+    }
+    return true;
+}
 // P9: rewrite atomicCounterIncrement/Decrement/Get → MSL atomics explicit.
 // Increment(ac) → fetch_add(ac,1u,relaxed); Decrement → fetch_sub; Get → load.
 static bool RewriteAtomicCalls(std::string& io, const std::vector<std::string>& names, std::string& err) {
@@ -1898,8 +2223,13 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     GLSLConvertResult R;
     R.isVertex = (stage == 0x8B31);
     R.isCompute = (stage == 0x91B9);
-    R.entryPoint = R.isVertex ? "TGLMT_vs" : (R.isCompute ? "TGLMT_cs" : "TGLMT_fs");
+    R.isTessControl = (stage == 0x8E88);
+    R.isTessEval = (stage == 0x8E87);
+    R.entryPoint = R.isVertex ? "TGLMT_vs" : (R.isCompute ? "TGLMT_cs" : (R.isTessControl ? "TGLMT_tcs" : "TGLMT_fs"));
     auto fail = [&](const std::string& m) { R.ok = false; R.log = m; return R; };
+    // P-Tess T2 chưa làm: TES fail rõ ngay đầu (gate gl_shader cũng chặn).
+    if (R.isTessEval)
+        return fail("tessellation evaluation shader chưa hỗ trợ (P-Tess T2)");
 
     std::string src = StripComments(glsl);
     // Tiền xử lý: #version, #define/#undef (object-like, kiểu Blaze3D prepend),
@@ -2048,6 +2378,28 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     return fail("local_size phải >= 1: " + t);
                 continue; // bỏ dòng layout local_size
             }
+            // P-Tess T1: `layout(vertices = N) out;` → bắt patch vertices, bỏ dòng
+            // (MSL không có khai báo tương đương; T4 dispatch grid=(N, numPatches,1)).
+            // Chỉ khớp đúng dạng patch-vertices (sau ')' phải là `out`), tránh
+            // nhầm layout khác chứa chữ "vertices" (vd gl_PatchVerticesIn trong body
+            // không bao giờ ở đầu dòng top-level dạng này — vẫn kiểm chặt).
+            if (R.isTessControl && t.rfind("layout", 0) == 0 && t.find("vertices") != std::string::npos) {
+                size_t rp = t.find(')');
+                std::string after = (rp == std::string::npos) ? "" : Trim(t.substr(rp + 1));
+                // bỏ ';' cuối để so sánh (`out;` / `out`)
+                if (!after.empty() && after.back() == ';') { after.pop_back(); after = Trim(after); }
+                if (after == "out") {
+                    size_t vp = t.find("vertices");
+                    size_t eq = t.find('=', vp);
+                    if (eq == std::string::npos) return fail("layout(vertices) thiếu =: " + t);
+                    int n = atoi(t.c_str() + eq + 1);
+                    if (n < 1 || n > 32) return fail("layout(vertices) phải 1..32 (GL MAX_PATCH_VERTICES): " + t);
+                    if (R.tessVertices > 0) return fail("layout(vertices) trùng: " + t);
+                    R.tessVertices = n;
+                    continue; // bỏ dòng layout vertices
+                }
+                // layout lạ chứa "vertices" (không phải patch decl) → để flow chung fail rõ.
+            }
             kept += line + "\n";
         }
         if (!activeStack.empty()) return fail("#ifdef/#if không đóng");
@@ -2098,6 +2450,9 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     std::vector<SubVar> subVars;
     std::vector<GLSLBlock> blocks;
     std::vector<HoistedGlobal> hoisted; // global mutable → main-local + thread-ref
+    // P-Tess T1: khối gl_in `in gl_PerVertex {...} gl_in[];` đã khai báo chưa
+    // (body dùng gl_in mà thiếu block = lỗi GLSL → fail rõ ở rewrite).
+    bool hasGlInBlock = false;
     std::string rest; // phần còn lại (hàm, main, const global)
     {
         auto stmts = SplitTopLevel(src);
@@ -2316,11 +2671,20 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             int depth = 0;
             bool inStr = false;
             // UBO `} name;`: block layout/uniform giữ luôn `name;` cùng segment.
+            // P-Tess T1: khối gl_in `in gl_PerVertex {...} gl_in[];` cũng vậy
+            // (không tách `gl_in[];` ra — parser cần cả khối để ghi nhận khai báo).
             auto segStartsUbo = [&](size_t s) {
                 size_t p = s;
                 while (p < t.size() && isspace((unsigned char)t[p])) ++p;
-                return (t.compare(p, 6, "layout") == 0 || t.compare(p, 7, "uniform") == 0 ||
-                        t.compare(p, 6, "buffer") == 0);
+                if (t.compare(p, 6, "layout") == 0 || t.compare(p, 7, "uniform") == 0 ||
+                    t.compare(p, 6, "buffer") == 0)
+                    return true;
+                // gl_in block: bắt đầu `in ` + chứa gl_PerVertex + gl_in.
+                // Hẹp (3 điều kiện) để không chạm struct/function thường.
+                if (t.compare(p, 3, "in ") == 0 && t.find("gl_PerVertex") != std::string::npos &&
+                    t.find("gl_in") != std::string::npos)
+                    return true;
+                return false;
             };
             auto flushTo = [&](size_t end) {
                 std::string s = Trim(t.substr(start, end - start));
@@ -2340,9 +2704,16 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                         if (j < t.size() && t[j] == ';') {
                             end = j + 1; // `};` đi cùng block
                         } else if (segStartsUbo(start) && j < t.size() && IsIdentChar(t[j], true)) {
-                            // `} lightmapInfo;`: instance name thuộc về UBO
+                            // `} lightmapInfo;`: instance name thuộc về UBO.
+                            // P-Tess T1: `} gl_in[N];` cũng vậy (sized gl_in).
                             size_t k = j + 1;
                             while (k < t.size() && IsIdentChar(t[k], false)) ++k;
+                            // nuốt `[N]` nếu có (gl_in sized; UBO array-instance vẫn
+                            // fail ở tryParseUBO như cũ — chỉ đổi message).
+                            if (k < t.size() && t[k] == '[') {
+                                size_t rb = t.find(']', k);
+                                if (rb != std::string::npos) k = rb + 1;
+                            }
                             size_t m = k;
                             while (m < t.size() && isspace((unsigned char)t[m])) ++m;
                             if (m < t.size() && t[m] == ';') end = m + 1;
@@ -2395,6 +2766,59 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     R.atomicCounters.push_back(av);
                     continue;
                 }
+            }
+            // P-Tess: `patch in|out ...` (per-patch) — strip prefix, ParseDecls bên
+            // dưới xử lý như decl thường, đánh dấu isPatch để validate + rewrite
+            // buffer theo patch (index = patchID, không stride N).
+            // TCS: chỉ `patch out` hợp lệ (`patch in` ở TCS là lỗi GL — patch do
+            // TCS tạo ra). TES (T2): ngược lại, chỉ `patch in`.
+            // Khối gl_in `in gl_PerVertex {...} gl_in[];` xử lý riêng ngay dưới.
+            bool isPatchDecl = false;
+            if (R.isTessControl || R.isTessEval) {
+                std::string tp = t, layoutPart;
+                if (tp.rfind("layout", 0) == 0) {
+                    size_t rp = tp.find(')');
+                    if (rp != std::string::npos) {
+                        layoutPart = tp.substr(0, rp + 1);
+                        tp = Trim(tp.substr(rp + 1));
+                    }
+                }
+                if (tp.rfind("patch ", 0) == 0) {
+                    std::string afterPatch = Trim(tp.substr(6));
+                    bool isOut = (afterPatch.rfind("out", 0) == 0 &&
+                                  (afterPatch.size() == 3 || isspace((unsigned char)afterPatch[3])));
+                    bool isIn = (afterPatch.rfind("in", 0) == 0 &&
+                                 (afterPatch.size() == 2 || isspace((unsigned char)afterPatch[2])));
+                    if (!isOut && !isIn) return fail("patch phải đi với in/out: " + t);
+                    if (R.isTessControl && !isOut)
+                        return fail("TCS `patch in` không hợp lệ (patch do TCS tạo ra): " + t);
+                    if (R.isTessEval && isOut)
+                        return fail("TES `patch out` không hợp lệ: " + t);
+                    isPatchDecl = true;
+                    t = layoutPart.empty() ? afterPatch : layoutPart + " " + afterPatch;
+                }
+            }
+            // P-Tess T1: khối gl_in `in gl_PerVertex { ... } gl_in[];` — KHÔNG phải
+            // hàm (dù có `{`): ghi nhận khai báo, không emit vào rest (Iris dùng
+            // gl_in[].gl_Position cho tess level theo khoảng cách — pattern chính).
+            // Instance phải tên `gl_in` (đúng spec); size `[]`/sized đều nhận.
+            // Segment phải BẮT ĐẦU bằng `in ` (main/helper chứa gl_in thì không).
+            if (R.isTessControl && t.rfind("in ", 0) == 0 &&
+                t.find("gl_PerVertex") != std::string::npos &&
+                t.find("gl_in") != std::string::npos && t.find('{') != std::string::npos) {
+                std::string s = Trim(t);
+                // dạng: `in gl_PerVertex { decls } gl_in [N];`
+                size_t close = s.rfind('}');
+                if (s.rfind("in ", 0) != 0 || close == std::string::npos)
+                    return fail("khối gl_in sai cú pháp: " + t);
+                std::string tail = Trim(s.substr(close + 1));
+                if (!tail.empty() && tail.back() == ';') { tail.pop_back(); tail = Trim(tail); }
+                // tail = `gl_in` hoặc `gl_in[N]`
+                size_t lb = tail.find('[');
+                std::string inst = (lb == std::string::npos) ? tail : Trim(tail.substr(0, lb));
+                if (inst != "gl_in") return fail("khối gl_in phải đặt tên instance `gl_in`: " + t);
+                hasGlInBlock = true;
+                continue;
             }
             // P6e subroutine: 3 dạng (type decl / impl / uniform).
             // Impl `subroutine(T) ret f(...) {...}` → strip prefix, hàm thường + ghi nhận.
@@ -2506,9 +2930,38 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             std::string dir;
             std::vector<GLSLVar> vs;
             bool isU = false;
-            if (ParseDecls(t, R.isVertex, dir, vs, isU)) {
+            bool isTessIO = (R.isTessControl || R.isTessEval) && !isPatchDecl;
+            if (ParseDecls(t, R.isVertex, dir, vs, isU, isTessIO || isPatchDecl)) {
                 for (auto& v : vs) {
                     bool okT = false;
+                    // P-Tess: mảng per-vertex/patch. Chuẩn hoá + validate ở đây
+                    // (ParseDecls đã cho qua nhờ flag; R.tessVertices có từ preprocessor).
+                    //  - patch scalar: giữ nguyên (index = patchID).
+                    //  - patch array: phải ghi kích thước (unsized không rõ size buffer).
+                    //  - TCS per-vertex (non-patch in/out): BẮT BUỘC mảng; unsized
+                    //    `[]` (arr=-1) → = tessVertices; sized phải == tessVertices
+                    //    (stride kernel dùng N — lệch là OOB; fail rõ thay vì UB câm).
+                    //    Scalar per-vertex ở TCS là lỗi GLSL → fail rõ.
+                    //  - TES (T2): per-vertex in/out là SCALAR (nội suy xong); array → fail.
+                    if ((R.isTessControl || R.isTessEval) && !isU) {
+                        v.isPatch = isPatchDecl;
+                        if (R.isTessControl && R.tessVertices < 1)
+                            return fail("thiếu layout(vertices=N) out (TCS bắt buộc)");
+                        if (isPatchDecl) {
+                            if (v.arraySize == -1)
+                                return fail("patch array phải ghi kích thước (unsized không rõ size buffer): " + v.name);
+                        } else if (R.isTessControl) {
+                            if (v.arraySize == 0)
+                                return fail("TCS per-vertex in/out phải là mảng []: " + v.name);
+                            if (v.arraySize == -1) v.arraySize = R.tessVertices;
+                            else if (v.arraySize != R.tessVertices)
+                                return fail("mảng per-vertex phải khớp layout(vertices=" +
+                                            std::to_string(R.tessVertices) + "): " + v.name);
+                        } else { // TES: per-vertex in/out scalar
+                            if (v.arraySize != 0)
+                                return fail("TES per-vertex in/out là scalar (đã nội suy), không phải mảng: " + v.name);
+                        }
+                    }
                     if (isU && (v.glslType == "samplerBuffer" || v.glslType == "isamplerBuffer" ||
                                 v.glslType == "usamplerBuffer")) {
                         // Buffer texture (CloudFaces mây): emulate bằng texture2d<int>
@@ -2620,6 +3073,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         } // for segs
         } // for queue
     } // block quét top-level
+    // P-Tess T1: TCS bắt buộc có layout(vertices=N) (kiểm tra sau scan để bắt cả
+    // shader không có decl in/out nào — trong scan chỉ check khi gặp decl).
+    if (R.isTessControl && R.tessVertices < 1)
+        return fail("thiếu layout(vertices=N) out (TCS bắt buộc)");
     // Kiểm tra ma trận làm attribute (Metal attribute tối đa float4)
     // Vanilla Blaze3D dùng `in vec3 Position;` KHÔNG layout → cho phép, linker gán
     // qua glBindAttribLocation/GetAttribLocation (đúng GL, trước đây fail oan).
@@ -2642,7 +3099,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // Fragment: 1..8 out vec4 (MRT cho vanilla deferred/Iris; location = attachment).
     // Legacy gl_FragColor / gl_FragData[0] (end_portal compat): map về out duy nhất.
     bool legacyFrag = false;
-    if (!R.isVertex && !R.isCompute) { // P6f: compute không có out
+    if (!R.isVertex && !R.isCompute && !R.isTessControl) { // P6f/T1: compute/tess không có out kiểu fragment
         if (outs.empty()) {
             auto hasWord = [&](const char* w) {
                 size_t n = strlen(w), p = 0;
@@ -3167,6 +3624,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // P6f compute thread-position params (chỉ emit param khi body dùng — probe thật).
     bool useGlobalID = false, useLocalID = false, useWorkGroupID = false;
     bool useNumWG = false, useLocalIndex = false, useWorkGroupSize = false;
+    // P-Tess T1: TCS dùng factor buffer / gl_in (emit param/buffer theo mức dùng).
+    // tglmt_tcs_tid + tglmt_patchID luôn emit (rẻ, tránh flag bug).
+    bool useTcsFactors = false, useTcsGlIn = false;
+    bool useTcsTid = true;
     if (R.isVertex) {
         for (auto& a : ins) mpVary.emplace_back(a.name, "_in." + a.name);
         for (auto& v : outs) mpVary.emplace_back(v.name, "_out." + v.name);
@@ -3216,6 +3677,59 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (body.find("gl_WorkGroupSize") != std::string::npos) {
             useWorkGroupSize = true;
             mpVary.emplace_back("gl_WorkGroupSize", "tglmt_workGroupSize");
+        }
+    } else if (R.isTessControl) {
+        // P-Tess T1: TCS builtins. gl_InvocationID/gl_PrimitiveID/TessLevel/gl_in/
+        // mảng per-vertex/patch do RewriteTessControl xử lý (cần match ngoặc) —
+        // ở đây chỉ detect flags dùng cho emission + fail builtins sai-stage.
+        // (mpVary KHÔNG map tên tess: tránh double-rewrite với custom rewrite.)
+        auto hasWord = [&](const char* w) {
+            size_t n = strlen(w), p = 0;
+            while ((p = body.find(w, p)) != std::string::npos) {
+                bool l = p > 0 && IsIdentChar(body[p - 1], false);
+                size_t e = p + n;
+                bool r = e < body.size() && IsIdentChar(body[e], false);
+                if (!l && !r) return true;
+                p = e;
+            }
+            return false;
+        };
+        if (hasWord("gl_TessLevelOuter") || hasWord("gl_TessLevelInner")) useTcsFactors = true;
+        if (hasWord("gl_in")) useTcsGlIn = true;
+        // (useTcsTid luôn true — tid param + patchID local emit mọi kernel TCS.)
+        // Builtin sai stage trong TCS → fail rõ ngay convert (thay vì MSL mơ hồ ở link).
+        // gl_Position/gl_PointSize: TCS không ghi (dùng out var). gl_TessCoord: TES-only.
+        // gl_PrimitiveID HỢP LỆ (= patch ID) nên không có trong list. gl_out không tồn tại.
+        // Lưu ý: gl_in[i].gl_Position là member access (rewrite riêng) — check dưới
+        // bỏ qua occurrence đứng sau '.' (xem RewriteTessControl; ở đây check thô,
+        // member access sẽ được rewrite trước khi... — KHÔNG: check này chạy TRƯỚC
+        // rewrite, nên `gl_in[0].gl_Position` sẽ match "gl_Position"! Phải loại trừ
+        // occurrence có '.' trước nó (bỏ spaces). Xử lý trong loop fail bên dưới.
+        const char* wrongStage[] = {
+            "gl_Position", "gl_PointSize", "gl_TessCoord", "gl_FragCoord",
+            "gl_FrontFacing", "gl_PointCoord", "gl_VertexID", "gl_InstanceID",
+            "gl_DrawID", "gl_BaseInstance", "gl_BaseVertex",
+            "gl_GlobalInvocationID", "gl_LocalInvocationID", "gl_WorkGroupID",
+            "gl_NumWorkGroups", "gl_LocalInvocationIndex", "gl_WorkGroupSize",
+            "gl_HelperInvocation", "gl_SampleID", "gl_SamplePosition",
+            "gl_SampleMask", "gl_FragDepth", "gl_StencilRef", "gl_out", nullptr
+        };
+        for (const char** ww = wrongStage; *ww; ++ww) {
+            size_t n = strlen(*ww), p = 0;
+            while ((p = body.find(*ww, p)) != std::string::npos) {
+                bool l = p > 0 && IsIdentChar(body[p - 1], false);
+                size_t e = p + n;
+                bool r = e < body.size() && IsIdentChar(body[e], false);
+                if (!l && !r) {
+                    // member access `x.gl_XXX` (vd gl_in[i].gl_Position): bỏ qua ở đây,
+                    // RewriteTessControl validate member sau (chỉ Position/PointSize).
+                    size_t q = p;
+                    while (q > 0 && isspace((unsigned char)body[q - 1])) --q;
+                    if (q > 0 && body[q - 1] == '.') { p = e; continue; }
+                    return fail(std::string(*ww) + " không dùng được trong TCS");
+                }
+                p = e;
+            }
         }
     } else {
         for (auto& v : ins) mpVary.emplace_back(v.name, "_in." + v.name);
@@ -3274,11 +3788,11 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     std::vector<SSBOFlat> ssboFlat;
     std::vector<int> ssboSlot(blocks.size(), -1); // storage-struct slot; -1 = UBO/flat
     int uboCnt = 0, ssboCnt = 0;
-    int ssboBase = R.isCompute ? 0 : -1; // -1 = graphics → SSBO chưa hỗ trợ
+    int ssboBase = (R.isCompute || R.isTessControl) ? 0 : -1; // -1 = graphics → SSBO chưa hỗ trợ
     for (size_t bi = 0; bi < blocks.size(); ++bi) {
         auto& b = blocks[bi];
         if (b.isStorage) {
-            if (ssboBase < 0) return fail("SSBO trong vertex/fragment chưa hỗ trợ (chỉ compute)");
+            if (ssboBase < 0) return fail("SSBO trong vertex/fragment chưa hỗ trợ (chỉ compute/tess)");
             bool hasUnsized = false;
             for (auto& m : b.members) if (m.arraySize == -1) hasUnsized = true;
             if (hasUnsized) {
@@ -3466,6 +3980,15 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             for (auto& ac : R.atomicCounters) anames.push_back(ac.name);
             if (!RewriteAtomicCalls(body, anames, err)) return fail(err);
         }
+        // P-Tess T1: rewrite TCS body (gl_InvocationID/TessLevel/gl_in/mảng).
+        // Chạy trước RewriteIdents; mpVary TCS đã detect flags + fail sai-stage.
+        if (R.isTessControl) {
+            std::vector<TessVar> tvars;
+            for (auto& v : ins) tvars.push_back({v.name, true, v.isPatch, v.arraySize});
+            for (auto& v : outs) tvars.push_back({v.name, false, v.isPatch, v.arraySize});
+            if (!RewriteTessControl(body, R.tessVertices, tvars, hasGlInBlock, err))
+                return fail(err);
+        }
         // Strip main khỏi rest → helpersOnly, rồi check image trong helper.
         std::string helpersOnly = rest;
         {
@@ -3499,6 +4022,34 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 if (!l && !r) return fail("image trong helper function ngoài subset");
                 p = e;
             }
+        }
+        // P-Tess T1: tess builtin/var trong helper → fail rõ (helper không nhận
+        // tess params — thread phức tạp; inline vào main hoặc truyền phần tử).
+        // Chỉ check builtin (không false-positive param trùng tên); var khai báo
+        // check kèm (param trùng tên hiếm — message hướng dẫn rename/inline).
+        if (R.isTessControl) {
+            auto hasWordH = [&](const std::string& w) {
+                size_t p = 0;
+                while ((p = helpersOnly.find(w, p)) != std::string::npos) {
+                    bool l = p > 0 && IsIdentChar(helpersOnly[p - 1], false);
+                    size_t e = p + w.size();
+                    bool r = e < helpersOnly.size() && IsIdentChar(helpersOnly[e], false);
+                    if (!l && !r) return true;
+                    p = e;
+                }
+                return false;
+            };
+            for (const char* b : {"gl_InvocationID", "gl_PrimitiveID", "gl_PatchVerticesIn",
+                                  "gl_TessLevelOuter", "gl_TessLevelInner", "gl_in", "barrier"}) {
+                if (hasWordH(b))
+                    return fail(std::string("tess builtin `") + b + "` trong helper ngoài subset T1 (inline vào main)");
+            }
+            for (auto& v : ins)
+                if (hasWordH(v.name))
+                    return fail("mảng tess `" + v.name + "` trong helper ngoài subset T1 (truyền phần tử vd f(" + v.name + "[i]))");
+            for (auto& v : outs)
+                if (hasWordH(v.name))
+                    return fail("mảng tess `" + v.name + "` trong helper ngoài subset T1 (truyền phần tử vd f(" + v.name + "[i]))");
         }
     }
     // gl_FragData[0] → tglmt_fragColor (trước RewriteIdents để không còn `[0]` lẻ).
@@ -3682,7 +4233,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         std::string out;
         std::string retV = kZConv + " return _out;";
         std::string retF = isMRT ? "return _out;" : "return tglmt_fragColor;";
-        std::string ret = R.isVertex ? retV : (R.isCompute ? "return;" : retF);
+        std::string ret = R.isVertex ? retV : ((R.isCompute || R.isTessControl) ? "return;" : retF);
         size_t i = 0;
         while (i < body.size()) {
             if (body.compare(i, 6, "return") == 0 &&
@@ -3834,6 +4385,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         msl_out << "};\n";
     } else if (R.isCompute) {
         // P6f: compute không có in/varying struct (gl_*ID là kernel params).
+    } else if (R.isTessControl) {
+        // P-Tess T1: TCS không có varying struct (in/out/patch là buffer params).
     } else {
         msl_out << "struct TGLMT_FIn {\n";
         for (auto& v : ins) msl_out << "  " << v.mslType << " " << v.name << " [[user(locn" << v.location << ")]];\n";
@@ -3913,11 +4466,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             blockParams += ",\n    device " + f.type + "* " + f.param +
                            " [[buffer(" + std::to_string(f.slot) + ")]]";
         // P9 atomic counters: device atomic_uint* tại buffer slot.
-        // Compute: sau SSBOs (0+). Graphics (không SSBO): slot 24+ (tránh vertex 0-15,
-        // uniforms 16, UBO 17+; fail nếu vượt 30).
+        // Compute/TCS-kernel: sau SSBOs (0+). Graphics (không SSBO): slot 24+ (tránh
+        // vertex 0-15, uniforms 16, UBO 17+; fail nếu vượt 30).
         {
             int baseSlot = 0;
-            if (!R.isCompute) {
+            bool kernelLike = R.isCompute || R.isTessControl;
+            if (!kernelLike) {
                 baseSlot = 24;
             } else {
                 int ssboCnt = (int)ssboFlat.size();
@@ -3927,8 +4481,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             }
             for (size_t k = 0; k < R.atomicCounters.size(); ++k) {
                 int slot = baseSlot + (int)k;
-                if (slot > 30 || (!R.isCompute && slot < 24)) return fail("atomic counter slot ngoài phạm vi");
-                if (R.isCompute && slot > 15) return fail("atomic counter vượt slot compute (0..15)");
+                if (slot > 30 || (!kernelLike && slot < 24)) return fail("atomic counter slot ngoài phạm vi");
+                if (kernelLike && slot > 15) return fail("atomic counter vượt slot kernel (0..15)");
                 blockParams += ",\n    device atomic_uint* " + R.atomicCounters[k].name +
                                " [[buffer(" + std::to_string(slot) + ")]]";
                 R.atomicSlots.push_back({R.atomicCounters[k].name,
@@ -4052,6 +4606,71 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             msl_out << "  const uint3 tglmt_workGroupSize = uint3(" << R.localSize[0] << "u, "
                     << R.localSize[1] << "u, " << R.localSize[2] << "u);\n";
         msl_out << body << "\n}\n";
+    } else if (R.isTessControl) {
+        // P-Tess T1: TCS → kernel (MoltenVK/SPIRV-Cross pattern: TCS là compute,
+        // TES là post-tess vertex, tessellator cố định của Metal ở giữa).
+        // Thread = (invocation, patch): T4 dispatch grid=(N, numPatches, 1),
+        // threadgroup=(N,1,1) để barrier() đồng bộ đúng N invocation/patch.
+        msl_out << "kernel void TGLMT_tcs(constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
+        msl_out << blockParams;
+        // Buffer slot tess I/O: sau UBO cuối (17+numUBO), bound-check ≤30.
+        // SSBO/atomic (0+, compute-like) + sampler/image (texture space) không đụng.
+        int tbase = 17;
+        for (auto& b : blocks) if (!b.isStorage) ++tbase;
+        auto takeSlot = [&]() -> int { return tbase++; };
+        // Per-vertex inputs → constant T* (T4 điền từ VS stage / control points).
+        for (auto& v : ins) {
+            if (v.isPatch) continue; // TCS patch-in đã fail ở parse
+            int s = takeSlot();
+            if (s > 30) return fail("TCS hết buffer slot (max 30)");
+            msl_out << ",\n    constant " << v.mslType << "* tcs_in_" << v.name
+                    << " [[buffer(" << s << ")]]";
+            R.tessSlots.push_back({v.name, s, true, false, false, v.mslType, R.tessVertices});
+        }
+        // gl_in (VS gl_Position/PointSize) — buffer riêng, T4 điền từ VS outputs.
+        // Emit theo tham chiếu post-rewrite (tránh param thừa).
+        if (useTcsGlIn && body.find("tcs_in_gl_Position") != std::string::npos) {
+            int s = takeSlot();
+            if (s > 30) return fail("TCS hết buffer slot (max 30)");
+            msl_out << ",\n    constant float4* tcs_in_gl_Position [[buffer(" << s << ")]]";
+            R.tessSlots.push_back({"gl_Position", s, true, false, true, "float4", R.tessVertices});
+        }
+        if (useTcsGlIn && body.find("tcs_in_gl_PointSize") != std::string::npos) {
+            int s = takeSlot();
+            if (s > 30) return fail("TCS hết buffer slot (max 30)");
+            msl_out << ",\n    constant float* tcs_in_gl_PointSize [[buffer(" << s << ")]]";
+            R.tessSlots.push_back({"gl_PointSize", s, true, false, true, "float", R.tessVertices});
+        }
+        // Per-vertex outputs → device T* (T4 + TES đọc qua patch buffer).
+        for (auto& v : outs) {
+            if (v.isPatch) continue;
+            int s = takeSlot();
+            if (s > 30) return fail("TCS hết buffer slot (max 30)");
+            msl_out << ",\n    device " << v.mslType << "* tcs_out_" << v.name
+                    << " [[buffer(" << s << ")]]";
+            R.tessSlots.push_back({v.name, s, false, false, false, v.mslType, R.tessVertices});
+        }
+        // Patch outputs → device T* (scalar: 1/patch; array[M]: M/patch).
+        for (auto& v : outs) {
+            if (!v.isPatch) continue;
+            int cnt = v.arraySize > 0 ? v.arraySize : 1;
+            int s = takeSlot();
+            if (s > 30) return fail("TCS hết buffer slot (max 30)");
+            msl_out << ",\n    device " << v.mslType << "* tcs_patch_" << v.name
+                    << " [[buffer(" << s << ")]]";
+            R.tessSlots.push_back({v.name, s, false, true, false, v.mslType, cnt});
+        }
+        // Factor buffer triangles (Half — KHỚP backend makeTessPipeline Half format
+        // + test_tess_patch_apple 8B/patch). T4 bind + drawPatches đọc.
+        if (useTcsFactors) {
+            int s = takeSlot();
+            if (s > 30) return fail("TCS hết buffer slot (max 30)");
+            msl_out << ",\n    device MTLTriangleTessellationFactorsHalf* tcs_factors [[buffer(" << s << ")]]";
+            R.tessFactorSlot = s;
+        }
+        // tid param + patchID local: luôn emit (useTcsTid hằng true — rẻ, tránh flag bug).
+        if (useTcsTid) msl_out << ",\n    uint3 tglmt_tcs_tid [[thread_position_in_grid]]";
+        msl_out << texParams << ") {\n  uint tglmt_patchID = tglmt_tcs_tid.y;\n" << body << "\n}\n";
     } else if (isMRT || useFragDepth || useSampleMask) {
         // Fragment trả STRUCT khi: MRT, hoặc có output builtin depth/sample_mask.
         // (gl_FragDepth → _out.depth; gl_SampleMask[0] → _out.smask.)
