@@ -50,6 +50,9 @@ struct GLSLBlock {
     std::vector<GLSLVar> members;
     size_t bufferSize = 0;
     int binding = -1; // layout(binding=N): -1 = không khai báo (mặc định 0)
+    // P6f SSBO: block `buffer B { ... };` → device (read-write), khác UBO (constant).
+    // member có mảng không kích thước (float v[]) → arraySize = -1 (MSL: device T*).
+    bool isStorage = false;
 };
 // Location tạm cho varying/attribute thiếu layout: LinkProgram viết lại số thật.
 constexpr int kTempLocBase = 900;

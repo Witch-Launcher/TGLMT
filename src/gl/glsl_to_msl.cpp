@@ -1940,7 +1940,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         };
         auto tryParseUBO = [&](const std::string& t, GLSLBlock& out) -> bool {
             std::string s = Trim(t);
-            if (s.rfind("layout", 0) != 0 && s.rfind("uniform", 0) != 0) return false;
+            if (s.rfind("layout", 0) != 0 && s.rfind("uniform", 0) != 0 &&
+                s.rfind("buffer", 0) != 0) return false;
             // layout(binding=N[, ...]) trước `uniform`: N là binding point thật
             // (GL: glUniformBlockBinding mặc định = layout binding, KHÔNG phải 0).
             // Bỏ qua = Globals đọc nhầm point 0 (đụng SamplerInfo 16B → zero fallback).
@@ -1957,14 +1958,22 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     }
                 }
             }
+            // P6f SSBO: `buffer B { ... };` (read-write) vs UBO `uniform B { ... };`.
             size_t ub = s.find("uniform");
-            if (ub == std::string::npos) return false;
-            size_t brace = s.find('{', ub);
+            size_t kb = (ub == std::string::npos) ? s.find("buffer") : std::string::npos;
+            bool storage = false;
+            size_t kw = ub, kwLen = 7;
+            if (ub == std::string::npos && kb != std::string::npos) {
+                storage = true; kw = kb; kwLen = 6;
+            }
+            if (kw == std::string::npos) return false;
+            out.isStorage = storage;
+            size_t brace = s.find('{', kw);
             if (brace == std::string::npos) return false;
             size_t close = s.find('}', brace);
             if (close == std::string::npos) return false;
-            // tên block: từ sau "uniform" tới '{'
-            std::string hdr = Trim(s.substr(ub + 7, brace - ub - 7));
+            // tên block: từ sau "uniform"/"buffer" tới '{'
+            std::string hdr = Trim(s.substr(kw + kwLen, brace - kw - kwLen));
             if (hdr.empty()) return false;
             // hdr có thể là "BlockName" (block không instance) — instance named UBO
             // (`} inst;`) sẽ được flatten thành `inst.member` ở body rewrite (M5c tách sau).
@@ -1998,8 +2007,15 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 if (lb != std::string::npos) {
                     size_t rb = mname.find(']', lb);
                     if (rb == std::string::npos) return false;
-                    arr = atoi(mname.substr(lb + 1, rb - lb - 1).c_str());
-                    if (arr <= 0 || arr > 1024) return false;
+                    // SSBO cho phép mảng không kích thước (float v[];) → arr = -1.
+                    std::string cnt = Trim(mname.substr(lb + 1, rb - lb - 1));
+                    if (cnt.empty()) {
+                        if (!storage) return false; // UBO phải có kích thước
+                        arr = -1;
+                    } else {
+                        arr = atoi(cnt.c_str());
+                        if (arr <= 0 || arr > 1024) return false;
+                    }
                     mname = Trim(mname.substr(0, lb));
                 }
                 bool okT = false;
@@ -2031,7 +2047,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             auto segStartsUbo = [&](size_t s) {
                 size_t p = s;
                 while (p < t.size() && isspace((unsigned char)t[p])) ++p;
-                return (t.compare(p, 6, "layout") == 0 || t.compare(p, 7, "uniform") == 0);
+                return (t.compare(p, 6, "layout") == 0 || t.compare(p, 7, "uniform") == 0 ||
+                        t.compare(p, 6, "buffer") == 0);
             };
             auto flushTo = [&](size_t end) {
                 std::string s = Trim(t.substr(start, end - start));
@@ -2077,10 +2094,11 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             for (std::string t : segs) {
                 t = Trim(t);
                 if (t.empty() || t == ";") continue;
-            // UBO block (chứa '{' nhưng là decl)
+            // UBO/SSBO block (chứa '{' nhưng là decl)
             {
                 GLSLBlock b;
-                if ((t.rfind("layout", 0) == 0 || t.rfind("uniform", 0) == 0) &&
+                if ((t.rfind("layout", 0) == 0 || t.rfind("uniform", 0) == 0 ||
+                     t.rfind("buffer", 0) == 0) &&
                     t.find('{') != std::string::npos && tryParseUBO(t, b)) {
                     blocks.push_back(b);
                     continue;
@@ -2902,10 +2920,48 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (u.isSampler) continue;
         mpShared.emplace_back(u.name, "tglmt_u." + u.name);
     }
-    // UBO members: `member` hoặc `inst.member` → `ubo_Block.member`.
-    // Instance name (`lightmapInfo` trong `} lightmapInfo;`) map thẳng sang
-    // struct để `lightmapInfo.BlockFactor` thành `ubo_LightmapInfo.BlockFactor`.
-    for (auto& b : blocks) {
+    // UBO/SSBO members → param. UBO: `ubo_Block.member` (constant, buffer(17+ubi)).
+    // SSBO struct: `ssbo_Block.member` (device); SSBO unsized-array single-member:
+    // flatten device T* (param tên member). Metal buffer index max = 30.
+    // Vertex/graphics: buffer(0..15) = vertex attrs → SSBO graphics fail trung thực.
+    // Compute (0..15 trống): SSBO slot bắt từ 0+sbi.
+    struct SSBOFlat { std::string type, param; int slot; };
+    std::vector<SSBOFlat> ssboFlat;
+    std::vector<int> ssboSlot(blocks.size(), -1); // storage-struct slot; -1 = UBO/flat
+    int uboCnt = 0, ssboCnt = 0;
+    int ssboBase = R.isCompute ? 0 : -1; // -1 = graphics → SSBO chưa hỗ trợ
+    for (size_t bi = 0; bi < blocks.size(); ++bi) {
+        auto& b = blocks[bi];
+        if (b.isStorage) {
+            if (ssboBase < 0) return fail("SSBO trong vertex/fragment chưa hỗ trợ (chỉ compute)");
+            bool hasUnsized = false;
+            for (auto& m : b.members) if (m.arraySize == -1) hasUnsized = true;
+            if (hasUnsized) {
+                // Subset: block 1 member mảng unsized, KHÔNG instance (pattern compute).
+                if (b.members.size() != 1) return fail("SSBO nhiều member + mảng unsized ngoài subset");
+                std::string mn = b.members[0].name;
+                if (mn.find('.') != std::string::npos) return fail("SSBO unsized-array có instance ngoài subset");
+                ssboFlat.push_back({b.members[0].mslType, mn, ssboBase + ssboCnt});
+                if (ssboBase + ssboCnt > 15) return fail("SSBO vượt slot compute (0..15, max 30)");
+                ++ssboCnt;
+                continue; // member name = param name → không cần mpShared (identity)
+            }
+            if (ssboBase + ssboCnt > 15) return fail("SSBO vượt slot compute (0..15, max 30)");
+            ssboSlot[bi] = ssboBase + ssboCnt++;
+            std::string inst;
+            for (auto& m : b.members) {
+                size_t dot = m.name.find('.');
+                if (dot != std::string::npos && inst.empty()) inst = m.name.substr(0, dot);
+            }
+            if (!inst.empty()) mpShared.emplace_back(inst, "ssbo_" + b.name);
+            for (auto& m : b.members) {
+                size_t dot = m.name.find('.');
+                std::string access = (dot == std::string::npos) ? m.name : m.name.substr(dot + 1);
+                mpShared.emplace_back(m.name, "ssbo_" + b.name + "." + access);
+            }
+            continue;
+        }
+        ++uboCnt;
         std::string inst;
         for (auto& m : b.members) {
             size_t dot = m.name.find('.');
@@ -3313,19 +3369,60 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         }
         msl_out << "};\n";
     }
-    // UBO structs (read-only): 1 struct/block, bind ở buffer(17+k) theo thứ tự khai báo
-    for (size_t bi = 0; bi < blocks.size(); ++bi) {
-        auto& b = blocks[bi];
-        msl_out << "struct TGLMTUBO_" << b.name << " {\n";
-        for (auto& m : b.members) {
-            size_t dot = m.name.find('.');
-            std::string shortN = (dot == std::string::npos) ? m.name : m.name.substr(dot + 1);
-            if (m.arraySize > 0)
-                msl_out << "  " << m.mslType << " " << shortN << "[" << m.arraySize << "];\n";
-            else
-                msl_out << "  " << m.mslType << " " << shortN << ";\n";
+    // UBO structs (read-only) + SSBO structs (device). Flat SSBO (unsized array)
+    // đã ghi vào ssboFlat ở trên — không emit struct, chỉ device T* param.
+    {
+        int ubi = 0;
+        for (size_t bi = 0; bi < blocks.size(); ++bi) {
+            auto& b = blocks[bi];
+            if (b.isStorage) {
+                if (ssboSlot[bi] == -1) continue; // flat — đã xử lý
+                msl_out << "struct TGLMTSSBO_" << b.name << " {\n";
+                for (auto& m : b.members) {
+                    size_t dot = m.name.find('.');
+                    std::string shortN = (dot == std::string::npos) ? m.name : m.name.substr(dot + 1);
+                    if (m.arraySize > 0)
+                        msl_out << "  " << m.mslType << " " << shortN << "[" << m.arraySize << "];\n";
+                    else
+                        msl_out << "  " << m.mslType << " " << shortN << ";\n";
+                }
+                msl_out << "};\n";
+                continue;
+            }
+            msl_out << "struct TGLMTUBO_" << b.name << " {\n";
+            for (auto& m : b.members) {
+                size_t dot = m.name.find('.');
+                std::string shortN = (dot == std::string::npos) ? m.name : m.name.substr(dot + 1);
+                if (m.arraySize > 0)
+                    msl_out << "  " << m.mslType << " " << shortN << "[" << m.arraySize << "];\n";
+                else
+                    msl_out << "  " << m.mslType << " " << shortN << ";\n";
+            }
+            msl_out << "};\n";
+            ++ubi;
         }
-        msl_out << "};\n";
+    }
+    // Param buffer cho block: UBO constant (17+ubi), SSBO-struct device (32+sbi),
+    // SSBO-flat device T* (32+sbi). Dùng chung cho 4 entry (vertex/frag/compute).
+    std::string blockParams;
+    {
+        int ubi = 0, sbi = 0;
+        for (size_t bi = 0; bi < blocks.size(); ++bi) {
+            auto& b = blocks[bi];
+            if (b.isStorage) {
+                if (ssboSlot[bi] == -1) continue; // flat — param thêm ở ssboFlat loop
+                blockParams += ",\n    device TGLMTSSBO_" + b.name + "& ssbo_" + b.name +
+                               " [[buffer(" + std::to_string(ssboSlot[bi]) + ")]]";
+                ++sbi;
+                continue;
+            }
+            blockParams += ",\n    constant TGLMTUBO_" + b.name + "& ubo_" + b.name +
+                           " [[buffer(" + std::to_string(17 + ubi) + ")]]";
+            ++ubi;
+        }
+        for (auto& f : ssboFlat)
+            blockParams += ",\n    device " + f.type + "* " + f.param +
+                           " [[buffer(" + std::to_string(f.slot) + ")]]";
     }
     // Khai báo texture/sampler params (index theo thứ tự khai báo sampler).
     // Buffer sampler (CloudFaces): texture2d<elem> KHÔNG sampler (chỉ .read).
@@ -3412,9 +3509,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     if (R.isVertex) {
         msl_out << "vertex TGLMT_VOut TGLMT_vs(TGLMT_VIn _in [[stage_in]],\n"
                    "    constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
-        for (size_t bi = 0; bi < blocks.size(); ++bi)
-            msl_out << ",\n    constant TGLMTUBO_" << blocks[bi].name << "& ubo_" << blocks[bi].name
-                    << " [[buffer(" << (17 + bi) << ")]]";
+        msl_out << blockParams;
         if (R.usesVertexID) msl_out << ",\n    uint tglmt_vertexID [[vertex_id]]";
         if (R.usesInstanceID) msl_out << ",\n    uint tglmt_instanceID [[instance_id]]";
         if (useBaseInstance) msl_out << ",\n    uint tglmt_baseInstance [[base_instance]]";
@@ -3423,9 +3518,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         // P6f: compute → kernel. Thread-position params emit theo mức body dùng
         // (đã probe Metal thật: thread_position_in_grid/threadgroup/thread_index OK).
         msl_out << "kernel void TGLMT_cs(constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
-        for (size_t bi = 0; bi < blocks.size(); ++bi)
-            msl_out << ",\n    constant TGLMTUBO_" << blocks[bi].name << "& ubo_" << blocks[bi].name
-                    << " [[buffer(" << (17 + bi) << ")]]";
+        msl_out << blockParams;
         if (useGlobalID) msl_out << ",\n    uint3 tglmt_globalID [[thread_position_in_grid]]";
         if (useLocalID) msl_out << ",\n    uint3 tglmt_localID [[thread_position_in_threadgroup]]";
         if (useWorkGroupID) msl_out << ",\n    uint3 tglmt_workGroupID [[threadgroup_position_in_grid]]";
@@ -3451,9 +3544,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         msl_out << "};\n";
         msl_out << "fragment TGLMT_FOut TGLMT_fs(TGLMT_FIn _in [[stage_in]],\n"
                    "    constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
-        for (size_t bi = 0; bi < blocks.size(); ++bi)
-            msl_out << ",\n    constant TGLMTUBO_" << blocks[bi].name << "& ubo_" << blocks[bi].name
-                    << " [[buffer(" << (17 + bi) << ")]]";
+        msl_out << blockParams;
         if (R.usesPointCoord) msl_out << ",\n    float2 tglmt_pointCoord [[point_coord]]";
         if (R.usesFragCoord) msl_out << ",\n    float4 tglmt_fragCoord [[position]]";
         if (R.usesFrontFacing) msl_out << ",\n    bool tglmt_frontFacing [[front_facing]]";
@@ -3469,9 +3560,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     } else {
         msl_out << "fragment float4 TGLMT_fs(TGLMT_FIn _in [[stage_in]],\n"
                    "    constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
-        for (size_t bi = 0; bi < blocks.size(); ++bi)
-            msl_out << ",\n    constant TGLMTUBO_" << blocks[bi].name << "& ubo_" << blocks[bi].name
-                    << " [[buffer(" << (17 + bi) << ")]]";
+        msl_out << blockParams;
         if (R.usesPointCoord) msl_out << ",\n    float2 tglmt_pointCoord [[point_coord]]";
         if (R.usesFragCoord) msl_out << ",\n    float4 tglmt_fragCoord [[position]]";
         if (R.usesFrontFacing) msl_out << ",\n    bool tglmt_frontFacing [[front_facing]]";
