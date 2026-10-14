@@ -237,6 +237,16 @@ static const char* const kExts[] = {
     "GL_ARB_compute_variable_group_size",
     "GL_EXT_debug_label",
     "GL_ARB_ES3_2_compatibility",
+    // ===== P8: ARB_shader_objects (GLSL đời đầu, forwards sang core) — 11+28. =====
+    //  - glXxxObjectARB forward 1:1 sang glXxxShader/Program (type-dispatch cho
+    //    Delete/InfoLog/Parameter). 28 alias còn lại do generator.
+    "GL_ARB_shader_objects",
+    // ===== P8: EXT_draw_buffers2 (indexed MRT control) + separate_shader_objects. =====
+    //  - draw_buffers2: ColorMask/Enable/Disable/IsEnabled/Get indexed (per-target MRT).
+    //  - separate_shader_objects: CreateShaderProgram (compile+link separable) +
+    //    UseShaderProgram (bind theo stage) + ActiveProgram (validate pipeline).
+    "GL_EXT_draw_buffers2",
+    "GL_EXT_separate_shader_objects",
     // ===== P5: buffer storage (ARB_buffer_storage) — immutable buffer THẬT. =====
     //  - glBufferStorage (+Named) ĐÃ implement (immutable, flags, GPU upload).
     "GL_ARB_buffer_storage",

@@ -108,24 +108,41 @@ def main():
         need = funcs - core
         if not need:
             continue
-        # alias-ready: mọi need là alias của core-impl
+        # Alias-ready: hàm là alias của base-đã-implement (bỏ qua hàm real đã
+        # implement trực tiếp — chúng không cần alias). Sinh alias cho subset
+        # alias-ready ngay cả khi ext còn hàm real khác (P8: ARB_shader_objects
+        # có 11 real + 28 alias — 28 alias vẫn sinh được).
         bases = {}
-        is_alias_ready = True
         for f in sorted(need):
+            if f in impl:
+                continue  # real đã implement tay (không cần alias)
             b = alias_base(f)
             if not b or (b not in impl and b not in core):
-                is_alias_ready = False
-                break
+                continue  # real chưa implement (không sinh alias)
             bases[f] = b
-        if not is_alias_ready:
-            continue
         # verify signature từng alias. So sánh sau chuẩn hoá: TGLMT typedef
         # GLint==GLsizei==int32_t, GLintptr==GLsizeiptr — lệch tên nhưng C ABI
         # giống hệt → forward an toàn (vd glProgramBinaryOES GLint vs GLsizei).
+        # P8: thêm GLhandleARB==GLuint, GLcharARB==GLchar (ABI-identical, ARB_shader_objects).
         def nsig(s):
             ret, pr = s
-            m = {"GLsizei": "GLint", "GLsizeiptr": "GLintptr"}
-            return (ret, tuple(m.get(p, p) for p in pr))
+            m = {"GLsizei": "GLint", "GLsizeiptr": "GLintptr",
+                 "GLhandleARB": "GLuint", "GLcharARB": "GLchar",
+                 "const GLcharARB *": "const GLchar *",
+                 "const GLcharARB **": "const GLchar *const*"}
+            # Chuẩn hoá const pointer variants (strip const/space để so sánh ABI).
+            def norm(t):
+                # Thay token dài trước (GLcharARB trước GLchar) để khỏi cắt nhầm.
+                t = t.replace("GLcharARB", "GLchar").replace("GLhandleARB", "GLuint")
+                t = m.get(t, t)
+                t = t.replace("GLchar", "char")
+                # Bỏ 'const' và space, đếm sao (*) để so sánh ABI pointer
+                # (`const char**` vs `const char *const*` cùng ABI).
+                stars = t.count("*")
+                base = t.replace("const", "").replace("*", "").replace(" ", "").strip()
+                if stars: base += "*" * stars
+                return base
+            return (norm(ret), tuple(norm(p) for p in pr))
         for f, b in bases.items():
             if f not in sig or b not in sig:
                 review.append((name, f, b, "no-sig"))
@@ -166,15 +183,22 @@ def main():
             fp.write(f"{ret} {b}({args});\n")
         fp.write("} }\n\n")
         fp.write('extern "C" {\n')
+        # Chuẩn hoá types khi emit (GLhandleARB→GLuint, GLcharARB→GLchar — ABI-identical,
+        # TGLMT headers không định nghĩa ARB types). Dùng base signature types.
+        def emit_type(t):
+            t = t.replace("GLhandleARB", "GLuint").replace("GLcharARB", "GLchar")
+            return t
         for f, b, _ in forward:
             if f in seen:
                 continue
             seen.add(f)
             ret, params = sig[f]
-            args = ", ".join(f"{t} a{i}" for i, t in enumerate(params)) if params else "void"
-            call = ", ".join(f"a{i}" for i in range(len(params)))
-            kw = "return " if ret != "void" else ""
-            fp.write(f"{ret} {f}({args}) {{ {kw}tglmt::gl::{b}({call}); }}\n")
+            ret_e = emit_type(ret)
+            params_e = [emit_type(p) for p in params]
+            args = ", ".join(f"{t} a{i}" for i, t in enumerate(params_e)) if params_e else "void"
+            call = ", ".join(f"a{i}" for i in range(len(params_e)))
+            kw = "return " if ret_e != "void" else ""
+            fp.write(f"{ret_e} {f}({args}) {{ {kw}tglmt::gl::{b}({call}); }}\n")
         fp.write("} // extern \"C\"\n")
     print(f"\nWrote {OUT}: {len(seen)} alias functions (extern \"C\").")
     return 0

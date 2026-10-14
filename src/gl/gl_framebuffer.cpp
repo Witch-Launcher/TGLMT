@@ -119,6 +119,13 @@ void glFramebufferTextureLayer(GLenum t, GLenum a, GLuint x, GLint l, GLint laye
     (void)layer; // như trên.
     glFramebufferTexture2D(t, a, 0x0DE1 /*TEXTURE_2D*/, x, l);
 }
+// P8 ARB_geometry_shader4 (base cho glFramebufferTextureFaceARB alias):
+// Attach 1 face của cube map (hoặc layer của array) vào FBO.
+// TGLMT FBO model 2D (không phân biệt face/layer) → attach như 2D.
+void glFramebufferTextureFace(GLenum t, GLenum a, GLuint x, GLint l, GLenum face) {
+    (void)face; // cube face / array layer — TGLMT không track riêng, attach base texture.
+    glFramebufferTexture2D(t, a, 0x0DE1 /*TEXTURE_2D*/, x, l);
+}
 // Helper attach tôn trọng fbo chỉ định (fix bug bỏ qua `f` ở Named variants).
 static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex, GLint level) {
     if (fbo == 0) { c.errors.Record(0x0502); return false; } // default FB không attach

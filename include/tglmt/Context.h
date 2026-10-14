@@ -307,6 +307,7 @@ struct XfbObject {
     bool active = false, paused = false;
     GLenum primitiveMode = 0x0004; // mode của glBeginTransformFeedback (TRIANGLES)
     std::array<GLuint, 4> buffers = {0, 0, 0, 0}; // TRANSFORM_FEEDBACK_BUFFER bindings
+    std::array<GLintptr, 4> offsets = {0, 0, 0, 0}; // P8: offset từ BindBufferOffsetEXT
     GLuint capturedCount = 0;      // số đỉnh đã capture (cho glDrawTransformFeedback*)
 };
 
