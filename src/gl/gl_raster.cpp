@@ -3,6 +3,7 @@
 // Metal: bake vào MTLRenderPipelineDescriptor.colorAttachments / MTLDepthStencilDescriptor.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <vector>
 using namespace tglmt;
 
 namespace tglmt::gl {
@@ -53,36 +54,70 @@ void glDepthRangeArrayv(GLuint f, GLsizei n, const GLdouble* v) {
     for (GLsizei i = 0; i < n; ++i) Context::Current().state.SetDepthRange(v[2*i], v[2*i+1], f + i);
 }
 void glDepthRangeIndexed(GLuint i, GLdouble n, GLdouble f) { Context::Current().state.SetDepthRange(n, f, i); }
+// P9 viewport_array (ARB/OES/NV forwards sang core DepthRangeArray/Indexed).
+// ARB_viewport_array gl.xml liệt kê NV-suffixed (quirk) — forward về core.
+void glDepthRangeArraydvNV(GLuint f, GLsizei n, const GLdouble* v) { glDepthRangeArrayv(f, n, v); }
+void glDepthRangeIndexeddNV(GLuint i, GLdouble n, GLdouble f) { glDepthRangeIndexed(i, n, f); }
+// OES float versions → convert sang double, forward core.
+void glDepthRangeArrayfvOES(GLuint f, GLsizei n, const GLfloat* v) {
+    // Convert float→double (depth range cần precision — dùng thread_local buf).
+    thread_local std::vector<double> tmp;
+    tmp.resize((size_t)n * 2);
+    for (GLsizei i = 0; i < n * 2; ++i) tmp[(size_t)i] = (double)v[i];
+    glDepthRangeArrayv(f, n, tmp.data());
+}
+void glDepthRangeIndexedfOES(GLuint i, GLfloat n, GLfloat f) { glDepthRangeIndexed(i, (GLdouble)n, (GLdouble)f); }
 void glStencilFunc(GLenum f, GLint r, GLuint m) {
-    Context::Current().state.StencilFront().func = f;
-    Context::Current().state.StencilFront().ref = r;
-    Context::Current().state.StencilFront().valueMask = m;
-    Context::Current().state.StencilBack() = Context::Current().state.StencilFront();
+    // P9: tôn trọng ActiveStencilFace (EXT_stencil_two_side). Mặc định BOTH → cả 2.
+    Context& c = Context::Current();
+    GLenum face = c.state.ActiveStencilFace();
+    if (face == 0x0404 /*FRONT*/ || face == 0x0408 /*BOTH*/) {
+        c.state.StencilFront().func = f;
+        c.state.StencilFront().ref = r;
+        c.state.StencilFront().valueMask = m;
+    }
+    if (face == 0x0405 /*BACK*/ || face == 0x0408 /*BOTH*/) {
+        c.state.StencilBack().func = f;
+        c.state.StencilBack().ref = r;
+        c.state.StencilBack().valueMask = m;
+    }
 }
 void glStencilFuncSeparate(GLenum face, GLenum f, GLint r, GLuint m) {
     Context& c = Context::Current();
-    if (face == 0x0408 || face == 0x0404) c.state.StencilFront().func = f, c.state.StencilFront().ref = r, c.state.StencilFront().valueMask = m;
-    if (face == 0x0409 || face == 0x0404) c.state.StencilBack().func = f, c.state.StencilBack().ref = r, c.state.StencilBack().valueMask = m;
+    // Sửa bug: FRONT=0x0404, BACK=0x0405, BOTH=0x0408 (trước đây check 0x0409 sai).
+    if (face == 0x0404 || face == 0x0408) c.state.StencilFront().func = f, c.state.StencilFront().ref = r, c.state.StencilFront().valueMask = m;
+    if (face == 0x0405 || face == 0x0408) c.state.StencilBack().func = f, c.state.StencilBack().ref = r, c.state.StencilBack().valueMask = m;
 }
 void glStencilOp(GLenum sf, GLenum dpf, GLenum dpp) {
-    auto& fr = Context::Current().state.StencilFront();
-    fr.sfail = sf; fr.dpfail = dpf; fr.dppass = dpp;
-    Context::Current().state.StencilBack() = fr;
+    Context& c = Context::Current();
+    GLenum face = c.state.ActiveStencilFace();
+    if (face == 0x0404 || face == 0x0408) { auto& fr = c.state.StencilFront(); fr.sfail = sf; fr.dpfail = dpf; fr.dppass = dpp; }
+    if (face == 0x0405 || face == 0x0408) { auto& bk = c.state.StencilBack(); bk.sfail = sf; bk.dpfail = dpf; bk.dppass = dpp; }
 }
 void glStencilOpSeparate(GLenum face, GLenum sf, GLenum dpf, GLenum dpp) {
     Context& c = Context::Current();
-    auto apply = [&](StencilFace& s){ s.sfail = sf; s.dpfail = dpf; s.dppass = dpp; };
-    if (face == 0x0408 || face == 0x0404) apply(c.state.StencilFront());
-    if (face == 0x0409 || face == 0x0404) apply(c.state.StencilBack());
+    // Sửa bug face check (như FuncSeparate).
+    if (face == 0x0404 || face == 0x0408) { auto& fr = c.state.StencilFront(); fr.sfail = sf; fr.dpfail = dpf; fr.dppass = dpp; }
+    if (face == 0x0405 || face == 0x0408) { auto& bk = c.state.StencilBack(); bk.sfail = sf; bk.dpfail = dpf; bk.dppass = dpp; }
 }
 void glStencilMask(GLuint m) {
-    Context::Current().state.StencilFront().writeMask = m;
-    Context::Current().state.StencilBack().writeMask = m;
+    Context& c = Context::Current();
+    GLenum face = c.state.ActiveStencilFace();
+    if (face == 0x0404 || face == 0x0408) c.state.StencilFront().writeMask = m;
+    if (face == 0x0405 || face == 0x0408) c.state.StencilBack().writeMask = m;
 }
 void glStencilMaskSeparate(GLenum face, GLuint m) {
     Context& c = Context::Current();
-    if (face == 0x0408 || face == 0x0404) c.state.StencilFront().writeMask = m;
-    if (face == 0x0409 || face == 0x0404) c.state.StencilBack().writeMask = m;
+    if (face == 0x0404 || face == 0x0408) c.state.StencilFront().writeMask = m;
+    if (face == 0x0405 || face == 0x0408) c.state.StencilBack().writeMask = m;
+}
+// P9 EXT_stencil_two_side: chọn face cho StencilFunc/Op/Mask không-Separate.
+void glActiveStencilFaceEXT(GLenum face) {
+    Context& c = Context::Current();
+    if (face != 0x0404 && face != 0x0405 && face != 0x0408) {
+        c.errors.Record(0x0500); return; // INVALID_ENUM
+    }
+    c.state.SetActiveStencilFace(face);
 }
 void glCullFace(GLenum m) { Context::Current().state.SetCullFace(m); }
 void glFrontFace(GLenum m) { Context::Current().state.SetFrontFace(m); }

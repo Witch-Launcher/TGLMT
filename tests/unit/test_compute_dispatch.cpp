@@ -157,5 +157,46 @@ int main() {
     }
 
     printf("test_compute_dispatch: all cases OK (SSBO + uniform + texture + image)\n");
+
+    // --- Case 5: P9 atomic — 64 threads increment, verify unique + counter=64 ---
+    {
+        const char* src5 = "#version 460 core\n"
+            "layout(local_size_x=8) in;\n"
+            "layout(binding=0, offset=0) uniform atomic_uint ac;\n"
+            "layout(std430,binding=0) buffer B{uint v[];};\n"
+            "void main(){ v[gl_GlobalInvocationID.x]=atomicCounterIncrement(ac); }\n";
+        GLuint sh5 = glCreateShader(0x91B9);
+        glShaderSource(sh5, 1, &src5, nullptr); glCompileShader(sh5);
+        GLuint pr5 = glCreateProgram(); glAttachShader(pr5, sh5); glLinkProgram(pr5);
+        GLint ok5 = 0; glGetProgramiv(pr5, 0x8B82, &ok5);
+        if (!ok5) { printf("test_compute_dispatch FAIL atomic link\n"); return 1; }
+        GLuint abuf; glGenBuffers(1, &abuf);
+        glBindBuffer(0x92C0, abuf); // ATOMIC_COUNTER_BUFFER
+        unsigned int zero = 0;
+        glBufferData(0x92C0, 4, &zero, 0x88E4);
+        glBindBufferBase(0x92C0, 0, abuf);
+        unsigned int z5[64] = {0}; GLuint sbuf; glGenBuffers(1, &sbuf);
+        glBindBuffer(0x90D2, sbuf); glBufferData(0x90D2, sizeof(z5), z5, 0x88E4);
+        glBindBufferBase(0x90D2, 0, sbuf);
+        glUseProgram(pr5);
+        glDispatchCompute(8, 1, 1); glMemoryBarrier(0x00000040 | 0x00002000);
+        glBindBuffer(0x90D2, sbuf);
+        const unsigned int* r5 = (const unsigned int*)glMapBufferRange(0x90D2, 0, sizeof(z5), 0x0008 | 0x0010);
+        if (!r5) { printf("test_compute_dispatch FAIL atomic map\n"); return 1; }
+        int seen[64] = {0};
+        for (int i = 0; i < 64; ++i) if (r5[i] < 64) seen[r5[i]] = 1;
+        int uniq = 0; for (int i = 0; i < 64; ++i) uniq += seen[i];
+        glUnmapBuffer(0x90D2);
+        glBindBuffer(0x92C0, abuf);
+        const unsigned int* ac = (const unsigned int*)glMapBufferRange(0x92C0, 0, 4, 0x0008 | 0x0010);
+        unsigned int cnt = ac ? ac[0] : 0;
+        if (ac) glUnmapBuffer(0x92C0);
+        if (uniq != 64 || cnt != 64) {
+            printf("test_compute_dispatch FAIL atomic: uniq=%d cnt=%u\n", uniq, cnt); return 1;
+        }
+        printf("test_compute_dispatch: atomic OK (uniq=64 cnt=64)\n");
+    }
+
+    printf("test_compute_dispatch: all cases OK (SSBO + uniform + texture + image + atomic)\n");
     return 0;
 }

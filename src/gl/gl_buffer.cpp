@@ -335,6 +335,9 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
         }
     } else if (target == 0x90D2 /*SHADER_STORAGE_BUFFER*/) {
         c.storageBindPoints[index] = BufferRange{buffer, 0, 0};
+    } else if (target == 0x92C0 /*ATOMIC_COUNTER_BUFFER*/) {
+        // P9: atomic counter binding (offset lấy từ layout(offset) shader, không phải bind).
+        c.atomicBindPoints[index] = BufferRange{buffer, 0, 0};
     }
     glBindBuffer(target, buffer);
 }
@@ -352,6 +355,8 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr o, G
         }
     } else if (target == 0x90D2) {
         c.storageBindPoints[index] = BufferRange{buffer, o, s};
+    } else if (target == 0x92C0 /*ATOMIC_COUNTER_BUFFER*/) {
+        c.atomicBindPoints[index] = BufferRange{buffer, o, s};
     }
     glBindBuffer(target, buffer);
 }

@@ -247,6 +247,15 @@ static const char* const kExts[] = {
     //    UseShaderProgram (bind theo stage) + ActiveProgram (validate pipeline).
     "GL_EXT_draw_buffers2",
     "GL_EXT_separate_shader_objects",
+    // ===== P9: stencil_two_side + viewport_array + atomic_counters (Metal thật). =====
+    //  - stencil_two_side: ActiveStencilFaceEXT + sửa face check bug.
+    //  - viewport_array (ARB+OES): DepthRangeArray/Indexed forwards.
+    //  - shader_atomic_counters: atomic_uint + Increment/Decrement/Get → MSL atomics
+    //    (compute + vertex/fragment, bind với offset). e2e 64 threads PASS.
+    "GL_EXT_stencil_two_side",
+    "GL_ARB_viewport_array",
+    "GL_OES_viewport_array",
+    "GL_ARB_shader_atomic_counters",
     // ===== P5: buffer storage (ARB_buffer_storage) — immutable buffer THẬT. =====
     //  - glBufferStorage (+Named) ĐÃ implement (immutable, flags, GPU upload).
     "GL_ARB_buffer_storage",

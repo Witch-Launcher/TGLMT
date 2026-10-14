@@ -75,6 +75,7 @@ void glLinkProgram(GLuint p) {
     pr.appleCS.reset(); pr.appleCSPipeline.reset(); pr.computeMSL.clear();
     pr.computeBlockSlots.clear(); pr.computeSamplers.clear(); pr.computeUBSize = 0;
     pr.vsImages.clear(); pr.fsImages.clear(); pr.computeImages.clear();
+    pr.computeAtomics.clear(); pr.vsAtomics.clear(); pr.fsAtomics.clear();
     pr.vsUBSize = pr.fsUBSize = 0;
     ShaderObject *vs = nullptr, *fs = nullptr;
     bool hasV = false, hasF = false;
@@ -106,6 +107,9 @@ void glLinkProgram(GLuint p) {
                 pr.uniformLayout.push_back({u.name, u.uniformOffset, u.uniformSize, -1, true});
             }
             pr.computeUBSize = its->second.conv.uniformBufferSize;
+            // P9 atomic counters: copy slots (binding→slot+offset) cho dispatch bind.
+            for (auto& as : its->second.conv.atomicSlots)
+                pr.computeAtomics.push_back({as.name, as.binding, as.offset, as.slot});
             // P6g images: slot = samplerCount + index, binding = layout hoặc units.
             for (size_t k = 0; k < its->second.conv.images.size(); ++k) {
                 auto& im = its->second.conv.images[k];
@@ -296,6 +300,10 @@ void glLinkProgram(GLuint p) {
             pr.fsImages.push_back({im.name, slot, binding});
             if (!pr.samplerUnits.count(im.name)) pr.samplerUnits[im.name] = (GLuint)binding;
         }
+        // P9 graphics atomics: copy slots từ converter (vs/fs riêng).
+        pr.vsAtomics.clear(); pr.fsAtomics.clear();
+        for (auto& as : vsC.atomicSlots) pr.vsAtomics.push_back({as.name, as.binding, as.offset, as.slot});
+        for (auto& as : fsC.atomicSlots) pr.fsAtomics.push_back({as.name, as.binding, as.offset, as.slot});
     }
     // 4c. Uniform blocks (UBO read-only): gộp vs+fs theo thứ tự khai báo, index ổn định.
     // Đồng thời giữ thứ tự RIÊNG mỗi stage (vsBlocks/fsBlocks) khớp

@@ -49,6 +49,11 @@ struct GLSLVar {
     bool isImage = false;
     char imageAccess = 'B';
     int imageBinding = -1;
+    // P9 atomic counter: `layout(binding=N, offset=M) uniform atomic_uint ac;`
+    // → device atomic_uint* (atomicCounterIncrement/Decrement/Get → MSL atomics).
+    bool isAtomicCounter = false;
+    int atomicBinding = -1;
+    int atomicOffset = 0;
 };
 // Uniform block (UBO read-only): `layout(std140[, binding=N]) uniform Block { ... }`.
 struct GLSLBlock {
@@ -73,6 +78,7 @@ struct GLSLConvertResult {
     std::vector<GLSLVar> uniforms;   // cả sampler2D (isSampler=true)
     std::vector<GLSLVar> samplers;   // tách riêng cho tiện bind
     std::vector<GLSLVar> images;     // P6g: image vars (thứ tự khai báo = texture slot)
+    std::vector<GLSLVar> atomicCounters; // P9: atomic_uint vars (buffer slot)
     std::vector<GLSLBlock> blocks;   // UBO blocks (read-only)
     size_t uniformBufferSize = 0;    // sizeof(TGLMTUniforms), đã align
     bool usesPointSize = false;
@@ -92,6 +98,9 @@ struct GLSLConvertResult {
     // cần bảng này để bind storageBindPoints[binding] → buffer(slot).
     struct BlockSlot { int binding; int slot; bool isStorage; std::string name; };
     std::vector<BlockSlot> blockSlots;
+    // P9 atomic: (tên, binding, offset, slot) — backend bind atomicBindPoints[binding]→buffer(slot+offset).
+    struct AtomicSlot { std::string name; int binding; int offset; int slot; };
+    std::vector<AtomicSlot> atomicSlots;
 };
 
 // Convert 1 shader stage. stage = 0x8B31 (VERTEX) hoặc 0x8B30 (FRAGMENT).

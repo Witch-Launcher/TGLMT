@@ -245,6 +245,9 @@ public:
     virtual void setTexture(ITexture* t, uint32_t idx) { (void)t; (void)idx; }
     virtual void setSamplerState(ISamplerState* s, uint32_t idx) { (void)s; (void)idx; }
     virtual void setBuffer(IBuffer* b, uint32_t idx) { (void)b; (void)idx; }
+    // P9: bind với byte offset (atomic counter layout(offset) trong buffer).
+    // Default bỏ qua offset (backend cũ); Apple override dùng offset thật.
+    virtual void setBuffer(IBuffer* b, uint32_t idx, size_t offset) { (void)offset; setBuffer(b, idx); }
     virtual void dispatch2D(uint32_t w, uint32_t h) { (void)w; (void)h; }
     // P6f: dispatch 3D với threadsPerThreadgroup từ layout(local_size) của compute shader.
     // Default → dispatch2D (tg 8x8x1) cho backend không override.

@@ -452,15 +452,15 @@ int main() {
 
         // 9d. GL_ATI_separate_stencil: round-trip front/back riêng.
         while (glGetError() != 0) {}
-        glStencilFuncSeparateATI(0x0408 /*FRONT*/, 0x0202 /*EQUAL*/, 1, 0xFF);
-        glStencilOpSeparateATI(0x0408, 0x1E00 /*KEEP*/, 0x1E01 /*ZERO*/, 0x1E02 /*REPLACE*/);
+        glStencilFuncSeparateATI(0x0404 /*FRONT*/, 0x0202 /*EQUAL*/, 1, 0xFF);
+        glStencilOpSeparateATI(0x0404, 0x1E00 /*KEEP*/, 0x1E01 /*ZERO*/, 0x1E02 /*REPLACE*/);
         Check(glGetError() == 0, "glStencilFuncSeparateATI/OpSeparate không lỗi");
         GLint sf = 0, so = 0;
         glGetIntegerv(0x0B92 /*STENCIL_FUNC*/, &sf);
         Check(sf == 0x0202, "ATI separate stencil front func round-trip");
         glGetIntegerv(0x0B94 /*STENCIL_FAIL*/, &so);
         Check(so == 0x1E00, "ATI separate stencil front sfail round-trip");
-        glStencilFuncSeparateATI(0x0409 /*BACK*/, 0x0204 /*NOTEQUAL*/, 7, 0x0F);
+        glStencilFuncSeparateATI(0x0405 /*BACK*/, 0x0204 /*NOTEQUAL*/, 7, 0x0F);
         glGetIntegerv(0x8800 /*STENCIL_BACK_FUNC*/, &sf);
         Check(sf == 0x0204, "ATI separate stencil back func round-trip");
         glGetIntegerv(0x8CA3 /*STENCIL_BACK_REF*/, &sf);

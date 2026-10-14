@@ -92,6 +92,9 @@ public:
     StencilFace& StencilBack() { dirtyDepth_ = true; return stenBack_; }
     const StencilFace& StencilFront() const { return stenFront_; }
     const StencilFace& StencilBack() const { return stenBack_; }
+    // P9: active stencil face (FRONT=0x0404, BACK=0x0405, BOTH=0x0408).
+    void SetActiveStencilFace(GLenum f) { activeStencilFace_ = f; dirtyDepth_ = true; }
+    GLenum ActiveStencilFace() const { return activeStencilFace_; }
     void SetDepthRange(double n, double f, GLuint idx = 0);
 
     // --- raster ---
@@ -221,6 +224,9 @@ private:
     float blendColor_[4] = {0, 0, 0, 0};
     DepthState depth_;
     StencilFace stenFront_, stenBack_;
+    // P9 EXT_stencil_two_side: face active cho glStencilFunc/Op/Mask không-Separate.
+    // Mặc định FRONT_AND_BACK (0x0408) để giữ behavior cũ (cả 2 faces).
+    GLenum activeStencilFace_ = 0x0408;
     std::array<ViewportState, kMaxViewports> viewports_;
     GLenum cullMode_ = 0x0405;  // BACK
     GLenum frontFace_ = 0x0901; // CCW

@@ -713,6 +713,57 @@ struct SampEntry {
 using SampTable = std::map<std::string, SampEntry>;
 // P6g: bảng image (tên → kind '2'/'A'/'C'/'3') cho rewrite imageLoad/Store/Size.
 using ImgTable = std::map<std::string, char>;
+// P9: rewrite atomicCounterIncrement/Decrement/Get → MSL atomics explicit.
+// Increment(ac) → fetch_add(ac,1u,relaxed); Decrement → fetch_sub; Get → load.
+static bool RewriteAtomicCalls(std::string& io, const std::vector<std::string>& names, std::string& err) {
+    std::string& body = io;
+    auto isHead = [&](size_t p, const char* name) -> bool {
+        size_t n = strlen(name);
+        if (body.compare(p, n, name) != 0) return false;
+        if (p > 0 && IsIdentChar(body[p - 1], false)) return false;
+        size_t e = p + n;
+        if (e < body.size() && IsIdentChar(body[e], false)) return false;
+        return true;
+    };
+    std::string out;
+    size_t i = 0;
+    while (i < body.size()) {
+        bool matched = false;
+        for (const char* fn : {"atomicCounterIncrement", "atomicCounterDecrement", "atomicCounterGet"}) {
+            if (!isHead(i, fn)) continue;
+            size_t lp = i + strlen(fn);
+            while (lp < body.size() && isspace((unsigned char)body[lp])) ++lp;
+            if (lp >= body.size() || body[lp] != '(') continue;
+            // Tìm `)` đóng (args đơn giản, không nested parens phức tạp — atomic chỉ có 1 arg).
+            int dd = 0;
+            size_t m = lp;
+            for (; m < body.size(); ++m) {
+                if (body[m] == '(') ++dd;
+                else if (body[m] == ')') { if (--dd == 0) break; }
+            }
+            if (m >= body.size()) { err = std::string(fn) + " ngoặc lỗi"; return false; }
+            std::string arg = Trim(body.substr(lp + 1, m - lp - 1));
+            // Verify arg là atomic counter đã khai báo (nếu names không rỗng).
+            if (!names.empty()) {
+                bool found = false;
+                for (auto& nm : names) if (nm == arg) { found = true; break; }
+                if (!found) { err = std::string(fn) + " counter chưa khai báo: " + arg; return false; }
+            }
+            if (!strcmp(fn, "atomicCounterIncrement"))
+                out += "atomic_fetch_add_explicit((" + arg + "), 1u, memory_order_relaxed)";
+            else if (!strcmp(fn, "atomicCounterDecrement"))
+                out += "atomic_fetch_sub_explicit((" + arg + "), 1u, memory_order_relaxed)";
+            else
+                out += "atomic_load_explicit((" + arg + "), memory_order_relaxed)";
+            i = m + 1;
+            matched = true;
+            break;
+        }
+        if (!matched) out += body[i++];
+    }
+    body = out;
+    return true;
+}
 // Viết lại imageLoad(img, coord) → img.read(uintN(coord)),
 // imageStore(img, coord, v) → img.write(v, uintN(coord)),
 // imageSize(img) → intN(get_width/height/depth).
@@ -2210,6 +2261,48 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             out.mslType = base + "<" + elem + ", " + acc + ">";
             return true;
         };
+        // P9 atomic counter: `layout(binding=N, offset=M) uniform atomic_uint ac;`
+        // → GLSLVar isAtomicCounter. Binding/offset bắt buộc (GLSL yêu cầu layout).
+        auto tryParseAtomic = [&](const std::string& t, GLSLVar& out) -> bool {
+            std::string s = Trim(t);
+            if (!s.empty() && s.back() == ';') s.pop_back();
+            s = Trim(s);
+            int binding = -1, offset = 0;
+            if (s.rfind("layout", 0) == 0) {
+                size_t lp = s.find('('), rp = s.find(')');
+                if (lp == std::string::npos || rp == std::string::npos || rp <= lp) return false;
+                std::string inside = s.substr(lp + 1, rp - lp - 1);
+                size_t bp = inside.find("binding");
+                if (bp != std::string::npos) {
+                    size_t eq = inside.find('=', bp);
+                    if (eq != std::string::npos) binding = atoi(inside.c_str() + eq + 1);
+                }
+                size_t op = inside.find("offset");
+                if (op != std::string::npos) {
+                    size_t eq = inside.find('=', op);
+                    if (eq != std::string::npos) offset = atoi(inside.c_str() + eq + 1);
+                }
+                s = Trim(s.substr(rp + 1));
+            }
+            // s phải là `uniform atomic_uint name`
+            std::istringstream iss(s);
+            std::vector<std::string> w; std::string tok;
+            while (iss >> tok) w.push_back(tok);
+            if (w.size() < 3 || w[0] != "uniform") return false;
+            // w[1] có thể là qualifier? atomic_uint không có readonly/writeonly.
+            // Kiểm tra w[1]=="atomic_uint", w[2]==name (hoặc w có precision qualifier).
+            size_t k = 1;
+            while (k < w.size() && (w[k] == "highp" || w[k] == "mediump" || w[k] == "lowp")) ++k;
+            if (k + 1 >= w.size() || w[k] != "atomic_uint") return false;
+            std::string aname = w[k + 1];
+            if (!aname.empty() && aname.back() == ';') aname.pop_back();
+            if (aname.find('[') != std::string::npos || k + 2 < w.size()) return false;
+            if (binding < 0) return false; // layout binding bắt buộc cho atomic
+            out.glslType = "atomic_uint"; out.name = aname;
+            out.isAtomicCounter = true; out.atomicBinding = binding; out.atomicOffset = offset;
+            out.mslType = "device atomic_uint*";
+            return true;
+        };
         // Hàng đợi xử lý: SplitTopLevel cắt theo `;` depth 0 nên `hàm...} decl;`
         // dính nhau; splitSegments bên dưới tách tiếp theo khối cân bằng.
         std::vector<std::string> queue;
@@ -2290,6 +2383,16 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     t.find("image") != std::string::npos && t.find('{') == std::string::npos &&
                     tryParseImage(t, iv)) {
                     R.images.push_back(iv);
+                    continue;
+                }
+            }
+            // P9 atomic: `layout(binding,offset) uniform atomic_uint ac;`.
+            {
+                GLSLVar av;
+                if ((t.rfind("layout", 0) == 0 || t.rfind("uniform", 0) == 0) &&
+                    t.find("atomic_uint") != std::string::npos && t.find('{') == std::string::npos &&
+                    tryParseAtomic(t, av)) {
+                    R.atomicCounters.push_back(av);
                     continue;
                 }
             }
@@ -3357,6 +3460,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         }
         std::string err;
         if (!RewriteImageCalls(body, itab, err)) return fail(err);
+        // P9 atomic counters: rewrite atomicCounter* → MSL atomics.
+        {
+            std::vector<std::string> anames;
+            for (auto& ac : R.atomicCounters) anames.push_back(ac.name);
+            if (!RewriteAtomicCalls(body, anames, err)) return fail(err);
+        }
         // Strip main khỏi rest → helpersOnly, rồi check image trong helper.
         std::string helpersOnly = rest;
         {
@@ -3803,6 +3912,30 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         for (auto& f : ssboFlat)
             blockParams += ",\n    device " + f.type + "* " + f.param +
                            " [[buffer(" + std::to_string(f.slot) + ")]]";
+        // P9 atomic counters: device atomic_uint* tại buffer slot.
+        // Compute: sau SSBOs (0+). Graphics (không SSBO): slot 24+ (tránh vertex 0-15,
+        // uniforms 16, UBO 17+; fail nếu vượt 30).
+        {
+            int baseSlot = 0;
+            if (!R.isCompute) {
+                baseSlot = 24;
+            } else {
+                int ssboCnt = (int)ssboFlat.size();
+                for (size_t bi = 0; bi < blocks.size(); ++bi)
+                    if (blocks[bi].isStorage && ssboSlot[bi] != -1) ++ssboCnt;
+                baseSlot = ssboCnt;
+            }
+            for (size_t k = 0; k < R.atomicCounters.size(); ++k) {
+                int slot = baseSlot + (int)k;
+                if (slot > 30 || (!R.isCompute && slot < 24)) return fail("atomic counter slot ngoài phạm vi");
+                if (R.isCompute && slot > 15) return fail("atomic counter vượt slot compute (0..15)");
+                blockParams += ",\n    device atomic_uint* " + R.atomicCounters[k].name +
+                               " [[buffer(" + std::to_string(slot) + ")]]";
+                R.atomicSlots.push_back({R.atomicCounters[k].name,
+                                         R.atomicCounters[k].atomicBinding,
+                                         R.atomicCounters[k].atomicOffset, slot});
+            }
+        }
     }
     // Khai báo texture/sampler params (index theo thứ tự khai báo sampler).
     // Buffer sampler (CloudFaces): texture2d<elem> KHÔNG sampler (chỉ .read).

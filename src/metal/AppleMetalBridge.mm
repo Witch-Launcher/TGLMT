@@ -312,6 +312,13 @@ public:
         if (!ab) return;
         [enc_ setBuffer:ab->get() offset:0 atIndex:idx];
     }
+    // P9: offset cho atomic counter (layout(offset) trong buffer).
+    void setBuffer(IBuffer* b, uint32_t idx, size_t offset) override {
+        if (!enc_ || !b) return;
+        AppleBuffer* ab = dynamic_cast<AppleBuffer*>(b);
+        if (!ab) return;
+        [enc_ setBuffer:ab->get() offset:(NSUInteger)offset atIndex:idx];
+    }
     void dispatch2D(uint32_t w, uint32_t h) override {
         if (!enc_) return;
         MTLSize grid = {(NSUInteger)(w ? w : 1), (NSUInteger)(h ? h : 1), 1};

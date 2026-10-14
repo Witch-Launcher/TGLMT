@@ -128,6 +128,17 @@ static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
         }
         if (b) enc->setBuffer(b, (uint32_t)bs.slot);
     }
+    // P9 atomic counters: bind atomicBindPoints[binding] → buffer(slot) + offset(layout).
+    for (auto& as : pr.computeAtomics) {
+        metal::IBuffer* b = nullptr;
+        auto it = c.atomicBindPoints.find((GLuint)as.binding);
+        if (it != c.atomicBindPoints.end()) b = BufOf(c, it->second.buffer);
+        if (!b) {
+            c.LogDebug(0, 0, 0, 0, "glDispatchCompute: atomic unbound, zero fallback");
+            b = zero.get();
+        }
+        if (b) enc->setBuffer(b, (uint32_t)as.slot, (size_t)as.offset);
+    }
     // Texture + sampler: computeSamplers theo thứ tự khai báo = texture/sampler slot k.
     auto ssDef = DefSampler(c);
     auto black = BlackTex(c);

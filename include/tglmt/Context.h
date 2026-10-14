@@ -225,6 +225,12 @@ struct ProgramObject {
     // Binding = layout binding, hoặc samplerUnits[tên] nếu layout không có.
     struct ImageSlot { std::string name; int slot; int binding; };
     std::vector<ImageSlot> vsImages, fsImages, computeImages;
+    // P9 atomic counters: (tên, binding, offset, buffer slot) cho compute dispatch.
+    // Slot = ssboCnt + index (sau SSBOs, tránh 16/uniforms và 17+/UBO).
+    struct AtomicSlot { std::string name; int binding; int offset; int slot; };
+    std::vector<AtomicSlot> computeAtomics;
+    // P9 graphics atomics: vs/fs riêng (slot 24+, tránh vertex/uniform/UBO).
+    std::vector<AtomicSlot> vsAtomics, fsAtomics;
     std::unordered_map<std::string, GLuint> attribBind; // glBindAttribLocation (trước link)
     std::unordered_map<std::string, GLint> attribLoc;   // location sau link
     // Sampler mapping (fix unit vs MSL slot): tên sampler theo thứ tự khai báo
@@ -339,6 +345,9 @@ public:
     // A11: upload shadow + bind Metal buffer(17+k) mỗi draw (xem AppleDrawGL).
     std::unordered_map<GLuint, BufferRange> uniformBindPoints;
     std::unordered_map<GLuint, BufferRange> storageBindPoints;
+    // P9 atomic counter binding: binding → buffer (GL_ATOMIC_COUNTER_BUFFER).
+    // Offset trong buffer lấy từ layout(offset) của shader (không phải từ bind).
+    std::unordered_map<GLuint, BufferRange> atomicBindPoints;
     // P6g image binding: unit → (texture, level, layered, layer, access, format).
     // glBindImageTexture ghi; dispatch/draw bind texture vào image slot.
     struct ImageBind { GLuint texture = 0; GLint level = 0; GLboolean layered = 0;

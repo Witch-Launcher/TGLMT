@@ -88,6 +88,19 @@ int main() {
             "void main(){ imageAtomicAdd(img, ivec2(0), 1u); }"), false},
         {"img_cube_neg", FS,
          CS("layout(rgba8, binding=0) uniform imageCube img;\nout vec4 c;\nvoid main(){ c=vec4(1); }"), false},
+        // --- P9 atomic counters: atomic_uint + Increment/Decrement/Get → MSL ---
+        {"atomic_inc", CMP,
+         CS("layout(local_size_x=8) in;\n"
+            "layout(binding=0, offset=0) uniform atomic_uint ac;\n"
+            "layout(std430,binding=0) buffer B{uint v[];};\n"
+            "void main(){ v[gl_GlobalInvocationID.x]=atomicCounterIncrement(ac); }"), true},
+        {"atomic_dec_get", CMP,
+         CS("layout(local_size_x=8) in;\n"
+            "layout(binding=0, offset=0) uniform atomic_uint ac;\n"
+            "layout(std430,binding=0) buffer B{uint v[];};\n"
+            "void main(){ atomicCounterDecrement(ac); v[0]=atomicCounterGet(ac); }"), true},
+        {"atomic_nolayout_neg", CMP,
+         CS("layout(local_size_x=8) in;\nuniform atomic_uint ac;\nvoid main(){ }"), false},
     };
 
     int fail = 0;

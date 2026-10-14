@@ -1656,6 +1656,28 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (!gpu) gpu = FallbackBlackTex(c).get();
         if (gpu) enc->setFragmentTexture(gpu, (uint32_t)isl.slot);
     }
+    // P9 atomic counters: bind atomicBindPoints[binding] → buffer(slot) + offset.
+    // Vertex images → setVertexBuffer; fragment → setFragmentBuffer (đều có offset).
+    auto bindAtomic = [&](const ProgramObject::AtomicSlot& as, bool isVS) {
+        metal::IBuffer* b = nullptr;
+        size_t off = (size_t)as.offset;
+        auto it = c.atomicBindPoints.find((GLuint)as.binding);
+        if (it != c.atomicBindPoints.end() && it->second.buffer) {
+            auto bit = c.buffers.find(it->second.buffer);
+            if (bit != c.buffers.end() && bit->second.gpu) b = bit->second.gpu.get();
+        }
+        if (!b) {
+            // Unbound → zero fallback (giống SSBO/UBO).
+            auto zb = FallbackZeroBuf(c);
+            if (zb) b = zb.get();
+            off = 0;
+        }
+        if (!b) return;
+        if (isVS) enc->setVertexBuffer(b, off, (uint32_t)as.slot);
+        else enc->setFragmentBuffer(b, off, (uint32_t)as.slot);
+    };
+    for (auto& as : pr.vsAtomics) bindAtomic(as, true);
+    for (auto& as : pr.fsAtomics) bindAtomic(as, false);
     // Tương thích ngược: program cũ không có sampler list (link trước fix) → bind legacy theo unit
     if (pr.fsSamplers.empty() && pr.vsSamplers.empty()) {
         for (GLuint unit = 0; unit < 32; ++unit) {
