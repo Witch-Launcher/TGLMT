@@ -209,6 +209,12 @@ struct ProgramObject {
     std::vector<UniformEntry> uniformLayout;
     size_t vsUBSize = 0, fsUBSize = 0;
     std::shared_ptr<metal::ILibrary> appleVS, appleFS;
+    // P6f compute: library + pipeline + localSize (từ layout(local_size) converter).
+    std::shared_ptr<metal::ILibrary> appleCS;
+    std::shared_ptr<metal::IComputePipeline> appleCSPipeline;
+    int computeLocalSize[3] = {1, 1, 1};
+    // Map block → MSL buffer slot (bindingPoint → slot) cho compute dispatch bind.
+    std::vector<GLSLConvertResult::BlockSlot> computeBlockSlots;
     std::unordered_map<std::string, GLuint> attribBind; // glBindAttribLocation (trước link)
     std::unordered_map<std::string, GLint> attribLoc;   // location sau link
     // Sampler mapping (fix unit vs MSL slot): tên sampler theo thứ tự khai báo

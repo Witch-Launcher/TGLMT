@@ -245,6 +245,13 @@ public:
     virtual void setTexture(ITexture* t, uint32_t idx) { (void)t; (void)idx; }
     virtual void setBuffer(IBuffer* b, uint32_t idx) { (void)b; (void)idx; }
     virtual void dispatch2D(uint32_t w, uint32_t h) { (void)w; (void)h; }
+    // P6f: dispatch 3D với threadsPerThreadgroup từ layout(local_size) của compute shader.
+    // Default → dispatch2D (tg 8x8x1) cho backend không override.
+    virtual void dispatch3D(uint32_t gx, uint32_t gy, uint32_t gz,
+                            uint32_t tx, uint32_t ty, uint32_t tz) {
+        (void)gz; (void)tx; (void)ty; (void)tz;
+        dispatch2D(gx, gy);
+    }
     virtual bool endAndCommit() { return false; }
 };
 

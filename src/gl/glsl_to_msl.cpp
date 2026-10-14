@@ -2943,11 +2943,14 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 if (mn.find('.') != std::string::npos) return fail("SSBO unsized-array có instance ngoài subset");
                 ssboFlat.push_back({b.members[0].mslType, mn, ssboBase + ssboCnt});
                 if (ssboBase + ssboCnt > 15) return fail("SSBO vượt slot compute (0..15, max 30)");
+                R.blockSlots.push_back({b.binding, ssboBase + ssboCnt, true, b.name});
                 ++ssboCnt;
                 continue; // member name = param name → không cần mpShared (identity)
             }
             if (ssboBase + ssboCnt > 15) return fail("SSBO vượt slot compute (0..15, max 30)");
-            ssboSlot[bi] = ssboBase + ssboCnt++;
+            ssboSlot[bi] = ssboBase + ssboCnt;
+            R.blockSlots.push_back({b.binding, ssboBase + ssboCnt, true, b.name});
+            ++ssboCnt;
             std::string inst;
             for (auto& m : b.members) {
                 size_t dot = m.name.find('.');
@@ -2962,6 +2965,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             continue;
         }
         ++uboCnt;
+        R.blockSlots.push_back({b.binding, 17 + uboCnt - 1, false, b.name});
         std::string inst;
         for (auto& m : b.members) {
             size_t dot = m.name.find('.');

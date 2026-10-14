@@ -72,6 +72,8 @@ void glLinkProgram(GLuint p) {
     pr.linked = false; pr.infoLog.clear();
     pr.uniformLayout.clear();
     pr.attribLoc.clear(); pr.appleVS.reset(); pr.appleFS.reset();
+    pr.appleCS.reset(); pr.appleCSPipeline.reset(); pr.computeMSL.clear();
+    pr.computeBlockSlots.clear();
     pr.vsUBSize = pr.fsUBSize = 0;
     ShaderObject *vs = nullptr, *fs = nullptr;
     bool hasV = false, hasF = false;
@@ -82,14 +84,41 @@ void glLinkProgram(GLuint p) {
         if (!its->second.compiled) { pr.infoLog = "error: shader not compiled"; return; }
         if (its->second.type == 0x8B31) { hasV = true; vs = &its->second; pr.vertexMSL = vs->msl; }
         if (its->second.type == 0x8B30) { hasF = true; fs = &its->second; pr.fragmentMSL = fs->msl; }
-        if (its->second.type == 0x91B9) pr.computeMSL = its->second.msl; // COMPUTE_SHADER
+        if (its->second.type == 0x91B9) { // COMPUTE_SHADER
+            pr.computeMSL = its->second.msl;
+            pr.computeLocalSize[0] = its->second.conv.localSize[0];
+            pr.computeLocalSize[1] = its->second.conv.localSize[1];
+            pr.computeLocalSize[2] = its->second.conv.localSize[2];
+            pr.computeBlockSlots = its->second.conv.blockSlots;
+        }
         if (its->second.type == 0x8E88 || its->second.type == 0x8E87) // TCS/TES
             pr.hasTessStages = true;
         if (its->second.type == 0x8DD9) // GEOMETRY_SHADER: Metal không native → cờ fallback
             pr.hasGeometryStage = true;
     }
     if (pr.shaders.empty()) { pr.infoLog = "error: no shaders attached"; return; }
-    if (!pr.computeMSL.empty()) { pr.linked = true; return; } // compute program
+    if (!pr.computeMSL.empty()) {
+        // P6f: compute program — biên dịch MTLLibrary + tạo compute pipeline ngay
+        // tại link (lỗi → link fail thật, đúng cam kết advertise ⇔ implement).
+        if (c.device && !c.device->isNull()) {
+            std::string err;
+            pr.appleCS = c.device->compileLibrary(pr.computeMSL, err);
+            if (!pr.appleCS) {
+                pr.linked = false;
+                pr.infoLog = "error: MSL compute compile: " + err + "\n--- MSL head ---\n" +
+                             pr.computeMSL.substr(0, 1200);
+                return;
+            }
+            pr.appleCSPipeline = c.device->makeComputePipeline(pr.appleCS.get(), "TGLMT_cs");
+            if (!pr.appleCSPipeline) {
+                pr.linked = false;
+                pr.infoLog = "error: compute pipeline create failed (TGLMT_cs)";
+                return;
+            }
+        }
+        pr.linked = true;
+        return;
+    }
     if (!hasV) { pr.infoLog = "error: graphics program needs vertex shader"; return; }
     // Snapshot conv: Blaze3D gắn CÙNG ShaderObject vào NHIỀU program (và có thể
     // relink). Link cũ mutate vs->conv/fs->conv tại chỗ (900→0) trong khi MSL

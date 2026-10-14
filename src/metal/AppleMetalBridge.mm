@@ -312,6 +312,14 @@ public:
         MTLSize tg = {8, 8, 1};
         [enc_ dispatchThreads:grid threadsPerThreadgroup:tg];
     }
+    // P6f: threadsPerThreadgroup từ layout(local_size_x/y/z) của compute shader.
+    void dispatch3D(uint32_t gx, uint32_t gy, uint32_t gz,
+                    uint32_t tx, uint32_t ty, uint32_t tz) override {
+        if (!enc_) return;
+        MTLSize grid = {(NSUInteger)(gx ? gx : 1), (NSUInteger)(gy ? gy : 1), (NSUInteger)(gz ? gz : 1)};
+        MTLSize tg = {(NSUInteger)(tx ? tx : 1), (NSUInteger)(ty ? ty : 1), (NSUInteger)(tz ? tz : 1)};
+        [enc_ dispatchThreads:grid threadsPerThreadgroup:tg];
+    }
     bool endAndCommit() override {
         if (!enc_ || !cb_) return false;
         [enc_ endEncoding];

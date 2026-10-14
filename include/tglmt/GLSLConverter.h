@@ -80,6 +80,11 @@ struct GLSLConvertResult {
     // `layout(local_size_x/y/z) in;` — backend cần để dispatch threadsPerThreadgroup.
     bool isCompute = false;
     int localSize[3] = {1, 1, 1};
+    // P6f backend: map block → MSL buffer slot. GL bind theo bindingPoint
+    // (glBindBufferBase), converter gán slot theo thứ tự khai báo → backend
+    // cần bảng này để bind storageBindPoints[binding] → buffer(slot).
+    struct BlockSlot { int binding; int slot; bool isStorage; std::string name; };
+    std::vector<BlockSlot> blockSlots;
 };
 
 // Convert 1 shader stage. stage = 0x8B31 (VERTEX) hoặc 0x8B30 (FRAGMENT).
