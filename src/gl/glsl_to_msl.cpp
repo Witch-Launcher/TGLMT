@@ -867,8 +867,244 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             std::string bias = args.size() == 3 ? ", float(" + args[2] + ")" : "";
             // vec4 → xy/w (GL spec; vanilla end_portal chỉ dùng vec4, w luôn != 0
             // vì là clip w nên chia trực tiếp, không guard để giữ đúng GL).
+            // vec3 → chia /z, vec4 → /w (GLSL textureProj). Phát hiện qua literal
+            // `vec3(`/`vec4(`; biến không rõ → mặc định /w (vec4, đúng end_portal).
+            bool isVec3 = coord.rfind("vec3(", 0) == 0;
             out += sname + "_tex.sample(" + sname + "_smp, float2((" + coord + ").xy / (" +
-                   coord + ").w)" + bias + ")";
+                   coord + ")." + (isVec3 ? "z" : "w") + ")" + bias + ")";
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- textureSize(sampler, lod) → get_width/get_height ----
+    // Đã kiểm chứng MSL: get_width(uint)/get_height(uint) compile thật.
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "textureSize")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 11);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "textureSize(...) ngoặc không cân bằng"; return false; }
+            if (args.size() != 2) { err = "textureSize cần (sampler, lod)"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "textureSize sampler không khai báo: " + sname; return false; }
+            std::string lod = "uint(" + args[1] + ")";
+            std::string tn = sname + "_tex";
+            std::string rep;
+            if (sv.kind == 'B' || sv.kind == 'I' || sv.kind == 'U') {
+                rep = "int(" + tn + ".get_width())"; // buffer: chỉ width
+            } else if (sv.kind == 'A') {
+                // array: ivec3(w,h,array_size)
+                rep = "int3(int(" + tn + ".get_width(" + lod + ")), int(" + tn +
+                      ".get_height(" + lod + ")), int(" + tn + ".get_array_size()))";
+            } else if (sv.kind == 'C' || sv.kind == '2' || sv.kind == 'S') {
+                rep = "int2(int(" + tn + ".get_width(" + lod + ")), int(" + tn +
+                      ".get_height(" + lod + ")))";
+            } else {
+                err = "textureSize không hỗ trợ sampler kind cho " + sname;
+                return false;
+            }
+            out += rep;
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- textureGather(sampler, comp[, offset]) → .gather() ----
+    // MSL: t.gather(smp, uv[, int2 offset]) — đã kiểm chứng compile thật.
+    // GLSL gather(s, P, comp): comp là component index; Metal gather luôn lấy
+    // 4 texel quanh P (tương ứng comp=0..3 qua swizzle sau). Giữ gather nguyên
+    // (comp!=0罕见) — nếu comp!=0 sẽ swizzle kết quả theo comp.
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "textureGather")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 13);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "textureGather(...) ngoặc không cân bằng"; return false; }
+            if (args.size() < 2 || args.size() > 4) { err = "textureGather cần (sampler, uv[, comp[, offset]])"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "textureGather sampler không khai báo: " + sname; return false; }
+            if (sv.kind == 'B' || sv.kind == 'I' || sv.kind == 'U') {
+                err = "textureGather trên buffer sampler: " + sname;
+                return false;
+            }
+            std::string tn = sname + "_tex", sn = sname + "_smp";
+            std::string uv = "float2(" + args[1] + ")";
+            std::string comp = "";
+            std::string off = "";
+            if (args.size() >= 3) comp = Trim(args[2]);
+            if (args.size() == 4) off = ", int2(" + Trim(args[3]) + ")";
+            else if (args.size() == 3 && comp.find_first_not_of("0123456789") == std::string::npos) {
+                // 3 args: (s, uv, comp) — comp là số
+            }
+            std::string rep = tn + ".gather(" + sn + ", " + uv + off + ")";
+            // comp != 0: swizzle kết quả (Metal gather lấy component 0 mặc định)
+            if (!comp.empty() && comp != "0") {
+                const char* comps[4] = {"x", "y", "z", "w"};
+                int ci = atoi(comp.c_str());
+                if (ci >= 0 && ci < 4) rep = "(" + rep + ")." + comps[ci];
+                else { err = "textureGather comp phải hằng số 0..3: " + comp; return false; }
+            }
+            out += rep;
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- textureOffset(sampler, uv, offset[, bias]) → sample + int2 offset ----
+    // MSL: t.sample(smp, uv, int2 offset[, bias]) — đã kiểm chứng compile thật.
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "textureOffset")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 13);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "textureOffset(...) ngoặc không cân bằng"; return false; }
+            if (args.size() != 3 && args.size() != 4) { err = "textureOffset cần (sampler, uv, offset[, bias])"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "textureOffset sampler không khai báo: " + sname; return false; }
+            if (sv.kind == 'B' || sv.kind == 'I' || sv.kind == 'U') { err = "textureOffset trên buffer: " + sname; return false; }
+            std::string tn = sname + "_tex", sn = sname + "_smp";
+            std::string uv = sv.kind == 'S' ? "float2((" + args[1] + ").xy)" : "float2(" + args[1] + ")";
+            // MSL: sample(s, coord, bias, offset) — bias đứng TRƯỚC offset.
+            std::string bias = args.size() == 4 ? ", bias(float(" + args[3] + "))" : "";
+            out += tn + ".sample(" + sn + ", " + uv + bias + ", int2(" + args[2] + "))";
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- texelFetchOffset(sampler, coord, lod, offset) → read + offset cộng tay ----
+    // MSL .read không có offset; GLSL texelFetchOffset = fetch tại coord+offset
+    // → read(uint2(coord+offset), lod) — đúng GL (đã kiểm chứng read(uint2,uint) thật).
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "texelFetchOffset")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 16);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "texelFetchOffset(...) ngoặc không cân bằng"; return false; }
+            if (args.size() != 4) { err = "texelFetchOffset cần (sampler, coord, lod, offset)"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "texelFetchOffset sampler không khai báo: " + sname; return false; }
+            std::string tn = sname + "_tex";
+            out += tn + ".read(uint2((" + args[1] + ") + (" + args[3] + ")), uint(" + args[2] + "))";
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- textureLodOffset(sampler, uv, lod, offset) → sample + level + offset ----
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "textureLodOffset")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 16);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "textureLodOffset(...) ngoặc không cân bằng"; return false; }
+            if (args.size() != 4) { err = "textureLodOffset cần (sampler, uv, lod, offset)"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "textureLodOffset sampler không khai báo: " + sname; return false; }
+            if (sv.kind != '2' && sv.kind != 'S') { err = "textureLodOffset chỉ hỗ trợ sampler2D/Shadow: " + sname; return false; }
+            std::string tn = sname + "_tex", sn = sname + "_smp";
+            out += tn + ".sample(" + sn + ", float2(" + args[1] + "), level(float(" + args[2] +
+                   ")), int2(" + args[3] + "))";
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- textureGradOffset(sampler, uv, dPdx, dPdy, offset) → sample + gradient + offset ----
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "textureGradOffset")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 17);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "textureGradOffset(...) ngoặc không cân bằng"; return false; }
+            if (args.size() != 5) { err = "textureGradOffset cần (sampler, uv, dPdx, dPdy, offset)"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "textureGradOffset sampler không khai báo: " + sname; return false; }
+            if (sv.kind != '2') { err = "textureGradOffset chỉ hỗ trợ sampler2D"; return false; }
+            std::string tn = sname + "_tex", sn = sname + "_smp";
+            out += tn + ".sample(" + sn + ", float2(" + args[1] + "), gradient2d(float2(" + args[2] +
+                   "), float2(" + args[3] + ")), int2(" + args[4] + "))";
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- textureGatherOffset(sampler, uv, offset[, comp]) → gather + int2 offset ----
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "textureGatherOffset")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 19);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "textureGatherOffset(...) ngoặc không cân bằng"; return false; }
+            if (args.size() < 3 || args.size() > 4) { err = "textureGatherOffset cần (sampler, uv, offset[, comp])"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "textureGatherOffset sampler không khai báo: " + sname; return false; }
+            if (sv.kind == 'B' || sv.kind == 'I' || sv.kind == 'U') { err = "textureGatherOffset trên buffer: " + sname; return false; }
+            std::string tn = sname + "_tex", sn = sname + "_smp";
+            std::string rep = tn + ".gather(" + sn + ", float2(" + args[1] + "), int2(" + args[2] + "))";
+            if (args.size() == 4) {
+                std::string comp = Trim(args[3]);
+                if (comp != "0" && comp.find_first_not_of("0123456789") == std::string::npos) {
+                    const char* comps[4] = {"x", "y", "z", "w"};
+                    int ci = atoi(comp.c_str());
+                    if (ci >= 0 && ci < 4) rep = "(" + rep + ")." + comps[ci];
+                }
+            }
+            out += rep;
+            i = k + 1;
+        }
+        body = out;
+    }
+    // ---- textureProjLod(sampler, coord, lod) → proj chia tay + sample level ----
+    {
+        std::string out;
+        size_t i = 0;
+        while (i < body.size()) {
+            if (!isHead(i, "textureProjLod")) { out += body[i]; ++i; continue; }
+            size_t lp = body.find('(', i + 14);
+            if (lp == std::string::npos) { out += body.substr(i); break; }
+            std::vector<std::string> args;
+            size_t k = 0;
+            if (!splitArgs(lp, k, args)) { err = "textureProjLod(...) ngoặc không cân bằng"; return false; }
+            if (args.size() != 3) { err = "textureProjLod cần (sampler, coord, lod)"; return false; }
+            std::string sname = Trim(args[0]);
+            SampEntry sv;
+            if (!findSamp(sname, sv)) { err = "textureProjLod sampler không khai báo: " + sname; return false; }
+            if (sv.kind != '2') { err = "textureProjLod chỉ hỗ trợ sampler2D"; return false; }
+            std::string coord = Trim(args[1]);
+            bool isVec3 = coord.rfind("vec3(", 0) == 0;
+            std::string tn = sname + "_tex", sn = sname + "_smp";
+            out += tn + ".sample(" + sn + ", float2((" + coord + ").xy / (" + coord + ")." +
+                   (isVec3 ? "z" : "w") + "), level(float(" + args[2] + ")))";
             i = k + 1;
         }
         body = out;
@@ -2647,6 +2883,31 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // `tglmt_radians(...)`).
     mpShared.emplace_back("radians", "tglmt_radians");
     mpShared.emplace_back("degrees", "tglmt_degrees");
+    // ---- Bitcast GLSL → MSL as_type<> (đã kiểm chứng metal thật compile) ----
+    // floatBitsToInt(x) → as_type<int>(x): RewriteIdents thay identifier, ngoặc
+    // (x) giữ nguyên → as_type<int>(x). Đúng.
+    mpShared.emplace_back("floatBitsToInt", "as_type<int>");
+    mpShared.emplace_back("floatBitsToUint", "as_type<uint>");
+    mpShared.emplace_back("intBitsToFloat", "as_type<float>");
+    mpShared.emplace_back("uintBitsToFloat", "as_type<float>");
+    // ---- pack/unpack GLSL → MSL pack_float_to_* / unpack_*_to_float ----
+    // (đã kiểm chứng: pack_float_to_unorm2x16/snorm2x16/unorm4x8 + unpack
+    //  _to_float compile thật; vecN→floatN nhờ type map cùng pass RewriteIdents)
+    mpShared.emplace_back("packUnorm2x16", "pack_float_to_unorm2x16");
+    mpShared.emplace_back("unpackUnorm2x16", "unpack_unorm2x16_to_float");
+    mpShared.emplace_back("packSnorm2x16", "pack_float_to_snorm2x16");
+    mpShared.emplace_back("unpackSnorm2x16", "unpack_snorm2x16_to_float");
+    mpShared.emplace_back("packUnorm4x8", "pack_float_to_unorm4x8");
+    mpShared.emplace_back("unpackUnorm4x8", "unpack_unorm4x8_to_float");
+    // ---- bitfield GLSL → MSL (MSL extract/insert_bits nhận int arg thật) ----
+    mpShared.emplace_back("bitfieldReverse", "reverse_bits");
+    mpShared.emplace_back("bitfieldExtract", "extract_bits");
+    mpShared.emplace_back("bitfieldInsert", "insert_bits");
+    // ---- findLSB/findMSB/packHalf2x16 → helper prelude (cần bọc arg) ----
+    mpShared.emplace_back("findLSB", "tglmt_findLSB");
+    mpShared.emplace_back("findMSB", "tglmt_findMSB");
+    mpShared.emplace_back("packHalf2x16", "tglmt_packHalf2x16");
+    mpShared.emplace_back("unpackHalf2x16", "tglmt_unpackHalf2x16");
     // mp gộp cho main body = vary + shared (helpers chỉ dùng shared).
     mp.insert(mp.end(), mpVary.begin(), mpVary.end());
     mp.insert(mp.end(), mpShared.begin(), mpShared.end());
@@ -2822,12 +3083,40 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                       (rest.find("tglmt_degrees") != std::string::npos);
         bool useM2 = (body.find("tglmt_mat4_from_mat2") != std::string::npos) ||
                      (rest.find("tglmt_mat4_from_mat2") != std::string::npos);
+        bool useFLSB = (body.find("tglmt_findLSB") != std::string::npos) ||
+                       (rest.find("tglmt_findLSB") != std::string::npos);
+        bool useFMSB = (body.find("tglmt_findMSB") != std::string::npos) ||
+                       (rest.find("tglmt_findMSB") != std::string::npos);
+        bool usePH = (body.find("tglmt_packHalf2x16") != std::string::npos) ||
+                     (rest.find("tglmt_packHalf2x16") != std::string::npos);
+        bool useUPH = (body.find("tglmt_unpackHalf2x16") != std::string::npos) ||
+                      (rest.find("tglmt_unpackHalf2x16") != std::string::npos);
         if (useRad)
             msl_out << "float tglmt_radians(float d) { return d * 0.017453292519943295f; }\n";
         if (useDeg)
             msl_out << "float tglmt_degrees(float r) { return r * 57.29577951308232f; }\n";
         if (useM2)
             msl_out << "float4x4 tglmt_mat4_from_mat2(float2x2 m) { return float4x4(float4(m[0], 0.0, 0.0), float4(m[1], 0.0, 0.0), float4(0.0, 0.0, 1.0, 0.0), float4(0.0, 0.0, 0.0, 1.0)); }\n";
+        // findLSB = ctz (bit 0 thấp nhất đang set); findMSB = 31-clz (bit cao
+        // nhất đang set). uint/int overload — đã kiểm chứng ctz/clz compile thật.
+        if (useFLSB) {
+            msl_out << "int tglmt_findLSB(int x) { return int(ctz(uint(x))); }\n";
+            msl_out << "uint tglmt_findLSB(uint x) { return ctz(x); }\n";
+        }
+        if (useFMSB) {
+            msl_out << "int tglmt_findMSB(int x) { return int(31u - clz(uint(x))); }\n";
+            msl_out << "uint tglmt_findMSB(uint x) { return 31u - clz(x); }\n";
+        }
+        // packHalf2x16: float→half (round) rồi ghép 2×16bit. MSL không có pack
+        // half → dùng as_type<ushort>(half) lấy bit half (đã kiểm chứng thật).
+        if (usePH)
+            msl_out << "uint tglmt_packHalf2x16(float2 v) { half2 h = half2(v.x, v.y);"
+                       " ushort ux = as_type<ushort>(h.x); ushort uy = as_type<ushort>(h.y);"
+                       " return uint(ux) | (uint(uy) << 16); }\n";
+        if (useUPH)
+            msl_out << "float2 tglmt_unpackHalf2x16(uint x) { ushort ux = ushort(x & 0xFFFFu);"
+                       " ushort uy = ushort(x >> 16); half hx = as_type<half>(ux);"
+                       " half hy = as_type<half>(uy); return float2(float(hx), float(hy)); }\n";
     }
     if (R.isVertex) {
         msl_out << "struct TGLMT_VIn {\n";
