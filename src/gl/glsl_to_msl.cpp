@@ -2779,6 +2779,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // trước mọi return vertex (kể cả return sớm). ZERO_TO_ONE cần recompile (log ở link).
     const std::string kZConv = " _out.position.z = _out.position.z * 0.5 + _out.position.w * 0.5;";
     bool isMRT = !R.isVertex && outs.size() > 1;
+    // P6d: gl_* builtin cần param stage riêng (đã kiểm chứng metal thật).
+    // Local (không thêm vào public struct) — detect trước, emit param ở assembly.
+    bool useStencilRef = false, useSampleID = false, useSamplePos = false;
+    bool useBaseInstance = false, useFragDepth = false, useSampleMask = false;
     if (R.isVertex) {
         for (auto& a : ins) mpVary.emplace_back(a.name, "_in." + a.name);
         for (auto& v : outs) mpVary.emplace_back(v.name, "_out." + v.name);
@@ -2791,6 +2795,15 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (body.find("gl_VertexID") != std::string::npos) R.usesVertexID = true;
         mpVary.emplace_back("gl_InstanceID", "tglmt_instanceID");
         if (body.find("gl_InstanceID") != std::string::npos) R.usesInstanceID = true;
+        // gl_BaseInstance: MSL [[base_instance]] (đã kiểm chứng vertex compile thật).
+        if (body.find("gl_BaseInstance") != std::string::npos) {
+            useBaseInstance = true;
+            mpVary.emplace_back("gl_BaseInstance", "tglmt_baseInstance");
+        }
+        // gl_DrawID: Metal Intel không có [[draw_index]] (probe: unknown attr) →
+        // fail trung thực tại convert thay vì lỗi MSL mơ hồ ở link.
+        if (body.find("gl_DrawID") != std::string::npos)
+            return fail("gl_DrawID ngoài subset (Metal không có [[draw_index]])");
     } else {
         for (auto& v : ins) mpVary.emplace_back(v.name, "_in." + v.name);
         mpVary.emplace_back("gl_PointCoord", "tglmt_pointCoord");
@@ -2803,6 +2816,28 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         // 2026-09-28: 8 pipeline entity_*). Chỉ fragment mới có front-facing.
         mpVary.emplace_back("gl_FrontFacing", "tglmt_frontFacing");
         if (body.find("gl_FrontFacing") != std::string::npos) R.usesFrontFacing = true;
+        // P6d fragment input builtins (param stage, đã kiểm chứng metal thật).
+        if (body.find("gl_StencilRef") != std::string::npos) {
+            useStencilRef = true;
+            mpVary.emplace_back("gl_StencilRef", "tglmt_stencilRef");
+        }
+        if (body.find("gl_SampleID") != std::string::npos) {
+            useSampleID = true;
+            mpVary.emplace_back("gl_SampleID", "tglmt_sampleID");
+        }
+        if (body.find("gl_SamplePosition") != std::string::npos) {
+            useSamplePos = true;
+            mpVary.emplace_back("gl_SamplePosition", "tglmt_samplePosition");
+        }
+        // P6d fragment OUTPUT builtins (cần struct return với [[depth]/[sample_mask]]).
+        if (body.find("gl_FragDepth") != std::string::npos) {
+            useFragDepth = true;
+            mpVary.emplace_back("gl_FragDepth", "_out.depth"); // ghi thẳng vào struct out
+        }
+        if (body.find("gl_SampleMask") != std::string::npos) useSampleMask = true;
+        // gl_HelperInvocation: Metal Intel không có [[helper_invocation]] → fail rõ.
+        if (body.find("gl_HelperInvocation") != std::string::npos)
+            return fail("gl_HelperInvocation ngoài subset (Metal không có [[helper_invocation]])");
         if (isMRT) {
             for (auto& o : outs) mpVary.emplace_back(o.name, "_out.mrt" + std::to_string(o.location));
         } else if (legacyFrag) {
@@ -2908,6 +2943,37 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     mpShared.emplace_back("findMSB", "tglmt_findMSB");
     mpShared.emplace_back("packHalf2x16", "tglmt_packHalf2x16");
     mpShared.emplace_back("unpackHalf2x16", "tglmt_unpackHalf2x16");
+    // ---- Subgroup/invocation GLSL → MSL simdgroup (đã kiểm chứng metal thật,
+    //  chạy được cả fragment lẫn kernel). RewriteIdents khớp token đầy đủ nên
+    //  `subgroupBroadcast` không khớp nhầm `subgroupBroadcastFirst` (thứ tự无关).
+    mpShared.emplace_back("subgroupAdd", "simd_sum");
+    mpShared.emplace_back("subgroupMax", "simd_max");
+    mpShared.emplace_back("subgroupMin", "simd_min");
+    mpShared.emplace_back("subgroupAnd", "simd_and");
+    mpShared.emplace_back("subgroupOr", "simd_or");
+    mpShared.emplace_back("subgroupXor", "simd_xor");
+    mpShared.emplace_back("subgroupProduct", "simd_product");
+    mpShared.emplace_back("subgroupBroadcast", "simd_broadcast");
+    mpShared.emplace_back("subgroupShuffle", "simd_shuffle");
+    mpShared.emplace_back("subgroupShuffleXor", "simd_shuffle_xor");
+    mpShared.emplace_back("subgroupShuffleUp", "simd_shuffle_up");
+    mpShared.emplace_back("subgroupShuffleDown", "simd_shuffle_down");
+    mpShared.emplace_back("subgroupBroadcastFirst", "simd_broadcast_first");
+    mpShared.emplace_back("subgroupInclusiveAdd", "simd_prefix_inclusive_sum");
+    mpShared.emplace_back("subgroupExclusiveAdd", "simd_prefix_exclusive_sum");
+    mpShared.emplace_back("subgroupInclusiveMul", "simd_prefix_inclusive_product");
+    // elect(): GLSL chọn đúng 1 lane active; simd_is_first() = lane 0 (đúng khi
+    //  cả simdgroup active — trường hợp phổ biến). Ghi chú là xấp xỉ.
+    mpShared.emplace_back("subgroupElect", "simd_is_first");
+    // ballot/vote trả uvec4/bool → cần bọc qua prelude helper.
+    mpShared.emplace_back("subgroupBallot", "tglmt_subgroupBallot");
+    mpShared.emplace_back("ballotARB", "tglmt_subgroupBallot");
+    mpShared.emplace_back("subgroupAny", "tglmt_subgroupAny");
+    mpShared.emplace_back("subgroupAll", "tglmt_subgroupAll");
+    mpShared.emplace_back("anyInvocation", "tglmt_subgroupAny");
+    mpShared.emplace_back("allInvocation", "tglmt_subgroupAll");
+    mpShared.emplace_back("ballotBitCountARB", "tglmt_ballotBitCount");
+    mpShared.emplace_back("ballotBitCount", "tglmt_ballotBitCount");
     // mp gộp cho main body = vary + shared (helpers chỉ dùng shared).
     mp.insert(mp.end(), mpVary.begin(), mpVary.end());
     mp.insert(mp.end(), mpShared.begin(), mpShared.end());
@@ -2947,6 +3013,32 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             }
             nb += body.substr(i, p - i + 11);
             i = p + 11;
+        }
+        body = nb;
+    }
+    // gl_SampleMask[0] → _out.smask (trước RewriteIdents, bỏ `[0]` như gl_FragData).
+    // GLSL ghi mask bit 0..N-1 vào gl_SampleMask[0]; MSL [[sample_mask]] uint tương ứng.
+    if (!R.isVertex && useSampleMask) {
+        std::string nb;
+        size_t i = 0;
+        while (i < body.size()) {
+            size_t p = body.find("gl_SampleMask", i);
+            if (p == std::string::npos) { nb += body.substr(i); break; }
+            bool l = p > 0 && IsIdentChar(body[p - 1], false);
+            size_t b = body.find('[', p + 13);
+            size_t e2 = (b == std::string::npos) ? std::string::npos : body.find(']', b);
+            if (!l && b != std::string::npos && e2 != std::string::npos &&
+                atoi(body.substr(b + 1, e2 - b - 1).c_str()) == 0) {
+                nb += body.substr(i, p - i);
+                nb += "_out.smask";
+                i = e2 + 1;
+                continue;
+            }
+            // gl_SampleMask[N>0] ngoài subset (MSL chỉ có mask output duy nhất).
+            if (!l && b != std::string::npos && e2 != std::string::npos)
+                return fail("gl_SampleMask[N>0] ngoài subset");
+            nb += body.substr(i, p - i + 13);
+            i = p + 13;
         }
         body = nb;
     }
@@ -3117,6 +3209,26 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             msl_out << "float2 tglmt_unpackHalf2x16(uint x) { ushort ux = ushort(x & 0xFFFFu);"
                        " ushort uy = ushort(x >> 16); half hx = as_type<half>(ux);"
                        " half hy = as_type<half>(uy); return float2(float(hx), float(hy)); }\n";
+        // ---- Subgroup ballot/vote → MSL simd (đã kiểm chứng: simd_ballot trả
+        //  simd_vote, cast ulong = mask, .any()/.all() compile thật) ----
+        bool useBallot = (body.find("tglmt_subgroupBallot") != std::string::npos) ||
+                         (rest.find("tglmt_subgroupBallot") != std::string::npos);
+        bool useVote = (body.find("tglmt_subgroupAny") != std::string::npos) ||
+                       (rest.find("tglmt_subgroupAny") != std::string::npos) ||
+                       (body.find("tglmt_subgroupAll") != std::string::npos) ||
+                       (rest.find("tglmt_subgroupAll") != std::string::npos);
+        bool useBCnt = (body.find("tglmt_ballotBitCount") != std::string::npos) ||
+                       (rest.find("tglmt_ballotBitCount") != std::string::npos);
+        if (useBallot)
+            msl_out << "uint4 tglmt_subgroupBallot(bool cond) { ulong b = (ulong)simd_ballot(cond);"
+                       " return uint4(uint(b), uint(b >> 32), 0u, 0u); }\n";
+        if (useVote) {
+            msl_out << "bool tglmt_subgroupAny(bool cond) { return simd_ballot(cond).any(); }\n";
+            msl_out << "bool tglmt_subgroupAll(bool cond) { return simd_ballot(cond).all(); }\n";
+        }
+        if (useBCnt)
+            msl_out << "uint tglmt_ballotBitCount(uint4 b) { return popcount(b.x) + popcount(b.y)"
+                       " + popcount(b.z) + popcount(b.w); }\n";
     }
     if (R.isVertex) {
         msl_out << "struct TGLMT_VIn {\n";
@@ -3253,10 +3365,19 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     << " [[buffer(" << (17 + bi) << ")]]";
         if (R.usesVertexID) msl_out << ",\n    uint tglmt_vertexID [[vertex_id]]";
         if (R.usesInstanceID) msl_out << ",\n    uint tglmt_instanceID [[instance_id]]";
+        if (useBaseInstance) msl_out << ",\n    uint tglmt_baseInstance [[base_instance]]";
         msl_out << texParams << ") {\n  TGLMT_VOut _out = {};\n" << body << "\n" << kZConv << "\n  return _out;\n}\n";
-    } else if (isMRT) {
+    } else if (isMRT || useFragDepth || useSampleMask) {
+        // Fragment trả STRUCT khi: MRT, hoặc có output builtin depth/sample_mask.
+        // (gl_FragDepth → _out.depth; gl_SampleMask[0] → _out.smask.)
         msl_out << "struct TGLMT_FOut {\n";
-        for (auto& o : outs) msl_out << "  float4 mrt" << o.location << " [[color(" << o.location << ")]];\n";
+        if (isMRT) {
+            for (auto& o : outs) msl_out << "  float4 mrt" << o.location << " [[color(" << o.location << ")]];\n";
+        } else {
+            msl_out << "  float4 c [[color(0)]];\n";
+        }
+        if (useFragDepth) msl_out << "  float depth [[depth(any)]];\n";
+        if (useSampleMask) msl_out << "  uint smask [[sample_mask]];\n";
         msl_out << "};\n";
         msl_out << "fragment TGLMT_FOut TGLMT_fs(TGLMT_FIn _in [[stage_in]],\n"
                    "    constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
@@ -3266,8 +3387,15 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (R.usesPointCoord) msl_out << ",\n    float2 tglmt_pointCoord [[point_coord]]";
         if (R.usesFragCoord) msl_out << ",\n    float4 tglmt_fragCoord [[position]]";
         if (R.usesFrontFacing) msl_out << ",\n    bool tglmt_frontFacing [[front_facing]]";
-        msl_out << texParams << ") {\n  TGLMT_FOut _out = {};\n" << body
-                << "\n  return _out;\n}\n";
+        if (useStencilRef) msl_out << ",\n    uint tglmt_stencilRef [[stencil_ref]]";
+        if (useSampleID) msl_out << ",\n    uint tglmt_sampleID [[sample_id]]";
+        if (useSamplePos) msl_out << ",\n    float2 tglmt_samplePosition [[sample_position]]";
+        msl_out << texParams << ") {\n  TGLMT_FOut _out = {};\n";
+        // Single-out: body vẫn ghi vào tglmt_fragColor → ghi vào _out.c ở cuối.
+        if (!isMRT) msl_out << "  float4 tglmt_fragColor = float4(0.0);\n";
+        msl_out << body << "\n";
+        if (!isMRT) msl_out << "  _out.c = tglmt_fragColor;\n";
+        msl_out << "  return _out;\n}\n";
     } else {
         msl_out << "fragment float4 TGLMT_fs(TGLMT_FIn _in [[stage_in]],\n"
                    "    constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
@@ -3277,6 +3405,9 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (R.usesPointCoord) msl_out << ",\n    float2 tglmt_pointCoord [[point_coord]]";
         if (R.usesFragCoord) msl_out << ",\n    float4 tglmt_fragCoord [[position]]";
         if (R.usesFrontFacing) msl_out << ",\n    bool tglmt_frontFacing [[front_facing]]";
+        if (useStencilRef) msl_out << ",\n    uint tglmt_stencilRef [[stencil_ref]]";
+        if (useSampleID) msl_out << ",\n    uint tglmt_sampleID [[sample_id]]";
+        if (useSamplePos) msl_out << ",\n    float2 tglmt_samplePosition [[sample_position]]";
         msl_out << texParams << ") {\n  float4 tglmt_fragColor = float4(0.0);\n" << body
                 << "\n  return tglmt_fragColor;\n}\n";
     }
