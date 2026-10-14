@@ -18,7 +18,8 @@ mipmap, roundtrip `ReadPixels`/`GetTexImage`.
 
 | Mục | Hành vi |
 |---|---|
-| Stage tessellation / geometry / compute | Compile fail trung thực; chưa encode GPU |
+| Stage tessellation / geometry | Compile fail trung thực; Metal không có stage (xem HONESTLY_ABSENT.md) |
+| Stage compute | ✅ Hoạt động (P6f): kernel, SSBO, image, dispatch — ARB_compute_shader |
 | Transform feedback | State machine + đếm draw, không capture varying |
 | `glLogicOp` | Shadow only (shader compute-ROP có nhưng chưa nối vào draw) |
 | Stencil test | Đã lưu, chưa encode |

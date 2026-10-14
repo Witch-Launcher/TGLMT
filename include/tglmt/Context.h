@@ -10,6 +10,7 @@
 #include "tglmt/MetalInterface.h"
 #include "tglmt/GLSLConverter.h"
 #include <array>
+#include <deque>
 #include <map>
 #include <memory>
 #include <unordered_map>
@@ -31,6 +32,7 @@ struct BufferObject {
     size_t size = 0;                // kích thước logích — đúng cả khi data rỗng
     GLenum usage = 0x88E4;          // STATIC_DRAW
     GLbitfield storageFlags = 0;
+    bool immutable = false;       // true sau glBufferStorage (BufferData realloc → INVALID_OPERATION)
     bool mapped = false;
     size_t mapOffset = 0, mapLength = 0;
     GLbitfield mapAccess = 0;
@@ -341,6 +343,23 @@ public:
     struct ImageBind { GLuint texture = 0; GLint level = 0; GLboolean layered = 0;
                        GLint layer = 0; GLenum access = 0; GLenum format = 0; };
     std::unordered_map<GLuint, ImageBind> imageBindPoints;
+    // P4 debug (KHR_debug + EXT_debug_marker + ARB_parallel_shader_compile).
+    GLuint maxShaderCompilerThreads = 0; // 0 = implementation quyết định
+    std::vector<std::string> debugGroupStack; // push/pop marker + debug group
+    // KHR_debug message log (ring 128) + callback.
+    struct DebugMsg { GLenum source = 0, type = 0; GLuint id = 0; GLenum severity = 0; std::string text; };
+    std::deque<DebugMsg> debugLog;
+    // Callback: GLDEBUGPROC (void(*)(source,type,id,severity,length,message,userParam)).
+    using DebugProc = void(*)(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar*, const void*);
+    DebugProc debugCallback = nullptr;
+    const void* debugUserParam = nullptr;
+    // Message control filter: (source,type,severity) → enabled. Mặc định bật hết.
+    // Lưu các rule disable để check khi invoke callback/log.
+    struct DebugFilter { GLenum source, type, severity; bool enabled; };
+    std::vector<DebugFilter> debugFilters;
+    // Object labels: (identifier, name) → label. Ptr labels: ptr → label.
+    std::map<std::pair<GLenum, GLuint>, std::string> objectLabels;
+    std::map<const void*, std::string> objectPtrLabels;
     std::map<GLenum, ProxyTex> proxyTex; // target PROXY → spec probe gần nhất
 
     // clear color/depth/stencil shadow (glClearColor/... + glClear)

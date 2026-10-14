@@ -56,7 +56,21 @@ GLenum KindTarget(char k) {
 }
 } // namespace
 
+// Forward: helper dispatch chung (định nghĩa sau wrappers).
+static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
+                                int o0, int o1, int o2, bool useOverride);
+
 void glDispatchCompute(GLuint x, GLuint y, GLuint z) {
+    DispatchComputeImpl(x, y, z, 0, 0, 0, false);
+}
+// ARB_compute_variable_group_size: dispatch với group size EXPLICIT (override
+// layout local_size của shader). Dùng cho shader không có local_size cố định.
+void glDispatchComputeGroupSize(GLuint x, GLuint y, GLuint z, GLuint gx, GLuint gy, GLuint gz) {
+    DispatchComputeImpl(x, y, z, (int)gx, (int)gy, (int)gz, true);
+}
+// Helper chung: dispatch với localSize từ shader hoặc override.
+static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
+                                int o0, int o1, int o2, bool useOverride) {
     Context& c = Context::Current();
     GLuint progId = c.state.BoundProgram();
     auto itp = c.programs.find(progId);
@@ -150,9 +164,17 @@ void glDispatchCompute(GLuint x, GLuint y, GLuint z) {
     }
     // Dispatch: GL glDispatchCompute(x,y,z) = x*y*z WORKGROUP; Metal
     // dispatchThreads:grid = TỔNG thread → grid = workgroup * localSize.
-    uint32_t ls0 = (uint32_t)(pr.computeLocalSize[0] > 0 ? pr.computeLocalSize[0] : 1);
-    uint32_t ls1 = (uint32_t)(pr.computeLocalSize[1] > 0 ? pr.computeLocalSize[1] : 1);
-    uint32_t ls2 = (uint32_t)(pr.computeLocalSize[2] > 0 ? pr.computeLocalSize[2] : 1);
+    // GroupSizeARB: localSize = override (gx,gy,gz), không phải từ shader.
+    uint32_t ls0, ls1, ls2;
+    if (useOverride) {
+        ls0 = (uint32_t)(o0 > 0 ? o0 : 1);
+        ls1 = (uint32_t)(o1 > 0 ? o1 : 1);
+        ls2 = (uint32_t)(o2 > 0 ? o2 : 1);
+    } else {
+        ls0 = (uint32_t)(pr.computeLocalSize[0] > 0 ? pr.computeLocalSize[0] : 1);
+        ls1 = (uint32_t)(pr.computeLocalSize[1] > 0 ? pr.computeLocalSize[1] : 1);
+        ls2 = (uint32_t)(pr.computeLocalSize[2] > 0 ? pr.computeLocalSize[2] : 1);
+    }
     enc->dispatch3D((x ? x : 1) * ls0, (y ? y : 1) * ls1, (z ? z : 1) * ls2, ls0, ls1, ls2);
     enc->endAndCommit(); // commit + waitUntilCompleted (compute hiếm, chấp nhận sync)
 }

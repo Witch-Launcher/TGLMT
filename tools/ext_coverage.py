@@ -116,6 +116,9 @@ def classify(name, need, impl, core):
     Trả (kind, missing_real, missing_alias)."""
     real, alias = [], []
     for f in sorted(need):
+        # Hàm đã implement trực tiếp (kể cả không suffix như glGetPointerv) → đủ.
+        if f in impl:
+            continue
         base = vendor_suffix_strip(f)
         if base and (base in impl or base in core):
             alias.append(f)

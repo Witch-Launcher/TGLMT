@@ -140,9 +140,6 @@ void glTexImage3DMultisample(GLenum t, GLsizei s, GLenum inf, GLsizei w, GLsizei
     (void)t;(void)s;(void)inf;(void)w;(void)h;(void)d;(void)f;
 }
 void glValidateProgramPipeline(GLuint p) { (void)p; }
-GLuint glGetDebugMessageLog(GLuint n, GLsizei s, GLenum* src, GLenum* ty, GLuint* ids, GLenum* sev, GLsizei* len, GLchar* log) {
-    (void)n;(void)s;(void)src;(void)ty;(void)ids;(void)sev;(void)len;(void)log; return 0;
-}
 void glGetProgramPipelineiv(GLuint p, GLenum q, GLint* v) { (void)p;(void)q; *v=0; }
 void glGetProgramPipelineInfoLog(GLuint p, GLsizei n, GLsizei* l, GLchar* log) {
     (void)p; if(l)*l=0; if(log&&n>0)log[0]=0;

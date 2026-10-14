@@ -18,6 +18,7 @@ void glBindVertexArray(GLuint a0);
 void glDeleteVertexArrays(GLsizei a0, const GLuint * a1);
 void glGenVertexArrays(GLsizei a0, GLuint * a1);
 GLboolean glIsVertexArray(GLuint a0);
+void glPrimitiveBoundingBox(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4, GLfloat a5, GLfloat a6, GLfloat a7);
 void glClampColor(GLenum a0, GLenum a1);
 void glDebugMessageControl(GLenum a0, GLenum a1, GLenum a2, GLsizei a3, const GLuint * a4, GLboolean a5);
 void glDebugMessageInsert(GLenum a0, GLenum a1, GLuint a2, GLenum a3, GLsizei a4, const GLchar * a5);
@@ -148,6 +149,7 @@ void glCopyTexImage2D(GLenum a0, GLint a1, GLenum a2, GLint a3, GLint a4, GLsize
 void glCopyTexSubImage1D(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLsizei a5);
 void glCopyTexSubImage2D(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLsizei a6, GLsizei a7);
 void glCopyTexSubImage3D(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLsizei a7, GLsizei a8);
+void glGetObjectLabel(GLenum a0, GLuint a1, GLsizei a2, GLsizei * a3, GLchar * a4);
 void glBeginQuery(GLenum a0, GLuint a1);
 void glDeleteQueries(GLsizei a0, const GLuint * a1);
 void glEndQuery(GLenum a0);
@@ -253,6 +255,7 @@ void glPointParameterf(GLenum a0, GLfloat a1);
 void glPointParameterfv(GLenum a0, const GLfloat * a1);
 void glPolygonOffset(GLfloat a0, GLfloat a1);
 void glPolygonOffsetClamp(GLfloat a0, GLfloat a1, GLfloat a2);
+void glPrimitiveBoundingBox(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4, GLfloat a5, GLfloat a6, GLfloat a7);
 void glProvokingVertex(GLenum a0);
 GLenum glGetGraphicsResetStatus(void);
 void glGetnUniformfv(GLuint a0, GLint a1, GLsizei a2, GLfloat * a3);
@@ -386,6 +389,7 @@ void glProgramBinary(GLuint a0, GLenum a1, const void * a2, GLsizei a3);
 void glGetBufferPointerv(GLenum a0, GLenum a1, void ** a2);
 void * glMapBuffer(GLenum a0, GLenum a1);
 GLboolean glUnmapBuffer(GLenum a0);
+void glPrimitiveBoundingBox(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4, GLfloat a5, GLfloat a6, GLfloat a7);
 void glMinSampleShading(GLfloat a0);
 void glPatchParameteri(GLenum a0, GLint a1);
 void glCompressedTexImage3D(GLenum a0, GLint a1, GLenum a2, GLsizei a3, GLsizei a4, GLsizei a5, GLint a6, GLsizei a7, const void * a8);
@@ -427,6 +431,7 @@ void glBindVertexArrayAPPLE(GLuint a0) { tglmt::gl::glBindVertexArray(a0); }
 void glDeleteVertexArraysAPPLE(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteVertexArrays(a0, a1); }
 void glGenVertexArraysAPPLE(GLsizei a0, GLuint * a1) { tglmt::gl::glGenVertexArrays(a0, a1); }
 GLboolean glIsVertexArrayAPPLE(GLuint a0) { return tglmt::gl::glIsVertexArray(a0); }
+void glPrimitiveBoundingBoxARB(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4, GLfloat a5, GLfloat a6, GLfloat a7) { tglmt::gl::glPrimitiveBoundingBox(a0, a1, a2, a3, a4, a5, a6, a7); }
 void glClampColorARB(GLenum a0, GLenum a1) { tglmt::gl::glClampColor(a0, a1); }
 void glDebugMessageControlARB(GLenum a0, GLenum a1, GLenum a2, GLsizei a3, const GLuint * a4, GLboolean a5) { tglmt::gl::glDebugMessageControl(a0, a1, a2, a3, a4, a5); }
 void glDebugMessageInsertARB(GLenum a0, GLenum a1, GLuint a2, GLenum a3, GLsizei a4, const GLchar * a5) { tglmt::gl::glDebugMessageInsert(a0, a1, a2, a3, a4, a5); }
@@ -557,6 +562,7 @@ void glCopyTexImage2DEXT(GLenum a0, GLint a1, GLenum a2, GLint a3, GLint a4, GLs
 void glCopyTexSubImage1DEXT(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLsizei a5) { tglmt::gl::glCopyTexSubImage1D(a0, a1, a2, a3, a4, a5); }
 void glCopyTexSubImage2DEXT(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLsizei a6, GLsizei a7) { tglmt::gl::glCopyTexSubImage2D(a0, a1, a2, a3, a4, a5, a6, a7); }
 void glCopyTexSubImage3DEXT(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLsizei a7, GLsizei a8) { tglmt::gl::glCopyTexSubImage3D(a0, a1, a2, a3, a4, a5, a6, a7, a8); }
+void glGetObjectLabelEXT(GLenum a0, GLuint a1, GLsizei a2, GLsizei * a3, GLchar * a4) { tglmt::gl::glGetObjectLabel(a0, a1, a2, a3, a4); }
 void glBeginQueryEXT(GLenum a0, GLuint a1) { tglmt::gl::glBeginQuery(a0, a1); }
 void glDeleteQueriesEXT(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteQueries(a0, a1); }
 void glEndQueryEXT(GLenum a0) { tglmt::gl::glEndQuery(a0); }
@@ -652,6 +658,7 @@ void glPointParameterfEXT(GLenum a0, GLfloat a1) { tglmt::gl::glPointParameterf(
 void glPointParameterfvEXT(GLenum a0, const GLfloat * a1) { tglmt::gl::glPointParameterfv(a0, a1); }
 void glPolygonOffsetEXT(GLfloat a0, GLfloat a1) { tglmt::gl::glPolygonOffset(a0, a1); }
 void glPolygonOffsetClampEXT(GLfloat a0, GLfloat a1, GLfloat a2) { tglmt::gl::glPolygonOffsetClamp(a0, a1, a2); }
+void glPrimitiveBoundingBoxEXT(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4, GLfloat a5, GLfloat a6, GLfloat a7) { tglmt::gl::glPrimitiveBoundingBox(a0, a1, a2, a3, a4, a5, a6, a7); }
 void glProvokingVertexEXT(GLenum a0) { tglmt::gl::glProvokingVertex(a0); }
 GLenum glGetGraphicsResetStatusEXT(void) { return tglmt::gl::glGetGraphicsResetStatus(); }
 void glGetnUniformfvEXT(GLuint a0, GLint a1, GLsizei a2, GLfloat * a3) { tglmt::gl::glGetnUniformfv(a0, a1, a2, a3); }
@@ -758,6 +765,7 @@ void glProgramBinaryOES(GLuint a0, GLenum a1, const void * a2, GLint a3) { tglmt
 void glGetBufferPointervOES(GLenum a0, GLenum a1, void ** a2) { tglmt::gl::glGetBufferPointerv(a0, a1, a2); }
 void * glMapBufferOES(GLenum a0, GLenum a1) { return tglmt::gl::glMapBuffer(a0, a1); }
 GLboolean glUnmapBufferOES(GLenum a0) { return tglmt::gl::glUnmapBuffer(a0); }
+void glPrimitiveBoundingBoxOES(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4, GLfloat a5, GLfloat a6, GLfloat a7) { tglmt::gl::glPrimitiveBoundingBox(a0, a1, a2, a3, a4, a5, a6, a7); }
 void glMinSampleShadingOES(GLfloat a0) { tglmt::gl::glMinSampleShading(a0); }
 void glPatchParameteriOES(GLenum a0, GLint a1) { tglmt::gl::glPatchParameteri(a0, a1); }
 void glCompressedTexImage3DOES(GLenum a0, GLint a1, GLenum a2, GLsizei a3, GLsizei a4, GLsizei a5, GLint a6, GLsizei a7, const void * a8) { tglmt::gl::glCompressedTexImage3D(a0, a1, a2, a3, a4, a5, a6, a7, a8); }

@@ -18,7 +18,8 @@ CPU), mipmap generation, `ReadPixels`/`GetTexImage` roundtrip.
 
 | Area | Behavior |
 |---|---|
-| Tessellation / geometry / compute stages | Compile fails honestly; no GPU encode |
+| Tessellation / geometry stages | Compile fails honestly; Metal has no such stages (see HONESTLY_ABSENT.md) |
+| Compute stage | ✅ Works (P6f): kernel, SSBO, image, dispatch — ARB_compute_shader |
 | Transform feedback | State machine + draw count only, no varying capture |
 | `glLogicOp` | Shadow only (compute-ROP shader exists but is not wired to draws) |
 | Stencil test | Tracked, not encoded |

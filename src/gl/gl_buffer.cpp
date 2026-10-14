@@ -367,6 +367,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return;
+    if (bo->immutable) { c.errors.Record(0x0502); return; } // Storage rồi → INVALID_OPERATION
     bo->size = (size_t)size;
     bo->usage = usage;
     bo->gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
@@ -389,6 +390,7 @@ void glNamedBufferData(GLuint b, GLsizeiptr size, const void* data, GLenum usage
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
+    if (it->second.immutable) { c.errors.Record(0x0502); return; }
     GLuint saved = c.state.BoundBuffer(it->second.target ? it->second.target : 0x8892);
     c.state.BindBuffer(0x8892, b); // ARRAY_BUFFER scratch
     // trực tiếp không qua target
@@ -411,8 +413,10 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return;
+    if (bo->immutable) { c.errors.Record(0x0502); return; } // đã Storage → INVALID_OPERATION
     bo->size = (size_t)size;
     bo->storageFlags = flags;
+    bo->immutable = true;
     bo->gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                    : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
     if (bo->gpu && !c.device->isNull()) {
@@ -428,8 +432,10 @@ void glNamedBufferStorage(GLuint b, GLsizeiptr size, const void* data, GLbitfiel
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
+    if (it->second.immutable) { c.errors.Record(0x0502); return; }
     it->second.size = (size_t)size;
     it->second.storageFlags = flags;
+    it->second.immutable = true;
     it->second.gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                           : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
     if (it->second.gpu && !c.device->isNull()) {

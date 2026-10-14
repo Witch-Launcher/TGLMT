@@ -221,6 +221,29 @@ static const char* const kExts[] = {
     //  - imageCube/Buffer/1D/Rect/MS + imageAtomic* → fail trung thực (MSL không có).
     //  - glGet MAX_IMAGE_UNITS/COMBINED/VERTEX/FRAGMENT/COMPUTE_IMAGE_UNIFORMS thật.
     "GL_ARB_shader_image_load_store",
+    // ===== P4: debug + discard + parallel-compile — behavior THẬT, test verify. =====
+    //  - KHR_debug: callback/control/insert/log/labels/groups (ring 128, filter rules).
+    //  - EXT_debug_marker: push/pop/insert (stack, log vào KHR_debug).
+    //  - EXT_discard_framebuffer: validate + no-op hint (tile memory, TGLMT quản lý显式).
+    //  - ARB_parallel_shader_compile: MaxShaderCompilerThreadsARB hint (ghi nhận).
+    "GL_KHR_debug",
+    "GL_EXT_debug_marker",
+    "GL_EXT_discard_framebuffer",
+    "GL_ARB_parallel_shader_compile",
+    // ===== P4/P5 easy wins (1-2 hàm, behavior thật, test verify). =====
+    //  - ARB_compute_variable_group_size: DispatchComputeGroupSizeARB (override local_size).
+    //  - EXT_debug_label: LabelObjectEXT (dùng chung storage với KHR_debug ObjectLabel).
+    //  - ARB_ES3_2_compatibility: PrimitiveBoundingBoxARB (hint, no-op hợp lệ).
+    "GL_ARB_compute_variable_group_size",
+    "GL_EXT_debug_label",
+    "GL_ARB_ES3_2_compatibility",
+    // ===== P5: buffer storage (ARB_buffer_storage) — immutable buffer THẬT. =====
+    //  - glBufferStorage (+Named) ĐÃ implement (immutable, flags, GPU upload).
+    "GL_ARB_buffer_storage",
+    // ===== P5: direct state access (ARB_direct_state_access) — 97 hàm THẬT. =====
+    //  - Texture/buffer/framebuffer/VAO/sampler/query DSA ĐÃ implement đầy đủ
+    //    (không bind, thao tác trực tiếp object). Verify bằng coverage + test.
+    "GL_ARB_direct_state_access",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),
@@ -237,26 +260,6 @@ const GLubyte* glGetStringi(GLenum n, GLuint i) {
     Context::Current().errors.Record(0x0500);
     return nullptr;
 }
-void glDebugMessageCallback(TGLMTDebugProc cb, const void* u) {
-    Context& c = Context::Current();
-    c.debugCb = (decltype(c.debugCb))cb; c.debugUser = u;
-}
-void glDebugMessageControl(GLenum s, GLenum t, GLenum sev, GLsizei n, const GLuint* ids, GLboolean on) {
-    (void)s;(void)t;(void)sev;(void)n;(void)ids;(void)on;
-}
-void glDebugMessageInsert(GLenum s, GLenum t, GLuint id, GLenum sev, GLsizei len, const GLchar* msg) {
-    Context& c = Context::Current();
-    std::string m(msg ? msg : "", len < 0 ? strlen(msg ? msg : "") : (size_t)len);
-    c.LogDebug(s, t, id, sev, m);
-}
-void glPushDebugGroup(GLenum s, GLuint id, GLsizei len, const GLchar* msg) { (void)s;(void)id;(void)len;(void)msg; }
-void glPopDebugGroup() {}
-void glObjectLabel(GLenum t, GLuint o, GLsizei len, const GLchar* l) { (void)t;(void)o;(void)len;(void)l; }
-void glObjectPtrLabel(const void* p, GLsizei len, const GLchar* l) { (void)p;(void)len;(void)l; }
-void glGetObjectLabel(GLenum t, GLuint o, GLsizei n, GLsizei* l, GLchar* b) { (void)t;(void)o;(void)n;(void)l;(void)b; }
-void glGetObjectPtrLabel(const void* p, GLsizei n, GLsizei* l, GLchar* b) { (void)p;(void)n;(void)l;(void)b; }
-GLenum glGetGraphicsResetStatus() { return 0x8252; } // NO_ERROR (GL 4.5 robustness)
-void glGetPointerv(GLenum p, void** v) { (void)p; *v = nullptr; }
 } // namespace tglmt::gl
 namespace tglmt {
 GLuint tglmt_num_extensions() { return gl::kNumExts; }
