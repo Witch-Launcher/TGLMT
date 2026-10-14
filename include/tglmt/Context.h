@@ -153,6 +153,14 @@ struct TextureObject {
     // thắng lợi băng thông thật, không phải no-op. Cờ được TIÊU THỤ khi encoder
     // dùng attachment này được tạo (nội dung mới do chính pass đó sinh ra).
     bool contentUndefined = false;
+    // P10 ARB_texture_view: view chia sẻ storage với texture gốc.
+    // viewOf=0 → texture thường; viewOf!=0 → view của texture viewOf.
+    // baseLevel/numLevels/baseLayer/numLayers: subset; viewFormat: format reinterpret.
+    // GPU: ITexture view (textureView()) hoặc share base nếu view fail.
+    // CPU (Null): đọc/ghi qua original's mipData[pixels] + baseLevel offset.
+    GLuint viewOf = 0;
+    GLint viewBaseLevel = 0, viewNumLevels = 0, viewBaseLayer = 0, viewNumLayers = 0;
+    GLenum viewFormat = 0; // 0 = cùng format gốc
 };
 
 // P1: pixel có đọc lại được từ GPU (buffer Shared) không? Nếu KHÔNG → shadow CPU
@@ -207,6 +215,7 @@ struct ProgramObject {
         size_t offset = 0, size = 0;
         GLint loc = -1; // điền khi glGetUniformLocation
         bool isVS = true;
+        GLenum glType = 0; // P10: GL enum type (FLOAT_VEC4...) cho program_interface_query
     };
     std::vector<UniformEntry> uniformLayout;
     size_t vsUBSize = 0, fsUBSize = 0;
@@ -281,6 +290,9 @@ struct FramebufferObject {
     GLint depthLevel = 0, stencilLevel = 0, depthStencilLevel = 0;
     GLsizei w = 0, h = 0;
     std::vector<GLenum> drawBuffers = {0x8CE0}; // GL_COLOR_ATTACHMENT0
+    // P10 ARB_framebuffer_no_attachments: defaults cho FBO không attachment.
+    GLint defaultWidth = 0, defaultHeight = 0, defaultLayers = 0, defaultSamples = 0;
+    GLboolean defaultFixedSampleLocations = 0;
 };
 
 struct QueryObject {

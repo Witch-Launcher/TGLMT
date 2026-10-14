@@ -348,8 +348,8 @@ void glGetFramebufferAttachmentParameteriv(GLenum t, GLenum a, GLenum p, GLint* 
 void glGetNamedFramebufferAttachmentParameteriv(GLuint f, GLenum a, GLenum p, GLint* v) {
     (void)f; glGetFramebufferAttachmentParameteriv(0x8D40, a, p, v);
 }
-void glGetFramebufferParameteriv(GLenum t, GLenum p, GLint* v) { (void)t; Context::Current().state.GetShadow(p,v,4); if(!Context::Current().state.GetShadow(p,v,4)) *v=0; }
-void glGetNamedFramebufferParameteriv(GLuint f, GLenum p, GLint* v) { (void)f; glGetFramebufferParameteriv(0x8D40,p,v); }
+// glGetFramebufferParameteriv/Named đã chuyển sang gl_framebuffer.cpp (P10 ARB_framebuffer_no_attachments,
+// đọc defaults từ FBO object thật thay vì shadow). Xoá stubs ở đây để khỏi duplicate symbol.
 void glGetRenderbufferParameteriv(GLenum t, GLenum p, GLint* v) { (void)t;(void)p; *v=0; }
 void glGetNamedRenderbufferParameteriv(GLuint r, GLenum p, GLint* v) { (void)r; glGetRenderbufferParameteriv(0x8D41,p,v); }
 // --- VAO getters ---
@@ -396,22 +396,9 @@ void glGetSynciv(GLsync s, GLenum p, GLsizei n, GLsizei* l, GLint* v) {
     }
     if (l) *l = 1;
 }
-void glGetProgramInterfaceiv(GLuint p, GLenum pi, GLenum q, GLint* v) {
-    (void)p;(void)pi;
-    if (q == 0x92F0) *v = 0; // ACTIVE_RESOURCES
-    else *v = 0;
-}
-void glGetProgramResourceiv(GLuint p, GLenum pi, GLuint ix, GLsizei npc, const GLenum* pr, GLsizei n, GLsizei* l, GLint* v) {
-    (void)p;(void)pi;(void)ix;(void)npc;(void)pr;
-    for (GLsizei i = 0; i < n; ++i) v[i] = 0;
-    if (l) *l = n;
-}
-void glGetProgramResourceName(GLuint p, GLenum pi, GLuint ix, GLsizei n, GLsizei* l, GLchar* name) {
-    (void)p;(void)pi;(void)ix; if(l)*l=0; if(name&&n>0)name[0]=0;
-}
-GLuint glGetProgramResourceIndex(GLuint p, GLenum pi, const GLchar* n) { (void)p;(void)pi;(void)n; return 0xFFFFFFFFu; }
-GLint glGetProgramResourceLocation(GLuint p, GLenum pi, const GLchar* n) { (void)p;(void)pi;(void)n; return -1; }
-GLint glGetProgramResourceLocationIndex(GLuint p, GLenum pi, const GLchar* n) { (void)p;(void)pi;(void)n; return -1; }
+// glGetProgramInterfaceiv/Resource* đã chuyển sang gl_program_interface_p10.cpp (P10
+// ARB_program_interface_query, introspect từ converter data thật thay vì stub 0).
+// Xoá stubs ở đây để khỏi duplicate symbol.
 void glGetProgramStageiv(GLuint p, GLenum st, GLenum q, GLint* v) { (void)p;(void)st;(void)q; *v=0; }
 GLuint glGetSubroutineIndex(GLuint p, GLenum st, const GLchar* n) { (void)p;(void)st;(void)n; return 0xFFFFFFFFu; }
 GLint glGetSubroutineUniformLocation(GLuint p, GLenum st, const GLchar* n) { (void)p;(void)st;(void)n; return -1; }

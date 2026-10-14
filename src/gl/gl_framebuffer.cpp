@@ -154,8 +154,66 @@ void glNamedFramebufferTextureLayer(GLuint f, GLenum a, GLuint x, GLint l, GLint
     (void)layer;
     AttachToFBO(Context::Current(), f, a, x, l);
 }
-void glFramebufferParameteri(GLenum t, GLenum p, GLint v) { (void)t; Context::Current().state.SetShadow(p, &v, 4); }
-void glNamedFramebufferParameteri(GLuint f, GLenum p, GLint v) { (void)f; Context::Current().state.SetShadow(p, &v, 4); }
+void glFramebufferParameteri(GLenum t, GLenum p, GLint v) {
+    // P10 ARB_framebuffer_no_attachments: defaults cho FBO không attachment.
+    Context& c = Context::Current();
+    GLuint fbo = ResolveFBOForTarget(c, t);
+    if (fbo == 0) { c.errors.Record(0x0502); return; } // default FB không có params
+    auto it = c.fbos.find(fbo);
+    if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
+    auto& f = it->second;
+    // Pnames: DEFAULT_WIDTH(0x9310), HEIGHT(0x9311), LAYERS(0x9312),
+    // SAMPLES(0x9313), FIXED_SAMPLE_LOCATIONS(0x9314).
+    if (p == 0x9310) f.defaultWidth = v;
+    else if (p == 0x9311) f.defaultHeight = v;
+    else if (p == 0x9312) f.defaultLayers = v;
+    else if (p == 0x9313) f.defaultSamples = v;
+    else if (p == 0x9314) f.defaultFixedSampleLocations = (GLboolean)(v ? 1 : 0);
+    else { c.errors.Record(0x0500); return; } // INVALID_ENUM
+    if (v < 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE (trừ FIXED=0/1)
+}
+void glNamedFramebufferParameteri(GLuint f, GLenum p, GLint v) {
+    Context& c = Context::Current();
+    auto it = c.fbos.find(f);
+    if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
+    // Reuse logic bằng cách bind tạm? Đơn giản: set trực tiếp (giống trên).
+    auto& fo = it->second;
+    if (p == 0x9310) fo.defaultWidth = v;
+    else if (p == 0x9311) fo.defaultHeight = v;
+    else if (p == 0x9312) fo.defaultLayers = v;
+    else if (p == 0x9313) fo.defaultSamples = v;
+    else if (p == 0x9314) fo.defaultFixedSampleLocations = (GLboolean)(v ? 1 : 0);
+    else { c.errors.Record(0x0500); return; }
+    if (v < 0) { c.errors.Record(0x0501); return; }
+}
+void glGetFramebufferParameteriv(GLenum t, GLenum p, GLint* v) {
+    Context& c = Context::Current();
+    if (!v) return;
+    GLuint fbo = ResolveFBOForTarget(c, t);
+    if (fbo == 0) { c.errors.Record(0x0502); return; }
+    auto it = c.fbos.find(fbo);
+    if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
+    auto& f = it->second;
+    if (p == 0x9310) *v = f.defaultWidth;
+    else if (p == 0x9311) *v = f.defaultHeight;
+    else if (p == 0x9312) *v = f.defaultLayers;
+    else if (p == 0x9313) *v = f.defaultSamples;
+    else if (p == 0x9314) *v = f.defaultFixedSampleLocations;
+    else { c.errors.Record(0x0500); return; }
+}
+void glGetNamedFramebufferParameteriv(GLuint f, GLenum p, GLint* v) {
+    Context& c = Context::Current();
+    if (!v) return;
+    auto it = c.fbos.find(f);
+    if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
+    auto& fo = it->second;
+    if (p == 0x9310) *v = fo.defaultWidth;
+    else if (p == 0x9311) *v = fo.defaultHeight;
+    else if (p == 0x9312) *v = fo.defaultLayers;
+    else if (p == 0x9313) *v = fo.defaultSamples;
+    else if (p == 0x9314) *v = fo.defaultFixedSampleLocations;
+    else { c.errors.Record(0x0500); return; }
+}
 GLenum glCheckFramebufferStatus(GLenum t) {
     (void)t; return 0x8CD5; // FRAMEBUFFER_COMPLETE (Null backend luôn complete nếu attach hợp lệ)
 }

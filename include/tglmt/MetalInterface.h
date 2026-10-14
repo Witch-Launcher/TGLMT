@@ -128,6 +128,15 @@ public:
     virtual std::shared_ptr<ITexture> swizzledView(uint8_t, uint8_t, uint8_t, uint8_t) {
         return nullptr;
     }
+    // P10 ARB_texture_view: tạo texture view chia sẻ storage (mip/slice subset,
+    // format reinterpret). Trả nullptr nếu không hỗ trợ (caller fallback share base).
+    // baseLevel/baseSlice + counts theo Metal newTextureViewWithPixelFormat.
+    virtual std::shared_ptr<ITexture> textureView(PixelFormat fmt, uint32_t baseLevel,
+                                                 uint32_t levelCount, uint32_t baseSlice,
+                                                 uint32_t sliceCount) {
+        (void)fmt; (void)baseLevel; (void)levelCount; (void)baseSlice; (void)sliceCount;
+        return nullptr;
+    }
 };
 
 using LogFn = std::function<void(const std::string&)>;

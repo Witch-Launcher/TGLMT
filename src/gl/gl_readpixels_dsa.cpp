@@ -273,15 +273,8 @@ void glTextureBuffer(GLuint t, GLenum inf, GLuint b) { BindBufTex(t, inf, b); }
 void glTextureBufferRange(GLuint t, GLenum inf, GLuint b, GLintptr o, GLsizeiptr s) {
     (void)o; (void)s; BindBufTex(t, inf, b);
 }
-void glTextureView(GLuint t, GLenum tgt, GLuint orig, GLenum inf, GLuint ml, GLuint nl, GLuint mlay, GLuint nlay) {
-    Context& c = Context::Current();
-    auto ito = c.textures.find(orig);
-    auto itt = c.textures.find(t);
-    if (ito == c.textures.end() || itt == c.textures.end()) { c.errors.Record(0x0502); return; }
-    itt->second = ito->second; itt->second.id = t; itt->second.target = tgt;
-    itt->second.internalFormat = inf;
-    (void)ml; (void)nl; (void)mlay; (void)nlay;
-}
+// glTextureView đã chuyển sang gl_texture.cpp (P10 ARB_texture_view, tạo Metal
+// texture view thật với mip/slice subset thay vì copy nguyên object). Xoá stub ở đây.
 // --- XFB varyings ---
 void glTransformFeedbackVaryings(GLuint p, GLsizei n, const GLchar* const* v, GLenum m) {
     Context& c = Context::Current();

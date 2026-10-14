@@ -1506,4 +1506,43 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
                    payload.data());
 }
 void glTextureSubImage3D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLenum j, const void* k) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; }
+// P10 ARB_texture_view: tạo view chia sẻ storage (vanilla 26.x mip bake dùng).
+// View trỏ tới subset mips/layers của gốc, có thể reinterpret format (tương thích).
+void glTextureView(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat,
+                   GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers) {
+    Context& c = Context::Current();
+    auto ito = c.textures.find(origtexture);
+    if (ito == c.textures.end()) { c.errors.Record(0x0502); return; } // INVALID_OPERATION
+    if (ito->second.viewOf != 0) { c.errors.Record(0x0502); return; } // view của view → lỗi
+    if (numlevels == 0 || numlayers == 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE
+    // Tạo/ghi đè TextureObject cho view (texture phải là tên mới hoặc chưa dùng?
+    // Spec: texture phải chưa có storage (mới gen hoặc đã delete). TGLMT: cho phép
+    // ghi đè nếu chưa có gpu (tránh leak); nếu đã có gpu → lỗi để an toàn.
+    auto itv = c.textures.find(texture);
+    if (itv != c.textures.end() && itv->second.gpu) { c.errors.Record(0x0502); return; }
+    TextureObject& v = c.textures[texture]; // tạo mới hoặc reuse rỗng
+    v.id = texture;
+    v.target = target;
+    v.viewOf = origtexture;
+    v.viewBaseLevel = (GLint)minlevel; v.viewNumLevels = (GLint)numlevels;
+    v.viewBaseLayer = (GLint)minlayer; v.viewNumLayers = (GLint)numlayers;
+    v.viewFormat = internalformat;
+    // Kích thước view = mip minlevel của gốc (w>>minlevel).
+    v.w = ito->second.w >> minlevel; v.h = ito->second.h >> minlevel;
+    if (v.w == 0) v.w = 1; if (v.h == 0) v.h = 1;
+    v.internalFormat = internalformat;
+    v.levels = (GLsizei)numlevels;
+    // GPU: tạo Metal texture view chia sẻ storage (đúng mip/slice).
+    // Format: internalformat GL → PixelFormat (dùng ToMetalFormat, fallback base).
+    if (ito->second.gpu && c.device && !c.device->isNull()) {
+        metal::PixelFormat vfmt = ToMetalFormat(internalformat);
+        // Nếu internalformat==0 hoặc không map (trả RGBA8 mặc định nhưng gốc khác),
+        // dùng format gốc để view tương thích (đúng khi view cùng format).
+        if (internalformat == 0) vfmt = ito->second.gpu->pixelFormat();
+        auto views = ito->second.gpu->textureView(vfmt, minlevel, numlevels, minlayer, numlayers);
+        if (views) v.gpu = views;
+        else v.gpu = ito->second.gpu; // fallback: share base (đúng khi cùng format/mip0)
+    }
+    // CPU (Null): view đọc qua original's storage + baseLevel (xử lý ở GetTexImage/readback).
+}
 } // namespace tglmt::gl

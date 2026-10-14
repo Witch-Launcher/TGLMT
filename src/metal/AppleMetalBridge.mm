@@ -236,6 +236,32 @@ private:
     PixelFormat f_;
     std::shared_ptr<struct DepthInitSet> depthInitSet_;
     std::unordered_map<uint32_t, std::shared_ptr<AppleTexture>> swzCache_;
+    // P10 ARB_texture_view: Metal texture view chia sẻ storage (mip/slice/format).
+    std::shared_ptr<ITexture> textureView(PixelFormat fmt, uint32_t baseLevel,
+                                          uint32_t levelCount, uint32_t baseSlice,
+                                          uint32_t sliceCount) override {
+        if (!tex_) return nullptr;
+        @try {
+            MTLPixelFormat mfmt = ToMTL(fmt);
+            // Giữ textureType gốc (2D/Array/Cube — view không đổi target ở đây;
+            // target convert phức tạp, giữ nguyên để an toàn).
+            MTLTextureType ttype = [tex_ textureType];
+            id<MTLTexture> v =
+                [tex_ newTextureViewWithPixelFormat:mfmt
+                                       textureType:ttype
+                                            levels:NSMakeRange(baseLevel, levelCount)
+                                            slices:NSMakeRange(baseSlice, sliceCount)];
+            if (!v) return nullptr;
+            // Kích thước view = mip baseLevel của gốc (w>>baseLevel).
+            uint32_t vw = w_ >> baseLevel, vh = h_ >> baseLevel;
+            if (!vw) vw = 1; if (!vh) vh = 1;
+            auto p = std::make_shared<AppleTexture>(v, vw, vh, fmt);
+            p->trackDepthInit(depthInitSet_);
+            return p;
+        } @catch (NSException*) {
+            return nullptr; // format incompatible → caller fallback share base
+        }
+    }
 };
 
 class AppleLibrary : public ILibrary {

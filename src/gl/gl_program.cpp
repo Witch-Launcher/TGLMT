@@ -10,6 +10,29 @@
 using namespace tglmt;
 
 namespace tglmt::gl {
+// P10: GLSL type string → GL enum (cho program_interface_query TYPE property).
+static GLenum GlslTypeToGLEnum(const std::string& t) {
+    if (t == "float") return 0x1406;
+    if (t == "vec2") return 0x8B50;
+    if (t == "vec3") return 0x8B51;
+    if (t == "vec4") return 0x8B52;
+    if (t == "int") return 0x1404;
+    if (t == "ivec2") return 0x8B53;
+    if (t == "ivec3") return 0x8B54;
+    if (t == "ivec4") return 0x8B55;
+    if (t == "uint") return 0x1405;
+    if (t == "uvec2") return 0x8DC6;
+    if (t == "uvec3") return 0x8DC7;
+    if (t == "uvec4") return 0x8DC8;
+    if (t == "bool") return 0x8B56;
+    if (t == "bvec2") return 0x8B57;
+    if (t == "bvec3") return 0x8B58;
+    if (t == "bvec4") return 0x8B59;
+    if (t == "mat2") return 0x8B5A;
+    if (t == "mat3") return 0x8B5B;
+    if (t == "mat4") return 0x8B5C;
+    return 0; // sampler/unknown (samplers không vào uniformLayout)
+}
 GLuint glCreateProgram() {
     Context& c = Context::Current();
     GLuint id; c.registry.Create(ObjectKind::Program, 1, &id);
@@ -104,7 +127,7 @@ void glLinkProgram(GLuint p) {
             // Uniforms: 1 stage (isVS=true), offset/size từ converter.
             for (auto& u : its->second.conv.uniforms) {
                 if (u.isSampler) continue;
-                pr.uniformLayout.push_back({u.name, u.uniformOffset, u.uniformSize, -1, true});
+                pr.uniformLayout.push_back({u.name, u.uniformOffset, u.uniformSize, -1, true, GlslTypeToGLEnum(u.glslType)});
             }
             pr.computeUBSize = its->second.conv.uniformBufferSize;
             // P9 atomic counters: copy slots (binding→slot+offset) cho dispatch bind.
@@ -250,13 +273,13 @@ void glLinkProgram(GLuint p) {
         size_t off = 0;
         for (auto& u : vsC.uniforms) {
             if (u.isSampler) continue;
-            pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, true});
+            pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, true, GlslTypeToGLEnum(u.glslType)});
         }
         pr.vsUBSize = vsC.uniformBufferSize;
         off = (pr.vsUBSize + 15) & ~((size_t)15);
         for (auto& u : fsC.uniforms) {
             if (u.isSampler) continue;
-            pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, false});
+            pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, false, GlslTypeToGLEnum(u.glslType)});
         }
         pr.fsUBSize = fsC.uniformBufferSize;
     }

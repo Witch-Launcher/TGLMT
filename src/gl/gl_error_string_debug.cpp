@@ -256,6 +256,13 @@ static const char* const kExts[] = {
     "GL_ARB_viewport_array",
     "GL_OES_viewport_array",
     "GL_ARB_shader_atomic_counters",
+    // ===== P10: Sodium/Iris exts (framebuffer_no_attachments + texture_view + program_interface). =====
+    //  - framebuffer_no_attachments: FramebufferParameteri/Get (defaults state).
+    //  - texture_view: TextureView Metal view thật (mip/slice subset, vanilla mip bake).
+    //  - program_interface_query: GetProgramResource* từ converter data (UNIFORM/BLOCK/INPUT).
+    "GL_ARB_framebuffer_no_attachments",
+    "GL_ARB_texture_view",
+    "GL_ARB_program_interface_query",
     // ===== P5: buffer storage (ARB_buffer_storage) — immutable buffer THẬT. =====
     //  - glBufferStorage (+Named) ĐÃ implement (immutable, flags, GPU upload).
     "GL_ARB_buffer_storage",
