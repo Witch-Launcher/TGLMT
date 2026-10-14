@@ -103,6 +103,10 @@ void glGetIntegerv(GLenum p, GLint* v) {
         // GL_ARB_explicit_uniform_location: GL 4.3 đòi tối thiểu 1024; TGLMT
         // dùng map → mọi location < 1024 hoạt động.
         case 0x826E: *v = 1024; return;                            // MAX_UNIFORM_LOCATIONS
+        // GL_ARB_clip_control: glClipControl lưu + áp (viewport Y-flip, clear
+        // depth, shader depth map) → round-trip query được.
+        case 0x8216: *v = (GLint)c.state.ClipOrigin(); return;     // CLIP_ORIGIN
+        case 0x8217: *v = (GLint)c.state.ClipDepth(); return;      // CLIP_DEPTH
         case 0x1F02: break;
         default: break;
     }

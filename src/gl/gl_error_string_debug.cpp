@@ -205,6 +205,9 @@ static const char* const kExts[] = {
     //    SyncRegionToGPU (format/type UNSIGNED_BYTE/FLOAT/HALF_FLOAT/USHORT/UINT)
     "GL_EXT_clear_texture",
     "GL_ARB_clear_texture",
+    //  - clip_control: SetClipControl + áp viewport Y-flip / clear depth /
+    //    shader depth map (ClipOrigin/ClipDepth được consume) + glGet round-trip
+    "GL_ARB_clip_control",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),

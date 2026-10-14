@@ -553,6 +553,30 @@ int main() {
             Check(glGetError() == 0x0500, "type lạ → INVALID_ENUM");
             glDeleteTextures(1, &ct);
         }
+
+        // --- 12. GL_ARB_clip_control: round-trip + không lỗi.
+        while (glGetError() != 0) {}
+        {
+            bool foundCC = false;
+            GLint ncc = 0;
+            glGetIntegerv(0x821D, &ncc);
+            for (GLint i = 0; i < ncc && !foundCC; ++i) {
+                const char* e = (const char*)glGetStringi(0x1F03, (GLuint)i);
+                if (e && !strcmp(e, "GL_ARB_clip_control")) foundCC = true;
+            }
+            Check(foundCC, "GL_ARB_clip_control advertised");
+            glClipControl(0x8CA2 /*UPPER_LEFT*/, 0x935F /*ZERO_TO_ONE*/);
+            Check(glGetError() == 0, "glClipControl không lỗi");
+            GLint co = 0, cd = 0;
+            glGetIntegerv(0x8216 /*CLIP_ORIGIN*/, &co);
+            glGetIntegerv(0x8217 /*CLIP_DEPTH*/, &cd);
+            Check(co == 0x8CA2, "CLIP_ORIGIN round-trip UPPER_LEFT");
+            Check(cd == 0x935F, "CLIP_DEPTH round-trip ZERO_TO_ONE");
+            glClipControl(0x8CA1 /*LOWER_LEFT*/, 0x935E /*NEGATIVE_ONE_TO_ONE*/);
+            glGetIntegerv(0x8216, &co);
+            glGetIntegerv(0x8217, &cd);
+            Check(co == 0x8CA1 && cd == 0x935E, "clip_control round-trip về default");
+        }
     }
 
     if (gFails) return 1;
