@@ -153,9 +153,9 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             // Tag build: force-diag nhận diện được ngay dòng frame=1 trong log
             // (phát hiện sai dylib trên máy — TGLMT_DIAG không set được từ launcher).
 #if defined(TGLMT_FORCE_DIAG)
-            static const char* kBuildTag = "water-blend+chunk-diag";
+            static const char* kBuildTag = "sodium-fulldraw-ok";
 #else
-            static const char* kBuildTag = "water-blend+chunk-diag";
+            static const char* kBuildTag = "sodium-fulldraw-ok";
 #endif
             fprintf(stderr,
                     "[TGLMT] build=%s frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
