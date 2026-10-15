@@ -37,6 +37,16 @@ int main() {
                                {"bubble.vert", "bubble.frag"}, {"bg.vert", "bg.frag"},
                                {"hud.vert", "hud.frag"}};
     bool haveMetal = (system("xcrun --sdk macosx --find metal >/dev/null 2>&1") == 0);
+    if (haveMetal) {
+        // Toolchain có thể thiếu component (xcodebuild -downloadComponent MetalToolchain):
+        // `metal -c` khi đó fail MỌI input (kể cả MSL đúng) → FAIL oan.
+        // Probe bằng snippet tầm thường; fail → SKIP phần metal -c (trung thực).
+        // (Gặp 2026-10-15: metal Analyses fail, runtime compileLibrary vẫn OK.)
+        { std::ofstream f("/tmp/tglmt-conv-toolchain-check.msl");
+          f << "#include <metal_stdlib>\nusing namespace metal;\nkernel void tglmt_toolchain_probe(){}\n"; }
+        if (!Run("xcrun -sdk macosx metal -c /tmp/tglmt-conv-toolchain-check.msl -o /tmp/tglmt-conv-toolchain-check.air >/dev/null 2>&1"))
+            haveMetal = false;
+    }
     for (auto& pr : pairs) {
         std::string vs = Read(dir + "/" + pr[0]), fs = Read(dir + "/" + pr[1]);
         GLSLConvertResult vr = ConvertGLSLtoMSL(vs, 0x8B31);
@@ -72,7 +82,7 @@ int main() {
         printf("ok %s + %s (vsUB=%zu fsUB=%zu)\n", pr[0], pr[1], vr.uniformBufferSize,
                fr.uniformBufferSize);
     }
-    if (!haveMetal) printf("(metal compiler missing: compile-check skipped)\n");
+    if (!haveMetal) printf("(metal compiler missing/broken: compile-check skipped)\n");
     printf("test_converter_aquarium PASS (12/14 stages)\n");
     return 0;
 }
