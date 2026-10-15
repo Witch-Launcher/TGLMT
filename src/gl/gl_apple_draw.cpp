@@ -552,7 +552,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         const VertexAttrib& a = v.attribs[i];
         if (!a.enabled) continue;
         auto bit = c.buffers.find(a.buffer);
-        if (bit == c.buffers.end() || !bit->second.gpu) return false;
+        if (bit == c.buffers.end() || !bit->second.gpu) { c.appleStats.miscFail++; return false; }
         // Địa chỉ effective = bindings[binding].offset (base) + relativeOffset
         // (descriptor) — spec §10.3.1. Trước đây dùng chung a.offset cho cả hai
         // nên base+relative bị nhân đôi / relative bị mất (đen màn hình khi game
@@ -624,12 +624,12 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (!target) { c.appleStats.noTarget++; return false; } // app chưa đặt target
     } else {
         auto fit = c.fbos.find(c.state.BoundDrawFBO());
-        if (fit == c.fbos.end()) return false;
+        if (fit == c.fbos.end()) { c.appleStats.miscFail++; return false; }
         auto cit = fit->second.colorTex.find(0);
-        if (cit == fit->second.colorTex.end()) return false;
+        if (cit == fit->second.colorTex.end()) { c.appleStats.miscFail++; return false; }
         drawColorTexId = cit->second;
         auto tit = c.textures.find(cit->second);
-        if (tit == c.textures.end() || !tit->second.gpu) return false;
+        if (tit == c.textures.end() || !tit->second.gpu) { c.appleStats.miscFail++; return false; }
         // Mip view (animate bake per-mip của TextureAtlas 26.x): FBO attach
         // level>0 nhưng texture Metal chỉ có 1 level (non-mipmapped). Vẽ vào
         // đây = alias level 0 → smear atlas (bake mip-N sai vị trí/scale đè
@@ -1703,7 +1703,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     metal::IndexType ity = metal::IndexType::UInt32;
     auto ibGet = [&]() -> metal::IBuffer* { return ibRaw ? ibRaw : ibOwned.get(); };
     if (indexed) {
-        if (indexType != 0x1403 && indexType != 0x1405) return false;
+        // Gap dAtt/dEnc trên máy (frame 6000: ~4600 draws rơi mà mọi counter =0)
+        // chính là các nhánh return false không đếm ở đây → giờ đếm miscFail.
+        if (indexType != 0x1403 && indexType != 0x1405) { c.appleStats.miscFail++; return false; }
         ity = (indexType == 0x1403) ? metal::IndexType::UInt16 : metal::IndexType::UInt32;
         size_t elem = (indexType == 0x1403) ? 2 : 4;
         auto bit = c.buffers.find(eboId);
@@ -1731,12 +1733,13 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     ibOwned = ibKeep;
                 }
                 ioff = roff;
-                if (!ibGet()) return false;
+                if (!ibGet()) { c.appleStats.miscFail++; return false; }
             } else {
+                c.appleStats.miscFail++;
                 return false;
             }
         } else {
-            if (!srcBytes) return false;
+            if (!srcBytes) { c.appleStats.miscFail++; return false; }
             // p6: cache theo (ebo, off, count, bv, contentGen) → hit = bỏ hẳn
             // vòng decode/encode từng byte; miss = viết vào thread-local scratch
             // (hết malloc mỗi call) rồi copy vào cache.
@@ -1757,6 +1760,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     int64_t nv = v + (int64_t)baseVertex;
                     if (nv < 0 || (elem == 2 && nv > 0xFFFF) || (elem == 4 && (uint64_t)nv > 0xFFFFFFFFu)) {
                         c.errors.Record(0x0502); // index âm/tràn sau cộng baseVertex
+                        c.appleStats.miscFail++; // gap dAtt/dEnc kỳ trước không truy được vì thiếu đếm
                         return false;
                     }
                     if (elem == 2) {

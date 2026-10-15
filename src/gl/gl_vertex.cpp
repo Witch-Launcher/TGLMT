@@ -88,6 +88,9 @@ void glVertexAttribIPointer(GLuint i, GLint size, GLenum type, GLsizei stride, c
     auto& a = v->attribs[i];
     a.size = size; a.type = type; a.stride = stride; a.relativeOffset = (size_t)ptr;
     a.buffer = c.state.BoundBuffer(0x8892); a.isInt = true;
+    // Format integer: normalized/isLong của lần gọi trước không còn ý nghĩa
+    // (VAO tái dùng cho format khác → descriptor sai âm thầm, như IFormat).
+    a.normalized = 0; a.isLong = false;
     if (a.binding < v->bindings.size()) {
         v->bindings[a.binding].buffer = a.buffer;
         v->bindings[a.binding].offset = 0;
@@ -103,6 +106,8 @@ void glVertexAttribLPointer(GLuint i, GLint size, GLenum type, GLsizei stride, c
     auto& a = v->attribs[i];
     a.size = size; a.type = type; a.stride = stride; a.relativeOffset = (size_t)ptr;
     a.buffer = c.state.BoundBuffer(0x8892); a.isLong = true;
+    // Như IPointer: reset flag format cũ (tái dùng VAO khác format).
+    a.normalized = 0; a.isInt = false;
     if (a.binding < v->bindings.size()) {
         v->bindings[a.binding].buffer = a.buffer;
         v->bindings[a.binding].offset = 0;

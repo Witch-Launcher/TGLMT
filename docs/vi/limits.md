@@ -23,7 +23,7 @@ mipmap, roundtrip `ReadPixels`/`GetTexImage`.
 | Transform feedback | State machine + đếm draw, không capture varying |
 | `glLogicOp` | Shadow only (shader compute-ROP có nhưng chưa nối vào draw) |
 | Stencil test | Đã lưu, chưa encode |
-| `glColorMask` | No-op (chưa bake write-mask) |
+| `glColorMask` | Đã bake write-mask attachment 0 (`AppleMetalBridge.mm` writeMask, kiểm bởi `test_water_translucent_apple` case4); MRT > 0 chưa |
 | Blend attachment > 0, `ClearBuffer` MRT > 0 | Chỉ single-target |
 | Texture compressed / 3D / multisample storage | No-op hoặc fallback RGBA8 kèm log |
 | `ReadPixels` | Chỉ RGBA/BGRA + `UNSIGNED_BYTE` |
