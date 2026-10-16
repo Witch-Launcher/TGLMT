@@ -468,6 +468,13 @@ public:
         // tách ra drawMs/clrMs/endMs/stallMs để biết frame ~50ms đi đâu khi
         // thr=0 (GPU không nghẽn) mà FPS vẫn thấp. Không cần profiler trên máy.
         uint64_t nsDraw = 0;         // trong AppleDrawGL (encode 1 draw)
+        // Chia pha AppleDrawGL (chỉ cộng khi DiagOn — release giữ throughput).
+        // Perf harness đọc trực tiếp để tìm hot path, không in ra log release.
+        uint64_t nsPipe = 0;         // build key + lookup pipeline
+        uint64_t nsUniform = 0;      // staging + upload uniforms tách VS/FS
+        uint64_t nsUbo = 0;          // bind UBO per-stage
+        uint64_t nsSamp = 0;         // bind texture + sampler
+        uint64_t nsIdx = 0;          // rewrite baseVertex + ring upload index
         uint64_t nsClear = 0;        // trong glClear
         uint64_t nsEnd = 0;          // trong Renderer::EndFrame (flush + present)
         uint64_t nsStall = 0;        // trong Context::CommitAndWait (chờ GPU xong)
@@ -523,6 +530,24 @@ public:
         PhaseTimer(AppleStats& s, uint64_t AppleStats::*f)
             : st(&s), field(f), t0(std::chrono::steady_clock::now()) {}
         ~PhaseTimer() {
+            auto d = std::chrono::steady_clock::now() - t0;
+            st->*field +=
+                (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+        }
+    };
+    // Như PhaseTimer nhưng chỉ đo khi active (DiagOn) — release không mất
+    // clock call nào trong draw path nóng.
+    struct DiagPhase {
+        AppleStats* st;
+        uint64_t AppleStats::*field;
+        std::chrono::steady_clock::time_point t0;
+        bool on;
+        DiagPhase(AppleStats& s, uint64_t AppleStats::*f, bool active)
+            : st(&s), field(f), t0(), on(active) {
+            if (on) t0 = std::chrono::steady_clock::now();
+        }
+        ~DiagPhase() {
+            if (!on) return;
             auto d = std::chrono::steady_clock::now() - t0;
             st->*field +=
                 (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
@@ -623,6 +648,16 @@ public:
     // PSO đã resolve từ key (sống qua flush encoder — PSO tái dùng cho pass sau).
     // Khác pendingPipeline (state đã bind trong encoder đang mở, reset khi flush).
     std::shared_ptr<metal::IRenderPipeline> cachedPipe;
+    // MRU N-entry cho key→PSO: game ping-pong vài pipeline liên tục
+    // (opaque/cutout/translucent/entity/GUI) nên cache 1 entry miss hoài →
+    // bridge lookup (string+mutex) mỗi draw. Tuyến tính N nhỏ rẻ hơn nhiều.
+    static constexpr size_t kPipeCacheN = 8;
+    struct PipeCacheEnt {
+        PipelineKey key;
+        std::shared_ptr<metal::IRenderPipeline> pipe;
+        bool valid = false;
+    };
+    PipeCacheEnt pipeCache[kPipeCacheN];
     // ---- Resource staging (upload coalescing): buffer + texture updates defer ----
     // Buffer: glBufferSubData* chỉ memcpy vào shadow + ghi range vào staging;
     // GPU copy + didModifyRange dồn đến FlushBufferStaging() (trước draw dùng buffer,

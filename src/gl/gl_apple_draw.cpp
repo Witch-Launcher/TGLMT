@@ -106,8 +106,12 @@ static std::shared_ptr<metal::IBuffer> FallbackZeroBuf(Context& c) {
 // Sampler state cho 1 unit: SamplerObject đã bind, else dựng từ TextureObject.params
 // (glTexParameter), else default LINEAR/REPEAT. Cache theo khóa đơn giản.
 static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint unit,
-                                                            const TextureObject& tex) {
-    static thread_local std::map<uint64_t, std::shared_ptr<metal::ISamplerState>> cache;
+                                                             const TextureObject& tex) {
+    // unordered_map (hash) + last-key hit: game bind lặp cùng texture/sampler
+    // liên tục; std::map cây cũ tốn pointer-chase mỗi draw (samp ~3.6us).
+    static thread_local std::unordered_map<uint64_t, std::shared_ptr<metal::ISamplerState>> cache;
+    static thread_local uint64_t lastKey = 0;
+    static thread_local std::shared_ptr<metal::ISamplerState> lastVal;
     GLuint sid = c.state.BoundSampler(unit);
     uint32_t minF = 0x2601, magF = 0x2601, sW = 0x2901, tW = 0x2901;
     float aniso = 1.0f, lodMin = 0.0f, lodMax = 1000.0f;
@@ -179,14 +183,23 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
             c.LogDebug(0, 0, 0, 0, b);
         }
     }
+    if (key == lastKey && lastVal) return lastVal;
     auto it = cache.find(key);
-    if (it != cache.end()) return it->second;
+    if (it != cache.end()) {
+        lastKey = key;
+        lastVal = it->second;
+        return it->second;
+    }
     metal::SamplerDesc d;
     d.minFilter = minF; d.magFilter = magF; d.sWrap = sW; d.tWrap = tW; d.maxAniso = aniso;
     d.noMip = noMip;
     d.lodMin = lodMin; d.lodMax = lodMax;
     auto s = c.device->makeSampler(d);
-    if (s) cache[key] = s;
+    if (s) {
+        cache[key] = s;
+        lastKey = key;
+        lastVal = s;
+    }
     return s;
 }
 
@@ -404,6 +417,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     if (c.device->isNull()) return false;
     if (count <= 0) return true; // no-op đã lọc ở EmitDraw, giữ an toàn
     c.appleStats.drawsAttempted++;
+    const bool dgPhase = c.DiagOn(); // phase timers chỉ đo khi diag (release 0 cost)
     if (baseInstance != 0) {
         c.LogDebug(0, 0, 0, 0, "AppleDrawGL: baseInstance trace-only (Metal non-indirect)");
         return false;
@@ -728,6 +742,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // BỎ CẢ bridge lookup (build string + mutex). Trước đây mỗi draw vẫn lookup.
     std::shared_ptr<metal::IRenderPipeline> pipe;
     {
+        Context::DiagPhase _dp(c.appleStats, &Context::AppleStats::nsPipe, dgPhase);
         Context::PipelineKey want;
         want.vsLib = pr.appleVS.get();
         want.fsLib = pr.appleFS.get();
@@ -739,8 +754,18 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (opts.blend) want.blend0 = opts.blend0;
         want.nAttribs = casN;
         for (uint32_t k = 0; k < casN; ++k) want.attribs[k] = cas[k];
-        if (c.pendingPipeValid && c.cachedPipe && want == c.pendingPipeKey) {
-            pipe = c.cachedPipe;
+        int hit = -1;
+        for (size_t k = 0; k < Context::kPipeCacheN; ++k) {
+            auto& e = c.pipeCache[k];
+            if (e.valid && e.pipe && want == e.key) { hit = (int)k; break; }
+        }
+        if (hit >= 0) {
+            pipe = c.pipeCache[hit].pipe;
+            if (hit > 0) { // move-to-front
+                Context::PipeCacheEnt e = std::move(c.pipeCache[hit]);
+                for (int k = hit; k > 0; --k) c.pipeCache[k] = std::move(c.pipeCache[k - 1]);
+                c.pipeCache[0] = std::move(e);
+            }
             c.appleStats.pipelineLookupSkipped++;
         } else {
             c.appleStats.pipelineLookups++;
@@ -749,12 +774,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                                                 casN ? cas : nullptr, casN,
                                                 casN ? cas[0].stride : 0, &opts);
             if (pipe) {
-                c.pendingPipeKey = std::move(want);
-                c.pendingPipeValid = true;
-                c.cachedPipe = pipe;
-            } else {
-                c.pendingPipeValid = false;
-                c.cachedPipe.reset();
+                for (size_t k = Context::kPipeCacheN - 1; k > 0; --k)
+                    c.pipeCache[k] = std::move(c.pipeCache[k - 1]);
+                c.pipeCache[0].key = std::move(want);
+                c.pipeCache[0].pipe = pipe;
+                c.pipeCache[0].valid = true;
             }
         }
     }
@@ -1070,6 +1094,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     std::shared_ptr<metal::IBuffer> vsUbuf, fsUbuf;
     size_t vsUoff = 0, fsUoff = 0;
     {
+        Context::DiagPhase _dp(c.appleStats, &Context::AppleStats::nsUniform, dgPhase);
         size_t vsSize = pr.vsUBSize ? pr.vsUBSize : 16;
         size_t fsSize = pr.fsUBSize ? pr.fsUBSize : 16;
         // Scratch tái dùng (thread_local): cấp phát vector mỗi draw là malloc
@@ -1153,6 +1178,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // (trước đây push_back mỗi slot UB thiếu buffer = atomic inc/dec mỗi draw).
     std::shared_ptr<metal::IBuffer> uboKeepOne;
     {
+        Context::DiagPhase _dp(c.appleStats, &Context::AppleStats::nsUbo, dgPhase);
         uboKeepOne = FallbackZeroBuf(c);
         auto bindZeroV = [&](int s) {
             if (!uboKeepOne) return;
@@ -1348,6 +1374,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
         }
     }
+    {
+        Context::DiagPhase _dp(c.appleStats, &Context::AppleStats::nsSamp, dgPhase);
     // Sampler/texture theo glUniform1i unit → MSL slot k (fix bug bind theo unit):
     // FS samplers (theo thứ tự khai báo) → fragment texture(k)/sampler(k).
     // VS samplers → vertex texture(k)/sampler(k). Mặc định unit 0 đúng GL.
@@ -1693,6 +1721,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             if (ss) enc->setFragmentSamplerState(ss.get(), unit);
         }
     }
+    } // nsSamp
     // Index buffer. Metal drawIndexed KHÔNG có baseVertex → emulate bằng cách cộng
     // baseVertex vào từng giá trị index (đúng GL). baseVertex âm làm index âm → lỗi.
     // Deferred full: fast-path EBO GPU giữ nguyên (0 copy); còn lại ring-upload.
@@ -1703,6 +1732,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     metal::IndexType ity = metal::IndexType::UInt32;
     auto ibGet = [&]() -> metal::IBuffer* { return ibRaw ? ibRaw : ibOwned.get(); };
     if (indexed) {
+        Context::DiagPhase _dp(c.appleStats, &Context::AppleStats::nsIdx, dgPhase);
         // Gap dAtt/dEnc trên máy (frame 6000: ~4600 draws rơi mà mọi counter =0)
         // chính là các nhánh return false không đếm ở đây → giờ đếm miscFail.
         if (indexType != 0x1403 && indexType != 0x1405) { c.appleStats.miscFail++; return false; }
