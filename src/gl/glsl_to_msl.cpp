@@ -112,12 +112,17 @@ static size_t MSLAlign(const std::string& m) {
     if (m == "float" || m == "int" || m == "uint" || m == "bool") return 4;
     if (m == "float2" || m == "int2" || m == "uint2") return 8;
     if (m == "float2x2") return 8;
+    // Metal float3/int3/uint3 align 16 (dù size 12): scalar sau vec3 ở +12
+    // là đọc vào padding (Sodium u_RegionOffset → CurrentTime/RegionID lệch
+    // 4B → fade đóng băng từng chunk). Luôn align 16 cho vector 3 phần tử.
     return 16; // vec3/vec4/mat3/mat4 và mọi vector 3-4 phần tử
 }
 static size_t MSLSize(const std::string& m) {
     if (m == "float" || m == "int" || m == "uint" || m == "bool") return 4;
     if (m == "float2" || m == "int2" || m == "uint2") return 8;
-    if (m == "float3" || m == "int3" || m == "uint3") return 12;
+    // vec3 pad 16 để member tiếp theo khớp Metal (upload copy min(size, data)
+    // nên 12B từ glUniform3f vẫn đủ, 4B pad giữ 0).
+    if (m == "float3" || m == "int3" || m == "uint3") return 16;
     if (m == "float4" || m == "int4" || m == "uint4") return 16;
     if (m == "float2x2") return 16;
     if (m == "float3x3") return 48;

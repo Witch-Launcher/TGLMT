@@ -378,6 +378,71 @@ int main() {
     printf("fulldraw2 mid=(%u,%u,%u,%u)\n", mid[0], mid[1], mid[2], mid[3]);
     Check(mid[0] > 200 && mid[1] > 200 && mid[2] > 200, "fulldraw2 den (draw_id/uniform sai?)");
 
+    // Draw 3a/3b: xác thực uniform time/region/FOG có tác dụng thật.
+    // Fog ĐỎ alpha 1, fog range xa (fog≈0 ở gốc). Trắng = fade đúng, ĐỎ = time/region kẹt.
+    // 3a (RegionID): times[256]=-1000 → RegionID=1 đọc idx 256 → fadeFactor=1 → trắng.
+    //   RegionID kẹt 0 → đọc idx 0 (time 0), inv=0 → fade 0 → ĐỎ.
+    // 3b (CurrentTime): RegionID=0, times[0]=50, now=100, inv=1 → fade=1 → trắng.
+    //   Time kẹt 0 → fade=clamp(-50)=0 → ĐỎ.
+    {
+        uint8_t gb2[192];
+        memset(gb2, 0, sizeof(gb2));
+        for (int i = 0; i < 16; ++i) ((float*)gb2)[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+        for (int i = 0; i < 16; ++i) ((float*)(gb2 + 64))[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+        ((float*)(gb2 + 128))[0] = 1.0f; // fogColor ĐỎ alpha 1
+        ((float*)(gb2 + 128))[3] = 1.0f;
+        ((float*)(gb2 + 144))[0] = 100000.0f; // envFog xa
+        ((float*)(gb2 + 144))[1] = 200000.0f;
+        ((float*)(gb2 + 152))[0] = 100000.0f; // renderFog xa
+        ((float*)(gb2 + 152))[1] = 200000.0f;
+        ((float*)(gb2 + 160))[0] = 0.25f;
+        ((float*)(gb2 + 160))[1] = 0.25f;
+        glBindBuffer(0x8A11, ubo);
+        glBufferData(0x8A11, sizeof(gb2), gb2, 0x88E4);
+        // 3a
+        int32_t times2[512];
+        memset(times2, 0, sizeof(times2));
+        times2[256] = -1000;
+        glBindBuffer(0x8892, sectBuf);
+        glBufferData(0x8892, sizeof(times2), times2, 0x88E4);
+        glTexBuffer(0x8C2A, 0x8235, sectBuf); // MC rebind mỗi frame → refresh cache
+        for (int i = 0; i < 3; ++i) tri[i].light[3] = 0u;
+        glBindBuffer(0x8892, vbo);
+        glBufferData(0x8892, sizeof(tri), tri, 0x88E4);
+        glUniform3f(glGetUniformLocation(prog, "u_RegionOffset"), 0, 0, 0);
+        glUniform1i(glGetUniformLocation(prog, "u_CurrentTime"), 100);
+        glUniform1ui(glGetUniformLocation(prog, "u_RegionID"), 1);
+        // fadeInv=0 qua UBO? gb2 offset 176 = 0 → inv 0.
+        glClear(0x00004000 | 0x00000100);
+        while (glGetError() != 0) {}
+        glDrawArrays(0x0004, 0, 3);
+        Check(glGetError() == 0, "fulldraw3a gl error");
+        memset(px, 0, sizeof(px));
+        glReadPixels(0, 0, 256, 256, 0x1908, 0x1401, px);
+        mid = px + (128 * 256 + 128) * 4;
+        printf("fulldraw3a mid=(%u,%u,%u) (trang=RegionID dung, do=ket)\n", mid[0], mid[1], mid[2]);
+        Check(mid[0] > 200 && mid[1] > 200 && mid[2] > 200, "fulldraw3a DO (RegionID/time ket?)");
+        // 3b
+        times2[0] = 50;
+        times2[256] = 0;
+        glBindBuffer(0x8892, sectBuf);
+        glBufferData(0x8892, sizeof(times2), times2, 0x88E4);
+        glTexBuffer(0x8C2A, 0x8235, sectBuf); // refresh cache
+        ((float*)gb2)[176 / 4] = 1.0f; // fadeInv=1
+        glBindBuffer(0x8A11, ubo);
+        glBufferData(0x8A11, sizeof(gb2), gb2, 0x88E4);
+        glUniform1ui(glGetUniformLocation(prog, "u_RegionID"), 0);
+        glClear(0x00004000 | 0x00000100);
+        while (glGetError() != 0) {}
+        glDrawArrays(0x0004, 0, 3);
+        Check(glGetError() == 0, "fulldraw3b gl error");
+        memset(px, 0, sizeof(px));
+        glReadPixels(0, 0, 256, 256, 0x1908, 0x1401, px);
+        mid = px + (128 * 256 + 128) * 4;
+        printf("fulldraw3b mid=(%u,%u,%u) (trang=time dung, do=ket)\n", mid[0], mid[1], mid[2]);
+        Check(mid[0] > 200 && mid[1] > 200 && mid[2] > 200, "fulldraw3b DO (CurrentTime ket?)");
+    }
+
     glDeleteProgram(prog);
     if (gFails == 0) { printf("test_sodium_fulldraw_apple PASS\n"); return 0; }
     printf("test_sodium_fulldraw_apple: %d FAIL\n", gFails);
