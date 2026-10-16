@@ -1746,24 +1746,63 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             const uint64_t gen = bit != c.buffers.end() ? bit->second.contentGen : 0;
             const uint8_t* rw = nullptr;
             static thread_local std::vector<uint8_t> scratch;
-            IdxRewriteEnt* hit = eboId ? IdxRewriteLookup(eboId, indexByteOff, count,
-                                                          baseVertex, (size_t)elem, gen)
-                                       : nullptr;
-            if (hit) {
-                rw = hit->bytes.data();
-            } else {
-                scratch.resize((size_t)count * elem);
+            // Sức chứa đỉnh thật (min trên mọi attrib, như IDXRANGE): baseVertex
+            // + index U16 vượt 64k là HỢP LỆ trong GL (đúng mục đích baseVertex).
+            // Bản cũ drop mọi nv > type-max → Sodium mất chunk oan (log 0x0502).
+            // Giờ chỉ drop khi âm hoặc vượt VBO (tránh fault Metal); vượt
+            // type-max thì widen rewrite lên U32 (tránh truncate 16-bit).
+            size_t capVerts = SIZE_MAX;
+            for (uint32_t ai2 = 0; ai2 < casN; ++ai2) {
+                const metal::CustomAttrib& ca = cas[ai2];
+                if (ca.bufferIndex >= 16 || !(bindMask & (1u << ca.bufferIndex))) continue;
+                if (ca.divisor > 0 || !ca.stride) continue;
+                auto bbit = c.buffers.find(bindMap[ca.bufferIndex].id);
+                if (bbit == c.buffers.end() || !bbit->second.gpu) continue;
+                size_t gpuLen = bbit->second.gpu->length();
+                size_t base2 = bindMap[ca.bufferIndex].off;
+                size_t elemBytes = (size_t)ca.size * GLTypeSize(ca.type);
+                if (gpuLen > base2 + ca.offset + elemBytes)
+                    capVerts = std::min(capVerts, (gpuLen - base2 - ca.offset - elemBytes) / ca.stride + 1);
+                else
+                    capVerts = 0;
+            }
+            size_t typeMax = (elem == 2) ? 0xFFFFu : 0xFFFFFFFFu;
+            size_t finalElem = elem;
+            {
+                // Pre-scan rẻ: quyết định widen/tràn trước khi lookup cache.
+                int64_t maxNv = 0;
                 for (GLsizei k = 0; k < count; ++k) {
                     int64_t v = (elem == 2) ? (int64_t)(srcBytes[2 * k] | (srcBytes[2 * k + 1] << 8))
                                             : (int64_t)(srcBytes[4 * k] | (srcBytes[4 * k + 1] << 8) |
                                                        (srcBytes[4 * k + 2] << 16) | (srcBytes[4 * k + 3] << 24));
                     int64_t nv = v + (int64_t)baseVertex;
-                    if (nv < 0 || (elem == 2 && nv > 0xFFFF) || (elem == 4 && (uint64_t)nv > 0xFFFFFFFFu)) {
-                        c.errors.Record(0x0502); // index âm/tràn sau cộng baseVertex
-                        c.appleStats.miscFail++; // gap dAtt/dEnc kỳ trước không truy được vì thiếu đếm
+                    if (nv < 0) {
+                        c.errors.Record(0x0502); // index âm sau cộng baseVertex
+                        c.appleStats.miscFail++;
                         return false;
                     }
-                    if (elem == 2) {
+                    if (nv > maxNv) maxNv = nv;
+                }
+                if (capVerts != SIZE_MAX && (uint64_t)maxNv >= (uint64_t)capVerts) {
+                    c.errors.Record(0x0502); // vượt VBO thật → Metal fault nếu encode
+                    c.appleStats.miscFail++;
+                    return false;
+                }
+                if ((uint64_t)maxNv > (uint64_t)typeMax) finalElem = 4; // widen U32
+            }
+            IdxRewriteEnt* hit = eboId ? IdxRewriteLookup(eboId, indexByteOff, count,
+                                                          baseVertex, finalElem, gen)
+                                       : nullptr;
+            if (hit) {
+                rw = hit->bytes.data();
+            } else {
+                scratch.resize((size_t)count * finalElem);
+                for (GLsizei k = 0; k < count; ++k) {
+                    int64_t v = (elem == 2) ? (int64_t)(srcBytes[2 * k] | (srcBytes[2 * k + 1] << 8))
+                                            : (int64_t)(srcBytes[4 * k] | (srcBytes[4 * k + 1] << 8) |
+                                                       (srcBytes[4 * k + 2] << 16) | (srcBytes[4 * k + 3] << 24));
+                    int64_t nv = v + (int64_t)baseVertex;
+                    if (finalElem == 2) {
                         scratch[2 * k] = (uint8_t)nv;
                         scratch[2 * k + 1] = (uint8_t)(nv >> 8);
                     } else {
@@ -1774,11 +1813,12 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     }
                 }
                 if (eboId) IdxRewriteStore(eboId, indexByteOff, count, baseVertex,
-                                           (size_t)elem, gen, scratch);
+                                           finalElem, gen, scratch);
                 rw = scratch.data();
             }
+            if (finalElem == 4 && elem == 2) ity = metal::IndexType::UInt32; // widen
             metal::IBuffer* raw = nullptr;
-            size_t roff = RingUpload(c, rw, (size_t)count * elem, raw, ibKeep);
+            size_t roff = RingUpload(c, rw, (size_t)count * finalElem, raw, ibKeep);
             if (raw && !ibKeep) {
                 for (size_t i = 0; i < Context::kRingFrames; ++i)
                     if (c.ringBuf[i] && c.ringBuf[i].get() == raw) { ibOwned = c.ringBuf[i]; break; }

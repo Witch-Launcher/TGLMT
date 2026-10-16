@@ -189,6 +189,49 @@ int main() {
         Check(ctx.appleStats.miscFail > miscBefore, "tran phai dem miscFail (truy gap dAtt/dEnc)");
     }
 
+    // --- 5b. baseVertex vượt 64k NHƯNG trong VBO: U16 idx + bv=70000,
+    // VBO 70003 verts (tam giác ở slot 70000..70002) → phải encode (widen U32),
+    // pixels trắng (truncate 16-bit sẽ đọc nhầm verts 0 → đen).
+    {
+        GLuint vao, vbo, ebo;
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        const int N = 70000;
+        static uint32_t big[70003 * 2];
+        memset(big, 0, sizeof(big));
+        big[(N + 0) * 2 + 0] = 0;
+        big[(N + 0) * 2 + 1] = 0;
+        big[(N + 1) * 2 + 0] = 65535;
+        big[(N + 1) * 2 + 1] = 0;
+        big[(N + 2) * 2 + 0] = 32767;
+        big[(N + 2) * 2 + 1] = 65535;
+        glGenBuffers(1, &vbo);
+        glBindBuffer(0x8892, vbo);
+        glBufferData(0x8892, sizeof(big), big, 0x88E4);
+        glEnableVertexAttribArray(0);
+        glVertexAttribIPointer(0, 2, 0x1405, 8, (void*)0);
+        uint16_t idx[3] = {0, 1, 2};
+        glGenBuffers(1, &ebo);
+        glBindBuffer(0x8893, ebo);
+        glBufferData(0x8893, sizeof(idx), idx, 0x88E4);
+        glUseProgram(prog);
+        glClearColor(0, 0, 0, 1);
+        glClear(0x00004000);
+        while (glGetError() != 0) {}
+        uint64_t encBefore = ctx.appleStats.drawsEncoded;
+        glDrawElementsBaseVertex(0x0004, 3, 0x1403, (void*)0, N);
+        GLenum e = glGetError();
+        printf("widen bv err=0x%x encoded=%d\n", e, ctx.appleStats.drawsEncoded > encBefore);
+        Check(e == 0, "widen bv bi 0x502 oan (drop chunk that)");
+        Check(ctx.appleStats.drawsEncoded > encBefore, "widen bv not encoded");
+        unsigned char px[64 * 64 * 4];
+        memset(px, 0, sizeof(px));
+        glReadPixels(0, 0, 64, 64, 0x1908, 0x1401, px);
+        unsigned char* mid = px + (32 * 64 + 32) * 4;
+        printf("widen mid=(%u,%u,%u)\n", mid[0], mid[1], mid[2]);
+        Check(mid[0] > 200 && mid[1] > 200 && mid[2] > 200, "widen bv pixels sai (truncate?)");
+    }
+
     // --- 6. MultiDrawElementsIndirect thật: 1 draw qua DIB ---
     {
         GLuint vao, vbo, ebo, dib;
