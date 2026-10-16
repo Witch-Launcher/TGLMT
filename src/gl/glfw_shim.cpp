@@ -153,9 +153,9 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
             // Tag build: force-diag nhận diện được ngay dòng frame=1 trong log
             // (phát hiện sai dylib trên máy — TGLMT_DIAG không set được từ launcher).
 #if defined(TGLMT_FORCE_DIAG)
-            static const char* kBuildTag = "basevertex-widen";
+            static const char* kBuildTag = "chunk-perprog-diag";
 #else
-            static const char* kBuildTag = "basevertex-widen";
+            static const char* kBuildTag = "chunk-perprog-diag";
 #endif
             fprintf(stderr,
                     "[TGLMT] build=%s frame=%llu dt=%ldms dAtt=%llu dEnc=%llu "
@@ -239,6 +239,25 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
                     (unsigned long long)a.nBufferStaged, (unsigned long long)a.nPool,
                     (unsigned long long)(a.maxBuf >> 20),
                     (unsigned long long)cx.opt.poolBudgetMB);
+            // progDraw# (chỉ DiagOn): top program theo drawsEncoded luỹ kế —
+            // phân biệt CPU-cull (prog terrain ~0 draws) vs GPU-invisible
+            // (draws đủ mà không pixels). Release bỏ qua (không log).
+            if (cx.DiagOn()) {
+                std::vector<std::pair<GLuint, uint64_t>> pv(a.progEncoded.begin(),
+                                                            a.progEncoded.end());
+                std::sort(pv.begin(), pv.end(),
+                          [](const auto& x, const auto& y) { return x.second > y.second; });
+                std::string top;
+                char pb[48];
+                for (size_t pi = 0; pi < pv.size() && pi < 8; ++pi) {
+                    snprintf(pb, sizeof(pb), "p%u=%llu ", pv[pi].first,
+                             (unsigned long long)pv[pi].second);
+                    top += pb;
+                }
+                fprintf(stderr, "[TGLMT] progDraw# frame=%llu nProg=%zu top %s\n",
+                        (unsigned long long)nSwap, pv.size(), top.c_str());
+                fflush(stderr);
+            }
             // Top hàm gl* nuốt thời gian CPU trong cửa sổ này (delta so với dump
             // trước). cover = % dt mà các call extern "C" GL giải thích được;
             // thấp ⇒ thời gian nằm ngoài GL entry (Java/MobileGlues) hoặc call

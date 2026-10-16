@@ -357,6 +357,27 @@ int main() {
     printf("fulldraw mid=(%u,%u,%u,%u)\n", mid[0], mid[1], mid[2], mid[3]);
     Check(mid[0] > 200 && mid[1] > 200 && mid[2] > 200, "fulldraw pixels den (shader/VAO/UBO?)");
 
+    // Draw 2: section id != 0 (chunk xa, per-chunk translation thật).
+    // draw_id=5 → rel=(0,1,1)*16=(0,16,16); regionOffset=(0,-16,-16) bù lại → tam giác về giữa.
+    // Trắng = byte .w + uniform vec3/uint/int đúng với giá trị thật (không chỉ số 0).
+    for (int i = 0; i < 3; ++i) tri[i].light[3] = 5u;
+    glBindBuffer(0x8892, vbo);
+    glBufferData(0x8892, sizeof(tri), tri, 0x88E4);
+    glUniform3f(glGetUniformLocation(prog, "u_RegionOffset"), 0, -16, -16);
+    glClear(0x00004000 | 0x00000100);
+    while (glGetError() != 0) {}
+    encBefore = ctx.appleStats.drawsEncoded;
+    glDrawArrays(0x0004, 0, 3);
+    e = glGetError();
+    printf("fulldraw2 err=0x%x encoded=%d\n", e, ctx.appleStats.drawsEncoded > encBefore);
+    Check(e == 0, "fulldraw2 gl error");
+    Check(ctx.appleStats.drawsEncoded > encBefore, "fulldraw2 not encoded");
+    memset(px, 0, sizeof(px));
+    glReadPixels(0, 0, 256, 256, 0x1908, 0x1401, px);
+    mid = px + (128 * 256 + 128) * 4;
+    printf("fulldraw2 mid=(%u,%u,%u,%u)\n", mid[0], mid[1], mid[2], mid[3]);
+    Check(mid[0] > 200 && mid[1] > 200 && mid[2] > 200, "fulldraw2 den (draw_id/uniform sai?)");
+
     glDeleteProgram(prog);
     if (gFails == 0) { printf("test_sodium_fulldraw_apple PASS\n"); return 0; }
     printf("test_sodium_fulldraw_apple: %d FAIL\n", gFails);
