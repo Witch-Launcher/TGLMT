@@ -2153,6 +2153,28 @@ static bool ThreadHelpersMSL(
         // P3: mọi kind sample()-được đều cần _smp; chỉ B/I/U (buffer read()) không.
         if (k != 'B' && k != 'I' && k != 'U') items.push_back("T:" + sname + "_smp");
     };
+    // GLSL overload CÙNG arity khác kiểu tham số (Complementary: pow2 int/float/vec2/3/4,
+    // sqrt*, clamp01...). MSL cũng overload được → nếu mọi candidate cùng shape gọi được
+    // (req y hệt + splitKind y hệt theo vị trí) thì chọn candidate đầu: call site giữ tên,
+    // MSL tự chọn overload theo kiểu tại compile time. Khác req/kind → vẫn mơ hồ thật.
+    auto resolveOverload = [&](const std::string& nm, int arity, Def*& out) -> bool {
+        Def* f = nullptr;
+        for (auto& d : defs) {
+            if (d.name != nm || d.origCount != arity) continue;
+            if (!f) { f = &d; continue; }
+            if (d.req != f->req || d.formalNames.size() != f->formalNames.size()) return false;
+            for (size_t i = 0; i < d.formalNames.size(); ++i) {
+                char ka = 0, kb = 0;
+                auto ia = d.splitKind.find(d.formalNames[i]);
+                auto ib = f->splitKind.find(f->formalNames[i]);
+                if (ia != d.splitKind.end()) ka = ia->second;
+                if (ib != f->splitKind.end()) kb = ib->second;
+                if (ka != kb) return false;
+            }
+        }
+        out = f;
+        return f != nullptr;
+    };
     auto declFor = [&](const std::string& item) -> std::string {
         if (item == "U:") return "constant TGLMTUniforms& tglmt_u";
         if (item.rfind("B:", 0) == 0) return "constant TGLMTUBO_" + item.substr(2) + "& ubo_" + item.substr(2);
@@ -2313,22 +2335,24 @@ static bool ThreadHelpersMSL(
             changed = false;
             for (auto& cs : calls) {
                 Def* target = nullptr;
+                int nmatch = 0;
                 for (auto& d : defs)
                     if (d.name == cs.callee && (int)cs.actuals.size() == d.origCount) {
-                        if (target) {
-                            err = "helper " + cs.callee + " gọi mơ hồ (trùng arity n=" +
-                                  std::to_string(cs.actuals.size()) + " defs=";
-                            for (auto& d2 : defs)
-                                if (d2.name == cs.callee)
-                                    err += d2.key + "@" + std::to_string(d2.lp) + " ";
-                            err += ")";
-                            return false;
-                        }
-                        target = &d;
+                        if (!target) target = &d;
+                        ++nmatch;
                     }
-                if (!target) {
+                if (nmatch == 0) {
                     err = "helper " + cs.callee + " sai arity (co " +
                           std::to_string(cs.actuals.size()) + ")";
+                    return false;
+                }
+                if (nmatch > 1 && !resolveOverload(cs.callee, (int)cs.actuals.size(), target)) {
+                    err = "helper " + cs.callee + " gọi mơ hồ (trùng arity n=" +
+                          std::to_string(cs.actuals.size()) + " defs=";
+                    for (auto& d2 : defs)
+                        if (d2.name == cs.callee)
+                            err += d2.key + "@" + std::to_string(d2.lp) + " ";
+                    err += ")";
                     return false;
                 }
                 cs.target = target;
@@ -2532,20 +2556,21 @@ static bool ThreadHelpersMSL(
                     std::vector<std::string> actuals = SplitCallArgs(text.substr(q + 1, c - q - 1));
                     if (actuals.size() == 1 && Trim(actuals[0]).empty()) actuals.clear();
                     Def* target = nullptr;
-                    int matchCount = 0;
+                    int nmatch = 0;
                     for (auto& d : defs)
                         if (d.name == nm && (int)actuals.size() == d.origCount) {
-                            if (target) {
-                                err = "helper " + nm + " gọi mơ hồ (trùng arity kids=";
-                                for (auto& d2 : defs)
-                                    if (d2.name == nm) err += d2.key + " ";
-                                err += ")";
-                                return false;
-                            }
-                            target = &d;
+                            if (!target) target = &d;
+                            ++nmatch;
                         }
-                    if (!target) {
+                    if (nmatch == 0) {
                         err = "helper " + nm + " sai arity (co " + std::to_string(actuals.size()) + ")";
+                        return false;
+                    }
+                    if (nmatch > 1 && !resolveOverload(nm, (int)actuals.size(), target)) {
+                        err = "helper " + nm + " gọi mơ hồ (trùng arity kids=";
+                        for (auto& d2 : defs)
+                            if (d2.name == nm) err += d2.key + " ";
+                        err += ")";
                         return false;
                     }
                     std::string rebuilt;
