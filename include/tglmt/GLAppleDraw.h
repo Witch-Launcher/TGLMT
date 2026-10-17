@@ -11,6 +11,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
 // Trả false → caller fallback cơ chế deferred applePendingClear (Null backend,
 // chưa có target, makeClearEncoder fail).
 bool AppleClearNow(GLbitfield mask);
+// glClearBufferfv(COLOR, drawbuffer=d) immediate trên FBO `fbo`: chỉ clear
+// attachment tại slot d với màu rgba. slotOnly=-1 → mọi slot (glClear).
+bool AppleClearBufferImage(GLuint fbo, GLint slot, const float rgba[4]);
 // Ghi MSL đã convert (vs+fs) của program ra dir (chẩn đoán trên máy).
 // Trả false khi program không tồn tại/chưa link.
 bool DumpProgramMSL(GLuint program, const std::string& dir, std::string& err);

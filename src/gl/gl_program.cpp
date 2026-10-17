@@ -97,6 +97,7 @@ void glLinkProgram(GLuint p) {
     pr.attribLoc.clear(); pr.appleVS.reset(); pr.appleFS.reset();
     pr.appleCS.reset(); pr.appleCSPipeline.reset(); pr.computeMSL.clear();
     pr.computeBlockSlots.clear(); pr.computeSamplers.clear(); pr.computeUBSize = 0;
+    pr.vsShaderBlocks.clear(); pr.fsShaderBlocks.clear(); pr.storageBlocks.clear();
     pr.vsImages.clear(); pr.fsImages.clear(); pr.computeImages.clear();
     pr.computeAtomics.clear(); pr.vsAtomics.clear(); pr.fsAtomics.clear();
     pr.vsUBSize = pr.fsUBSize = 0;
@@ -115,9 +116,22 @@ void glLinkProgram(GLuint p) {
             pr.computeLocalSize[1] = its->second.conv.localSize[1];
             pr.computeLocalSize[2] = its->second.conv.localSize[2];
             pr.computeBlockSlots = its->second.conv.blockSlots;
+            // P4: SSBO program-scope cho glShaderStorageBlockBinding + query 0x92E6.
+            for (auto& b : its->second.conv.blocks)
+                if (b.isStorage)
+                    pr.storageBlocks.push_back({b.name, b.binding, b.bufferSize,
+                                                (int)b.members.size(), 4u});
             // P6f: compute samplers (thứ tự khai báo = texture slot) + uniforms.
-            auto kindOf = [](const GLSLVar& s) {
-                return s.isBuffer ? 'B' : s.isCube ? 'C' : s.isArray ? 'A' : s.isShadow ? 'S' : '2';
+            auto kindOf = [](const GLSLVar& s) -> char {
+                if (s.isBuffer) return s.sampleType == "int" ? 'I' : s.sampleType == "uint" ? 'U' : 'B';
+                if (s.isCube) return 'C';
+                if (s.isArray) return 'A';
+                if (s.isShadow) return 'S';
+                if (s.is1D) return '1';
+                if (s.is3D) return s.sampleType == "int" ? 'x' : s.sampleType == "uint" ? 'y' : '3';
+                if (s.sampleType == "int") return 'i';
+                if (s.sampleType == "uint") return 'u';
+                return '2';
             };
             for (auto& s : its->second.conv.samplers) {
                 pr.computeSamplers.push_back(s.name);
@@ -294,8 +308,17 @@ void glLinkProgram(GLuint p) {
     // 4b. Sampler lists + units mặc định 0 (đúng GL) cho AppleDrawGL slot mapping.
     {
         pr.vsSamplers.clear(); pr.fsSamplers.clear();
-        auto kindOf = [](const GLSLVar& s) {
-            return s.isBuffer ? 'B' : s.isCube ? 'C' : s.isArray ? 'A' : s.isShadow ? 'S' : '2';
+        auto kindOf = [](const GLSLVar& s) -> char {
+            // P3: đủ kind sampler (1/2/S/3/C/A/B/I/U/i/u/x/y) cho draw path KindTarget.
+            if (s.isBuffer) return s.sampleType == "int" ? 'I' : s.sampleType == "uint" ? 'U' : 'B';
+            if (s.isCube) return 'C';
+            if (s.isArray) return 'A';
+            if (s.isShadow) return 'S';
+            if (s.is1D) return '1';
+            if (s.is3D) return s.sampleType == "int" ? 'x' : s.sampleType == "uint" ? 'y' : '3';
+            if (s.sampleType == "int") return 'i';
+            if (s.sampleType == "uint") return 'u';
+            return '2';
         };
         for (auto& s : vsC.samplers) {
             pr.vsSamplers.push_back(s.name);
@@ -351,6 +374,26 @@ void glLinkProgram(GLuint p) {
         pr.uniformBlocks.clear();
         pr.vsBlocks.clear();
         pr.fsBlocks.clear();
+        // P4: slot thật per-stage từ converter (UBO 17+k, SSBO xen kẽ cùng dải) —
+        // AppleDrawGL bind theo list này; vsBlocks/fsBlocks (UBO names) chỉ còn
+        // cho stage-flag query + diag.
+        pr.vsShaderBlocks.clear();
+        pr.fsShaderBlocks.clear();
+        for (auto& bs : vsC.blockSlots)
+            pr.vsShaderBlocks.push_back({bs.name, bs.slot, bs.isStorage});
+        for (auto& bs : fsC.blockSlots)
+            pr.fsShaderBlocks.push_back({bs.name, bs.slot, bs.isStorage});
+        // P4: SSBO program-scope — index cho glShaderStorageBlockBinding (vs rồi fs,
+        // dedupe tên). Override binding giữ qua relink (ssboBindOverride không clear).
+        pr.storageBlocks.clear();
+        auto addStorage = [&](const GLSLBlock& b, unsigned mask) {
+            for (auto& s : pr.storageBlocks)
+                if (s.name == b.name) { s.stageMask |= mask; return; }
+            pr.storageBlocks.push_back({b.name, b.binding, b.bufferSize,
+                                        (int)b.members.size(), mask});
+        };
+        for (auto& b : vsC.blocks) if (b.isStorage) addStorage(b, 1u);
+        for (auto& b : fsC.blocks) if (b.isStorage) addStorage(b, 2u);
         GLuint idx = 0;
         auto addBlock = [&](const std::string& nm, int layoutBind, bool isVS) {
             for (auto& b : pr.uniformBlocks) if (b.name == nm) return;
@@ -368,10 +411,12 @@ void glLinkProgram(GLuint p) {
             pr.uniformBlocks.push_back(ub);
         };
         for (auto& b : vsC.blocks) {
+            if (b.isStorage) continue; // SSBO: không phải UBO (query riêng)
             addBlock(b.name, b.binding, true);
             pr.vsBlocks.push_back(b.name);
         }
         for (auto& b : fsC.blocks) {
+            if (b.isStorage) continue;
             addBlock(b.name, b.binding, false);
             pr.fsBlocks.push_back(b.name);
         }

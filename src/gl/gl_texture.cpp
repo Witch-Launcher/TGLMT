@@ -328,6 +328,16 @@ static size_t Bpp(GLenum format, GLenum type) {
         default: return 4;
     }
 }
+// P3: bytes/pixel có xét type cho texture 3D (FLOAT/INT/UINT 4 byte/element).
+// Bpp() cũ bỏ qua type (đúng cho UBYTE union formats của path 2D) — không dùng
+// cho 3D float (R32F...) được.
+static size_t BppTyped3D(GLenum format, GLenum type) {
+    size_t b = Bpp(format, type);
+    if (type == 0x1406 /*FLOAT*/ || type == 0x1405 /*UNSIGNED_INT*/ ||
+        type == 0x1404 /*INT*/)
+        return b * 4;
+    return b;
+}
 // Pitch unpack đúng spec §8.5: ROW_LENGTH (pixel, 0 = width) rồi align.
 // Game 26.x set ROW_LENGTH = image width qua GlCommandEncoder.writeToTexture
 // (font glyph sub-upload) — bỏ qua là đọc sai hàng (chữ hỏng).
@@ -685,7 +695,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     // giữ wrapper (AppleTarget) của gpu ĐỜI CŨ → draw kế tiếp trong cùng pass
     // re-use pendingTarget và ghi vào gpu đã bị thay (app sample gpu MỚI → rỗng:
     // atlas bake mất, GUI/terrain đen). Flush TRƯỚC khi thay gpu.
-    bool wasCurrentRT = (c.pendingEncoder && c.pendingColorTex == tp->id);
+    bool wasCurrentRT = (c.pendingEncoder && c.IsPendingColorId(tp->id));
     if (wasCurrentRT) c.FlushPendingEncoder();
     if (c.DiagOn() && (wasRTBefore || wasCurrentRT || (w >= 256 && h >= 256))) {
         static int nSwap = 0;
@@ -779,10 +789,101 @@ void glTexImage1D(GLenum t, GLint l, GLint inf, GLsizei w, GLint b, GLenum f, GL
     glTexImage2D(t, l, inf, w, 1, b, f, ty, p);
 }
 void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, GLsizei d, GLint b, GLenum f, GLenum ty, const void* p) {
-    if (target == 0x8070 || target == 0x8C19) return; // PROXY_3D/2D_ARRAY: probe, no-op
-    (void)target;(void)level;(void)inf;(void)w;(void)h;(void)d;(void)b;(void)f;(void)ty;(void)p;
-    // 3D → Metal type3D (M5 texture đầy đủ); hiện giữ shadow + log
-    Context::Current().LogDebug(0,0,0,0,"glTexImage3D staged (Metal type3D ở M3)");
+    if (target == 0x8070 || target == 0x8C19) return; // PROXY_3D/PROXY_2D_ARRAY: probe, no-op
+    Context& c = Context::Current();
+    if (target != 0x806F) { // TEXTURE_2D_ARRAY/CUBE_MAP_ARRAY: chưa hỗ trợ (M3 array)
+        c.LogDebug(0,0,0,0,"glTexImage3D: target != TEXTURE_3D chưa hỗ trợ");
+        return;
+    }
+    if (w < 0 || h < 0 || d < 0) { c.errors.Record(0x0501); return; }
+    TextureObject* tp = BoundTex(c, target);
+    if (!tp) return;
+    auto& tx = *tp;
+    // PBO unpack (spec §8): pixels là offset khi UNPACK bound.
+    bool hasUnpack = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/) != 0;
+    size_t bppAll = BppTyped3D(f, ty);
+    size_t rowLenAll = (w > 0) ? UnpackRowLen(c, (size_t)w, bppAll) : 0;
+    size_t skipAll = (size_t)c.state.PixelStore().unpackSkipRows * rowLenAll +
+                     (size_t)c.state.PixelStore().unpackSkipPixels * bppAll;
+    // 3D unpack giả định IMAGE_HEIGHT = h (không UNPACK_IMAGE_HEIGHT) — đúng cho
+    // Iris custom 3D texture (tight per-slice); các trường hợp khác chưa gặp.
+    size_t totalAll = skipAll + ((w > 0 && h > 0 && d > 0)
+                       ? (size_t)d * (size_t)h * rowLenAll : 0);
+    const uint8_t* pixBase = (const uint8_t*)p;
+    if (hasUnpack) {
+        bool okBase = true;
+        pixBase = UnpackBase(c, p, totalAll, okBase);
+        if (!okBase) { c.errors.Record(0x0501); return; }
+    }
+    bool hasData = hasUnpack || p;
+    // Mip level>0: GPU giữ base (như 2D) → shadow per-level phục vụ readback.
+    if (level > 0) {
+        if (level + 1 > tx.levels) tx.levels = level + 1;
+        if (w > 0 && h > 0 && d > 0) {
+            auto& ml = tx.mipData[level];
+            ml.w = w; ml.h = h; ml.d = d;
+            size_t bpp = BppTyped3D(f, ty);
+            ml.pixels.assign((size_t)w * h * d * bpp, 0);
+            if (hasData && ty == 0x1401 && (f == 0x1908 || f == 0x1903 || f == 0x8227)) {
+                size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+                size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                              (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+                const uint8_t* src = pixBase + skip;
+                for (GLsizei z = 0; z < d; ++z)
+                    for (GLsizei r = 0; r < h; ++r)
+                        memcpy(ml.pixels.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
+                               src + ((size_t)z * h + r) * rowLen, (size_t)w * bpp);
+            }
+        }
+        c.LogDebug(0, 0, 0, 0, "glTexImage3D: mip level>0 lưu shadow (GPU base-level)");
+        (void)b;
+        return;
+    }
+    tx.isCube = false;
+    tx.w = w; tx.h = h; tx.d = (uint32_t)d; tx.internalFormat = inf; tx.levels = level + 1;
+    tx.mipData.clear();
+    tx.wasRT = false;
+    // Unpack tight toàn bộ (z-major, mỗi slice h rows) — như 2D nhưng × d slice.
+    size_t n = (size_t)w * h * d * BppTyped3D(f, ty);
+    std::vector<uint8_t> unpacked(n, 0);
+    if (hasData && w > 0 && h > 0 && d > 0) {
+        size_t bpp = BppTyped3D(f, ty);
+        size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+        size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                      (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+        const uint8_t* src = pixBase + skip;
+        for (GLsizei z = 0; z < d; ++z)
+            for (GLsizei r = 0; r < h; ++r)
+                memcpy(unpacked.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
+                       src + ((size_t)z * h + r) * rowLen, (size_t)w * bpp);
+    }
+    tx.gpu = c.device->newTexture3D((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf));
+    c.pendingTexRegions.erase(tp->id);
+    // Format/type có đường upload: UBYTE tight (RGBA/RED/RG) hoặc FLOAT (RED/RGBA).
+    // Layout pixel khớp thẳng Metal format (R8/RG8/RGBA8/R32F/RGBA32F) → raw upload.
+    bool gpuFmt = (ty == 0x1401 && (f == 0x1908 || f == 0x1903 || f == 0x8227)) ||
+                  (ty == 0x1406 && (f == 0x1903 || f == 0x1908));
+    if (tx.gpu && hasData && w > 0 && h > 0 && d > 0 && gpuFmt) {
+        size_t bpp = BppTyped3D(f, ty);
+        bool ok = true;
+        for (GLsizei z = 0; z < d && ok; ++z)
+            ok = c.device->updateTexture3D(tx.gpu.get(), (uint32_t)z, 0, 0,
+                    (uint32_t)w, (uint32_t)h,
+                    unpacked.data() + (size_t)z * (size_t)h * (size_t)w * bpp,
+                    (size_t)w * bpp);
+        if (!ok) c.LogDebug(0, 0, 0, 0, "glTexImage3D: GPU upload fail");
+    } else if (tx.gpu && hasData && !gpuFmt) {
+        static int nUnh3 = 0;
+        if (c.DiagOn() && ++nUnh3 <= 32)
+            fprintf(stderr, "[TGLMT] tex3nop#%d id=%u %dx%dx%d fmt=0x%x ty=0x%x giu-shadow\n",
+                    nUnh3, tp->id, w, h, d, f, ty);
+        c.LogDebug(0, 0, 0, 0, "glTexImage3D: format/type chưa upload GPU (giữ shadow)");
+    }
+    if (c.device->isNull() || !tx.gpu || !gpuFmt)
+        tx.pixels = std::move(unpacked);
+    else
+        std::vector<uint8_t>().swap(tx.pixels);
+    (void)b; (void)level;
 }
 void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei w, GLsizei h, GLenum format, GLenum type, const void* pixels) {
     Context& c = Context::Current();
@@ -893,8 +994,89 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
 void glTexSubImage1D(GLenum t, GLint l, GLint x, GLsizei w, GLenum f, GLenum ty, const void* p) {
     glTexSubImage2D(t, l, x, 0, w, 1, f, ty, p);
 }
-void glTexSubImage3D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLenum j, const void* k) {
-    (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;
+// P3: core chung cho glTexSubImage3D + glTextureSubImage3D (DSA). Unpack theo
+// slice (IMAGE_HEIGHT = h), cập nhật shadow (nếu còn) + upload GPU per-slice.
+static void TexSubImage3DCore(Context& c, TextureObject& t, GLint level,
+        GLint xoff, GLint yoff, GLint zoff, GLsizei w, GLsizei h, GLsizei d,
+        GLenum format, GLenum type, const void* pixels) {
+    bool hasUnpack = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/) != 0;
+    if (!pixels && !hasUnpack) { c.errors.Record(0x0501); return; }
+    if (w < 0 || h < 0 || d < 0 || xoff < 0 || yoff < 0 || zoff < 0 ||
+        (size_t)(xoff + w) > t.w || (size_t)(yoff + h) > t.h ||
+        (size_t)(zoff + d) > (size_t)t.d) {
+        c.errors.Record(0x0501); return;
+    }
+    size_t bpp = BppTyped3D(format, type);
+    size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+    size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                  (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+    size_t total = skip + ((w > 0 && h > 0 && d > 0) ? (size_t)d * (size_t)h * rowLen : 0);
+    bool okBase = true;
+    const uint8_t* pixBase = UnpackBase(c, pixels, total, okBase);
+    if (!okBase) { c.errors.Record(0x0501); return; }
+    const uint8_t* src = pixBase + skip;
+    std::vector<uint8_t> payload((size_t)w * h * d * bpp);
+    for (GLsizei z = 0; z < d; ++z)
+        for (GLsizei r = 0; r < h; ++r)
+            memcpy(payload.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
+                   src + ((size_t)z * h + r) * rowLen, (size_t)w * bpp);
+    if (level > 0) {
+        auto it = t.mipData.find(level);
+        if (it == t.mipData.end() || it->second.d == 0) { c.errors.Record(0x0501); return; }
+        auto& ml = it->second;
+        if ((size_t)(xoff + w) > (size_t)ml.w || (size_t)(yoff + h) > (size_t)ml.h ||
+            (size_t)(zoff + d) > (size_t)ml.d) { c.errors.Record(0x0501); return; }
+        if (ml.pixels.size() < (size_t)ml.w * ml.h * ml.d * bpp)
+            ml.pixels.resize((size_t)ml.w * ml.h * ml.d * bpp, 0);
+        for (GLsizei z = 0; z < d; ++z)
+            for (GLsizei r = 0; r < h; ++r) {
+                uint8_t* dst = ml.pixels.data() +
+                    ((((size_t)(zoff + z) * ml.h + (yoff + r)) * ml.w + (size_t)xoff)) * bpp;
+                memcpy(dst, payload.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
+                       (size_t)w * bpp);
+            }
+        if (level + 1 > t.levels) t.levels = level + 1;
+        ++c.appleStats.mipStaged;
+        return;
+    }
+    if (!t.pixels.empty()) {
+        if (t.pixels.size() < (size_t)t.w * t.h * (size_t)t.d * bpp)
+            t.pixels.resize((size_t)t.w * t.h * (size_t)t.d * bpp, 0);
+        for (GLsizei z = 0; z < d; ++z)
+            for (GLsizei r = 0; r < h; ++r) {
+                uint8_t* dst = t.pixels.data() +
+                    ((((size_t)(zoff + z) * t.h + (yoff + r)) * t.w + (size_t)xoff)) * bpp;
+                memcpy(dst, payload.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
+                       (size_t)w * bpp);
+            }
+    }
+    bool gpuFmt = (type == 0x1401 && (format == 0x1908 || format == 0x1903 || format == 0x8227)) ||
+                  (type == 0x1406 && (format == 0x1903 || format == 0x1908));
+    if (t.gpu && gpuFmt) {
+        // Upload thẳng per-slice (immediate — 3D là init-time, không hot path).
+        for (GLsizei z = 0; z < d; ++z)
+            c.device->updateTexture3D(t.gpu.get(), (uint32_t)(zoff + z),
+                    (uint32_t)xoff, (uint32_t)yoff, (uint32_t)w, (uint32_t)h,
+                    payload.data() + (size_t)z * (size_t)h * (size_t)w * bpp,
+                    (size_t)w * bpp);
+    } else if (t.gpu) {
+        static int nUnh3s = 0;
+        if (c.DiagOn() && ++nUnh3s <= 32)
+            fprintf(stderr, "[TGLMT] tex3subnop#%d id=%u fmt=0x%x ty=0x%x giu-shadow\n",
+                    nUnh3s, t.id, format, type);
+        c.LogDebug(0, 0, 0, 0, "glTexSubImage3D: format/type chưa upload GPU (giữ shadow)");
+    }
+}
+void glTexSubImage3D(GLenum target, GLint level, GLint xoff, GLint yoff, GLint zoff,
+        GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type, const void* pixels) {
+    Context& c = Context::Current();
+    if (target != 0x806F) { // 2D_ARRAY/CUBE_MAP_ARRAY chưa hỗ trợ
+        c.LogDebug(0, 0, 0, 0, "glTexSubImage3D: target != TEXTURE_3D chưa hỗ trợ");
+        return;
+    }
+    TextureObject* tp = BoundTex(c, target);
+    if (!tp) return;
+    TexSubImage3DCore(c, *tp, level, xoff, yoff, zoff, w, h, d, format, type, pixels);
 }
 void glTexParameterf(GLenum t, GLenum p, GLfloat v) { glTexParameteri(t, p, (GLint)v); }
 void glTexParameterfv(GLenum t, GLenum p, const GLfloat* v) { glTexParameteri(t, p, (GLint)v[0]); }
@@ -996,7 +1178,6 @@ void glPixelStorei(GLenum pname, GLint param) {
     }
 }
 void glCopyTexImage1D(GLenum a, GLint b, GLenum d, GLint e, GLint f, GLsizei g, GLint h) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h; }
-void glCopyTexImage2D(GLenum a, GLint b, GLenum d, GLint e, GLint f, GLsizei g, GLsizei h, GLint i) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i; }
 void glCopyTexSubImage1D(GLenum a, GLint b, GLint c_, GLint d, GLint e, GLsizei f) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f; }
 // Copy framebuffer (READ) → texture (blur/post-chain, menu loading đen nếu stub).
 // Quy ước GL-order (hàng 0 = đáy GL) cho cả 2 đầu → copy raw GPU→GPU không flip,
@@ -1014,12 +1195,14 @@ static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
         c.errors.Record(0x0501); return;
     }
     GLuint readFbo = c.state.BoundReadFBO();
+    GLint readSlot = c.ReadBufferSlot(); // nguồn là READ_BUFFER (mặc định att0)
+    if (readFbo != 0 && readSlot < 0) { c.errors.Record(0x0502); return; }
     if (!c.device || c.device->isNull()) {
         // Null backend: copy shadow nếu nguồn là FBO texture.
         if (readFbo != 0) {
             auto fit = c.fbos.find(readFbo);
             if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
-            auto cit = fit->second.colorTex.find(0);
+            auto cit = fit->second.colorTex.find(readSlot);
             if (cit == fit->second.colorTex.end()) return;
             auto sit = c.textures.find(cit->second);
             if (sit == c.textures.end() || sit->second.pixels.empty()) return;
@@ -1086,7 +1269,7 @@ static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
     } else {
         auto fit = c.fbos.find(readFbo);
         if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
-        auto cit = fit->second.colorTex.find(0);
+        auto cit = fit->second.colorTex.find(readSlot);
         if (cit == fit->second.colorTex.end()) return;
         auto sit = c.textures.find(cit->second);
         if (sit == c.textures.end() || !sit->second.gpu) return;
@@ -1133,6 +1316,202 @@ static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
     // Không sync shadow đích từ GPU ở đây (giữ 60fps): sampling blur/post dùng
     // GPU mới; GetTexImage lên blur texture hiếm. Shadow cũ không ảnh hưởng draw.
     (void)gpuOk;
+}
+// Depth/stencil internalformat (spec 4.6 §8.3 + ARB_depth_texture + 4.4 stencil).
+// Với các format này nguồn copy KHÔNG phải color read buffer mà là depth buffer
+// của read framebuffer ("depth component data is taken from the depth buffer").
+static bool IsDepthInternalFormat(GLenum f) {
+    switch (f) {
+        case 0x1902: // DEPTH_COMPONENT
+        case 0x81A5: // DEPTH_COMPONENT16
+        case 0x81A6: // DEPTH_COMPONENT24
+        case 0x81A7: // DEPTH_COMPONENT32
+        case 0x8CAC: // DEPTH_COMPONENT32F
+        case 0x88F0: // DEPTH24_STENCIL8
+            return true;
+        default: return false;
+    }
+}
+// Đọc vùng (x,y,w,h) từ read FB ra RGBA 4bpp (chỉ dùng cho cube-face copy —
+// đường 2D dùng GPU blit). Nguồn: default drawable hoặc color attachment 0 của FBO.
+static bool ReadFBRegionRGBA(Context& c, GLuint readFbo, GLint x, GLint y,
+                             GLsizei w, GLsizei h, std::vector<uint8_t>& out) {
+    out.assign((size_t)w * h * 4, 0);
+    if (!c.device || c.device->isNull()) return false;
+    if (readFbo == 0) {
+        auto def = c.device->defaultRenderTarget();
+        if (!def || x < 0 || y < 0 ||
+            (GLint)(x + w) > (GLint)def->width() || (GLint)(y + h) > (GLint)def->height())
+            return false;
+        std::vector<uint8_t> scr((size_t)def->width() * def->height() * 4, 0);
+        if (!def->readback(scr.data(), (size_t)def->width() * 4)) return false;
+        for (GLsizei r = 0; r < h; ++r)
+            memcpy(out.data() + (size_t)r * w * 4,
+                   scr.data() + ((size_t)(y + r) * def->width() + x) * 4, (size_t)w * 4);
+        return true;
+    }
+    auto fit = c.fbos.find(readFbo);
+    if (fit == c.fbos.end()) return false;
+    GLint slot = c.ReadBufferSlot();
+    if (slot < 0) return false;
+    auto cit = fit->second.colorTex.find(slot);
+    if (cit == fit->second.colorTex.end()) return false;
+    auto sit = c.textures.find(cit->second);
+    if (sit == c.textures.end() || x < 0 || y < 0 ||
+        (size_t)(x + w) > sit->second.w || (size_t)(y + h) > sit->second.h)
+        return false;
+    std::vector<uint8_t> srcOwn;
+    const std::vector<uint8_t>* sp = nullptr;
+    if (c.ReadTextureGPU(sit->second, srcOwn)) sp = &srcOwn;
+    else if (sit->second.pixels.size() >= (size_t)sit->second.w * sit->second.h * 4)
+        sp = &sit->second.pixels;
+    if (!sp) return false;
+    for (GLsizei r = 0; r < h; ++r)
+        memcpy(out.data() + (size_t)r * w * 4,
+               sp->data() + ((size_t)(y + r) * sit->second.w + x) * 4, (size_t)w * 4);
+    return true;
+}
+// glCopyTexImage2D (spec 4.6 §18.3.2): ĐỊNH NGHĨA LẠI image level của texture
+// đang bind (kích thước + internalformat) rồi copy vùng rect từ read framebuffer
+// vào offset (0,0). Nguồn: color read buffer, RIÊNG internalformat depth/stencil
+// → depth buffer của read FB (INVALID_OPERATION nếu read FB không có depth).
+// Iris dùng đúng đường depth: RenderTargets.copyPreTranslucentDepth/copyPreHandDepth
+// → copy depth vào texture depth (noTranslucents/noHand) để depth-test shader pack.
+void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat,
+                      GLint x, GLint y, GLsizei w, GLsizei h, GLint border) {
+    Context& c = Context::Current();
+    ++c.appleStats.copyTex;
+    if (c.DiagOn()) {
+        static uint64_t n = 0;
+        if (++n <= 5) {
+            fprintf(stderr,
+                    "[TGLMT] copyTexImage#%llu tgt=0x%x level=%d ifmt=0x%x src=(%d,%d) size=%dx%d border=%d readFbo=%u\n",
+                    (unsigned long long)n, target, level, internalformat, x, y, w, h,
+                    border, c.state.BoundReadFBO());
+            fflush(stderr);
+        }
+    }
+    // Spec: target ∈ {2D, 6 cube faces} (INVALID_ENUM); border phải 0, level >= 0,
+    // w/h trong [0, MAX_TEXTURE_SIZE] (INVALID_VALUE). MAX_TEXTURE_SIZE expose = 8192.
+    if (target != 0x0DE1 && !IsCubeFace(target)) { c.errors.Record(0x0500); return; }
+    if (level < 0 || border != 0 || w < 0 || h < 0 || w > 8192 || h > 8192) {
+        c.errors.Record(0x0501); return;
+    }
+    TextureObject* tp = BoundTex(c, target);
+    if (!tp) return;
+    auto& tx = *tp;
+    bool depthFmt = IsDepthInternalFormat(internalformat);
+    GLuint readFbo = c.state.BoundReadFBO();
+    const TextureObject* depthSrc = nullptr;
+    if (depthFmt) {
+        // "no depth buffer" → INVALID_OPERATION, không đụng storage (spec).
+        if (readFbo != 0) {
+            auto fit = c.fbos.find(readFbo);
+            if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
+            GLuint did = fit->second.depthTex ? fit->second.depthTex
+                                              : fit->second.depthStencilTex;
+            if (!did) { c.errors.Record(0x0502); return; }
+            auto dit = c.textures.find(did);
+            if (dit != c.textures.end()) depthSrc = &dit->second;
+        } else {
+            auto def = c.device ? c.device->defaultRenderTarget() : nullptr;
+            if (!def || !def->hasDepth()) { c.errors.Record(0x0502); return; }
+            // default FB có depth nhưng drawable không có đường blit depth ra
+            // texture → định nghĩa storage, bỏ copy (log trung thực).
+        }
+    }
+    // Mip level > 0: giống glTexImage2D — GPU chỉ giữ base level, shadow metadata.
+    if (level > 0) {
+        if (level + 1 > tx.levels) tx.levels = level + 1;
+        if (w > 0 && h > 0) {
+            auto& ml = tx.mipData[level];
+            ml.w = w; ml.h = h;
+            ml.pixels.assign((size_t)w * h * 4, 0);
+        }
+        c.LogDebug(0, 0, 0, 0, "glCopyTexImage2D: level>0 lưu shadow (GPU base-level)");
+        return;
+    }
+    // Cube face: định nghĩa per-face shadow + (color) đọc nguồn → updateCubeFace.
+    // GPU cube chỉ RGBA8/R8 (bridge) → depth cube trung thực bỏ copy.
+    if (IsCubeFace(target)) {
+        int face = (int)(target - 0x8515);
+        if (tx.isCube && w > 0 && h > 0 && (tx.w != (uint32_t)w || tx.h != (uint32_t)h)) {
+            c.errors.Record(0x0501); return; // face lệch size (spec §8.5)
+        }
+        tx.isCube = true;
+        tx.w = (uint32_t)w; tx.h = (uint32_t)h;
+        tx.internalFormat = internalformat; tx.levels = 1;
+        tx.wasRT = false;
+        tx.faces[face].assign((size_t)w * h * 4, 0);
+        if (w > 0 && h > 0 && !depthFmt) {
+            std::vector<uint8_t> reg;
+            if (ReadFBRegionRGBA(c, readFbo, x, y, w, h, reg)) {
+                tx.faces[face] = std::move(reg);
+                if (!tx.gpu)
+                    tx.gpu = c.device->newCubeTexture((uint32_t)w, ToMetalFormat(internalformat));
+                if (tx.gpu && tx.gpu->width() == (uint32_t)w)
+                    c.device->updateCubeFace(tx.gpu.get(), (uint32_t)face,
+                                             tx.faces[face].data(), (size_t)w * 4);
+            } else {
+                c.LogDebug(0, 0, 0, 0, "glCopyTexImage2D: cube face nguồn ngoài/đọc fail, shadow zero");
+            }
+        } else if (w > 0 && h > 0) {
+            c.LogDebug(0, 0, 0, 0, "glCopyTexImage2D: cube face depth chưa hỗ trợ GPU, shadow zero");
+        }
+        tx.pixels = tx.faces[0];
+        return;
+    }
+    // 2D: định nghĩa lại storage level 0 (giống glTexImage2D realloc).
+    tx.isCube = false;
+    tx.w = w; tx.h = h; tx.internalFormat = internalformat; tx.levels = 1;
+    tx.mipData.clear();
+    tx.wasRT = false;
+    // Texture này đang là color HOẶC depth attachment của encoder đang mở:
+    // wrapper target giữ gpu cũ → flush trước khi thay gpu (stale TBDR).
+    bool wasCurrentRT = (c.pendingEncoder && c.IsPendingColorId(tp->id));
+    if (!wasCurrentRT && c.pendingEncoder && c.pendingDrawFBO != 0) {
+        auto pfit = c.fbos.find(c.pendingDrawFBO);
+        if (pfit != c.fbos.end() && pfit->second.depthTex == tp->id) wasCurrentRT = true;
+    }
+    if (wasCurrentRT) c.FlushPendingEncoder();
+    if (w > 0 && h > 0)
+        tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
+    else
+        tx.gpu.reset(); // NULL image (spec: w/h = 0 → NULL texture), không copy
+    c.pendingTexRegions.erase(tp->id);
+    if (w <= 0 || h <= 0) return;
+    if (depthFmt) {
+        if (!depthSrc || !depthSrc->gpu || !tx.gpu) {
+            c.LogDebug(0, 0, 0, 0, depthSrc ? "glCopyTexImage2D: depth GPU thiếu — bỏ copy"
+                                            : "glCopyTexImage2D: default-FB depth chưa hỗ trợ, storage mới");
+            return;
+        }
+        if (depthSrc->gpu->pixelFormat() != tx.gpu->pixelFormat()) {
+            c.LogDebug(0, 0, 0, 0, "glCopyTexImage2D: depth format nguồn≠đích — bỏ copy");
+            return;
+        }
+        // Vùng ngoài nguồn = undefined (spec) → clamp, không INVALID_VALUE.
+        GLint cx = x < 0 ? 0 : x, cy = y < 0 ? 0 : y;
+        GLsizei cw = w - (cx - x), ch = h - (cy - y);
+        if ((size_t)(cx + cw) > depthSrc->w) cw = (GLsizei)depthSrc->w - cx;
+        if ((size_t)(cy + ch) > depthSrc->h) ch = (GLsizei)depthSrc->h - cy;
+        if (cw > (GLsizei)tx.w) cw = (GLsizei)tx.w;
+        if (ch > (GLsizei)tx.h) ch = (GLsizei)tx.h;
+        if (cw <= 0 || ch <= 0) return;
+        c.FlushPendingEncoder();
+        c.FlushAllBufferStaging();
+        c.FlushAllTextureStaging();
+        c.CommitAndWait(); // read FB phải render xong trước khi blit depth
+        // blitCopy → bridge tự markDepthInited(dst): first-attach kế tiếp LOAD
+        // (không first-clear) — đúng ngữ nghĩa Iris depth copy + depth-test.
+        if (!c.device->blitCopy(depthSrc->gpu.get(), tx.gpu.get(),
+                                (uint32_t)cx, (uint32_t)cy, (uint32_t)cw, (uint32_t)ch,
+                                0, 0))
+            c.LogDebug(0, 0, 0, 0, "glCopyTexImage2D: depth blit fail (giữ storage mới)");
+        return;
+    }
+    // Color: dùng machinery CopyFBToTexture (FBO/default/null + CPU fallback).
+    CopyFBToTexture(c, tx, 0, 0, 0, x, y, w, h);
 }
 void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff,
                          GLint x, GLint y, GLsizei w, GLsizei h) {
@@ -1386,7 +1765,7 @@ void glTextureStorage2D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h) {
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
     it->second.w = w; it->second.h = h; it->second.internalFormat = inf; it->second.levels = l;
     bool wasRTD = it->second.wasRT;
-    bool wasCurRTD = (c.pendingEncoder && c.pendingColorTex == t);
+    bool wasCurRTD = (c.pendingEncoder && c.IsPendingColorId(t));
     if (wasCurRTD) c.FlushPendingEncoder();
     if (c.DiagOn() && (wasRTD || wasCurRTD || (w >= 256 && h >= 256))) {
         static int nSwapD = 0;
@@ -1405,7 +1784,24 @@ void glTextureStorage2D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h) {
     else
         std::vector<uint8_t>().swap(it->second.pixels);
 }
-void glTextureStorage3D(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g; }
+void glTextureStorage3D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h, GLsizei d) {
+    Context& c = Context::Current();
+    auto it = c.textures.find(t);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    if (w < 1 || h < 1 || d < 1 || l < 1) { c.errors.Record(0x0501); return; }
+    it->second.w = w; it->second.h = h; it->second.d = d;
+    it->second.internalFormat = inf; it->second.levels = l;
+    it->second.isCube = false;
+    it->second.wasRT = false;
+    c.pendingTexRegions.erase(t);
+    it->second.gpu = c.device->newTexture3D((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf));
+    // Cùng luật shadow với glTextureStorage2D: chỉ giữ khi Null / không gpu /
+    // format không đọc được từ GPU.
+    if (c.device->isNull() || !it->second.gpu || !TexReadableFromGPU(it->second))
+        it->second.pixels.assign((size_t)w * h * (size_t)d * 4, 0);
+    else
+        std::vector<uint8_t>().swap(it->second.pixels);
+}
 void glTextureStorage2DMultisample(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLboolean g) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g; }
 void glTextureStorage3DMultisample(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g, GLboolean h) { (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h; }
 // glTexStorage* (non-DSA, GL 4.2/4.3): resolve texture đang bind trên active unit
@@ -1452,6 +1848,13 @@ void glTexStorage3DMultisample(GLenum a, GLsizei b, GLenum d, GLsizei e, GLsizei
     glTextureStorage3DMultisample(t, b, d, e, f, g, h);
 }
 void glTextureSubImage1D(GLuint a, GLint b, GLint c_, GLsizei d, GLenum e, GLenum f, const void* g) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g; }
+void glTextureSubImage3D(GLuint t, GLint level, GLint xoff, GLint yoff, GLint zoff,
+        GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type, const void* pixels) {
+    Context& c = Context::Current();
+    auto it = c.textures.find(t);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    TexSubImage3DCore(c, it->second, level, xoff, yoff, zoff, w, h, d, format, type, pixels);
+}
 void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void* p) {
     Context& c = Context::Current();
     auto it = c.textures.find(t);
@@ -1505,7 +1908,6 @@ void glTextureSubImage2D(GLuint t, GLint l, GLint x, GLint y, GLsizei w, GLsizei
     StageTexRegion(c, t, (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h, f, ty,
                    payload.data());
 }
-void glTextureSubImage3D(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h, GLenum i, GLenum j, const void* k) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; }
 // P10 ARB_texture_view: tạo view chia sẻ storage (vanilla 26.x mip bake dùng).
 // View trỏ tới subset mips/layers của gốc, có thể reinterpret format (tương thích).
 void glTextureView(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat,

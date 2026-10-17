@@ -16,7 +16,7 @@ void glGetBooleanIndexedvEXT(GLenum t, GLuint i, GLboolean* d);
 void glGetIntegerIndexedvEXT(GLenum t, GLuint i, GLint* d);
 GLuint glCreateShaderProgramEXT(GLenum t, const GLchar* s);
 void glUseShaderProgramEXT(GLenum t, GLuint p);
-void glActiveProgramEXT(GLuint pl, GLuint p);
+void glActiveProgramEXT(GLuint p);
 void glFramebufferTextureFace(GLenum t, GLenum a, GLuint x, GLint l, GLenum f);
 } }
 
@@ -68,12 +68,11 @@ int main() {
         // Sai stage → INVALID_OPERATION.
         glUseShaderProgramEXT(0x8B30 /*FRAGMENT*/, pr); // program chỉ có VS
         Check(glGetError() == 0x0502, "UseShaderProgramEXT sai stage phải INVALID_OPERATION");
-        // ActiveProgram (validate).
-        GLuint pl = 0;
-        glGenProgramPipelines(1, &pl);
-        glActiveProgramEXT(pl, pr);
+        // ActiveProgramEXT (spec: 1 tham số, đặt active program).
+        glActiveProgramEXT(pr);
         Check(glGetError() == 0, "ActiveProgramEXT lỗi");
-        glDeleteProgramPipelines(1, &pl);
+        glActiveProgramEXT(0xFFFF);
+        Check(glGetError() == 0x0502, "ActiveProgramEXT id lạ phải INVALID_OPERATION");
         glDeleteProgram(pr);
     }
     // ===== ARB_geometry_shader4: FramebufferTextureFace (không advertise GS) =====

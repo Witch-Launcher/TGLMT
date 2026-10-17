@@ -69,8 +69,8 @@ int main() {
     cas[1].divisor = 0;
     PipelineOpts opts;
     opts.depth = false;
-    opts.blend = false;
-    opts.colorWriteMask = 0xF;
+    opts.blends[0].enabled = false;
+    opts.blends[0].writeMask = 0xF;
     auto pipe = dev->makeCustomPipeline(lib.get(), "gradVS", lib.get(), "gradFS",
                                         PixelFormat::RGBA8Unorm, cas, 2, 12, &opts);
     if (!pipe) { printf("test_mip_grad_apple FAIL: pipeline nil\n"); return 1; }

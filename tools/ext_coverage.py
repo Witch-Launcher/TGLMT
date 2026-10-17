@@ -14,6 +14,10 @@ Usage:
   python3 tools/ext_coverage.py --ready    # chỉ ext đủ hàm (sẵn advertise)
   python3 tools/ext_coverage.py --missing  # chỉ ext còn thiếu hàm
   python3 tools/ext_coverage.py --kexts    # kiểm consistency kExts hiện tại
+  python3 tools/ext_coverage.py --dlsym build-apple/libtglmt.dylib
+        # TRUTH cuối: mọi hàm của ext advertise phải có symbol C dlsym-able.
+        # (--kexts quét source có blind spot: hàm định nghĩa trong namespace
+        #  chỉ có symbol mangled → LWJGL dlsym = null → crash lúc chạy.)
 
 Không hardcode danh sách extension: mọi thứ sinh từ gl.xml + quét src/gl.
 """
@@ -131,6 +135,33 @@ def classify(name, need, impl, core):
     return "partial", real, alias
 
 
+def dlsym_check(libpath):
+    """Truth cuối: nm -gU lib → mọi hàm của ext trong kExts phải có symbol C.
+    P5: kExts từng 'đủ' theo source-scan nhưng glMaxShaderCompilerThreadsARB /
+    glPushGroupMarkerEXT... chỉ có symbol mangled → LWJGL dlsym null → crash."""
+    import subprocess
+    nm = subprocess.run(["nm", "-gU", libpath], capture_output=True, text=True)
+    if nm.returncode != 0:
+        print(f"[dlsym] nm lỗi trên {libpath}: {nm.stderr.strip()}")
+        return 1
+    syms = set(re.findall(r"\b_?(gl[A-Za-z0-9_]+)$", nm.stdout, re.M))
+    core, exts = parse_glxml()
+    kexts = current_kexts()
+    print(f"=== dlsym truth check: {len(kexts)} advertised ext vs {libpath} ===")
+    lies = 0
+    for e in kexts:
+        if e not in exts:
+            print(f"  [LIE] {e}: không có trong gl.xml!")
+            lies += 1
+            continue
+        miss = [f for f in sorted(exts[e]["funcs"]) if f not in syms]
+        if miss:
+            print(f"  [LIE] {e}: thiếu symbol dlsym: {miss}")
+            lies += 1
+    print(f"\n{len(kexts)} advertised, {lies} thiếu symbol dlsym.")
+    return 1 if lies else 0
+
+
 def main():
     core, exts = parse_glxml()
     impl = implemented_funcs()
@@ -152,6 +183,10 @@ def main():
             partial.append((name, len(real), real, len(alias)))
 
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
+
+    if mode == "--dlsym":
+        lib = sys.argv[2] if len(sys.argv) > 2 else str(ROOT / "build-apple/libtglmt.dylib")
+        return dlsym_check(lib)
 
     if mode == "--kexts":
         print("=== kExts consistency check (Quy tắc vàng: advertise ⇒ đủ hàm) ===")

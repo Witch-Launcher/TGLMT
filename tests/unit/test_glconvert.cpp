@@ -5,12 +5,16 @@
 #include <cassert>
 #include <cstdio>
 int main() {
-    // glViewport(10,20,100,50) trên target cao 200, depth mặc định GL (0,1)
-    auto vp = tglmt::GLViewportToMetal(10, 20, 100, 50, -1.0, 1.0, 200.0f);
+    // glViewport(10,20,100,50) trên target cao 200, glDepthRange mặc định (0,1).
+    // n/f = GL depth-range ∈ [0,1]; VS đã kZConv z → viewport passthrough.
+    auto vp = tglmt::GLViewportToMetal(10, 20, 100, 50, 0.0, 1.0, 200.0f);
     assert(vp.x == 10 && vp.w == 100);
     assert(vp.y == 20 + 50); // GL-correct: NDC y=-1 → hàng 20 (đáy viewport GL)
     assert(vp.h == -50);     // negative height = lật y sang GL-order memory
-    assert(vp.n == 0.0 && vp.f == 1.0); // [-1,1] → [0,1]
+    assert(vp.n == 0.0 && vp.f == 1.0); // depth-range passthrough
+    // glDepthRange(0.25, 0.75) → passthrough đúng giá trị
+    auto vpR = tglmt::GLViewportToMetal(0, 0, 64, 64, 0.25, 0.75, 64.0f);
+    assert(vpR.n == 0.25 && vpR.f == 0.75);
     // ZERO_TO_ONE: giữ nguyên dấu
     auto vp2 = tglmt::GLViewportToMetal(0, 0, 64, 64, 0.0, 1.0, 64.0f, false, true);
     assert(vp2.y == 64 && vp2.h == -64);

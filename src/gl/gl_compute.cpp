@@ -45,14 +45,67 @@ std::shared_ptr<metal::ISamplerState> DefSampler(Context& c) {
     if (s) cache[c.device.get()] = s;
     return s;
 }
-// Target cho kind char ('2' TEXTURE_2D, 'C' CUBE, 'A' ARRAY).
+// Target cho kind char ('2' TEXTURE_2D, 'C' CUBE, 'A' ARRAY, '3' TEXTURE_3D;
+// P3: '1'/'i'/'u' như 2D, 'x'/'y' như 3D).
 GLenum KindTarget(char k) {
     switch (k) {
         case 'C': return 0x8513; // TEXTURE_CUBE_MAP
         case 'A': return 0x8C1A; // TEXTURE_2D_ARRAY
-        case 'B': return 0x8C2A; // TEXTURE_BUFFER
+        case 'B': case 'I': case 'U': return 0x8C2A; // TEXTURE_BUFFER (float/int/uint)
+        case '3': case 'x': case 'y': return 0x806F; // TEXTURE_3D
         default:  return 0x0DE1; // TEXTURE_2D
     }
+}
+// P1: flush TOÀN BỘ staging mà dispatch sắp đọc/ghi (SSBO/UBO block bind,
+// atomic, sampled texture, image) TRƯỚC khi encode — dispatch chạy trên GPU
+// phải thấy dữ liệu mới nhất từ glBufferSubData/glTexSubImage. FlushBufferStaging
+// tự commit encoder render đang mở nếu buffer đó là nguồn của pass (đúng thứ tự).
+void FlushComputeResources(Context& c, ProgramObject& pr) {
+    for (auto& bs : pr.computeBlockSlots) {
+        // P4: SSBO dùng binding override (glShaderStorageBlockBinding) nếu có;
+        // binding -1 (không layout) = 0 theo spec.
+        GLuint bind = bs.isStorage ? pr.EffectiveSsboBinding(bs.name, bs.binding)
+                                   : (GLuint)(bs.binding < 0 ? 0 : bs.binding);
+        auto& map = bs.isStorage ? c.storageBindPoints : c.uniformBindPoints;
+        auto it = map.find(bind);
+        if (it != map.end() && it->second.buffer) c.FlushBufferStaging(it->second.buffer);
+    }
+    for (auto& as : pr.computeAtomics) {
+        auto it = c.atomicBindPoints.find((GLuint)as.binding);
+        if (it != c.atomicBindPoints.end() && it->second.buffer)
+            c.FlushBufferStaging(it->second.buffer);
+    }
+    for (auto& name : pr.computeSamplers) {
+        auto uit = pr.samplerUnits.find(name);
+        GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+        if (unit >= 32) continue;
+        auto kit = pr.samplerKind.find(name);
+        char kind = (kit == pr.samplerKind.end()) ? '2' : kit->second;
+        GLuint texId = c.state.BoundTexture(unit, KindTarget(kind));
+        if (texId) c.FlushTextureStaging(texId);
+    }
+    for (auto& isl : pr.computeImages) {
+        auto bit = c.imageBindPoints.find((GLuint)isl.binding);
+        if (bit != c.imageBindPoints.end() && bit->second.texture)
+            c.FlushTextureStaging(bit->second.texture);
+    }
+}
+// P1: encoder cho dispatch. Deferred (mặc định): tái dùng pendingCompute (1 CB
+// cho N dispatch liên tiếp). Sync (TGLMT_COMPUTE_SYNC=1 hoặc backend ép):
+// encoder mới + endAndCommit ngay ở caller. Trả nullptr + record lỗi nếu fail.
+std::shared_ptr<metal::IComputeEncoder> AcquireComputeEncoder(Context& c, bool& syncMode) {
+    syncMode = c.opt.computeSync;
+    // Draw đang encode phải commit TRƯỚC CB compute (queue order = commit order);
+    // bất biến: pendingCompute và pendingEncoder không cùng tồn tại.
+    if (c.pendingEncoder) c.FlushPendingEncoder();
+    if (syncMode) {
+        auto enc = c.device->makeComputeEncoder();
+        if (!enc) c.errors.Record(0x0502);
+        return enc;
+    }
+    if (!c.pendingCompute) c.pendingCompute = c.device->makeComputeEncoder();
+    if (!c.pendingCompute) { c.errors.Record(0x0502); return nullptr; }
+    return c.pendingCompute;
 }
 } // namespace
 
@@ -85,8 +138,11 @@ static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
         c.LogDebug(0, 0, 0, 0, "glDispatchCompute → dispatchThreads (null/no-pipeline)");
         return;
     }
-    auto enc = c.device->makeComputeEncoder();
-    if (!enc) { c.errors.Record(0x0502); return; }
+    // P1: flush staging nguồn (SSBO/UBO/atomic/image/sampler) trước khi encode.
+    FlushComputeResources(c, pr);
+    bool syncMode = false;
+    auto enc = AcquireComputeEncoder(c, syncMode);
+    if (!enc) return;
     enc->setPipeline(pr.appleCSPipeline.get());
     auto zero = ZeroBuf(c);
     // buffer(16) = uniforms. Build bytes từ uniformLayout (e.loc>=0, đã điền bởi
@@ -113,26 +169,41 @@ static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
         else if (zero) enc->setBuffer(zero.get(), 16);
     }
     // Block bind: bindingPoint → MSL slot (từ computeBlockSlots của converter).
+    // SSBO (isStorage) có thể bị shader GHI → đánh dấu để CPU đọc map/Get* phải
+    // chờ compute (SyncComputeWritesTo).
     for (auto& bs : pr.computeBlockSlots) {
         metal::IBuffer* b = nullptr;
+        size_t off = 0;
+        GLuint bind = bs.isStorage ? pr.EffectiveSsboBinding(bs.name, bs.binding)
+                                   : (GLuint)(bs.binding < 0 ? 0 : bs.binding);
         if (bs.isStorage) {
-            auto it = c.storageBindPoints.find((GLuint)bs.binding);
-            if (it != c.storageBindPoints.end()) b = BufOf(c, it->second.buffer);
+            auto it = c.storageBindPoints.find(bind);
+            if (it != c.storageBindPoints.end()) {
+                b = BufOf(c, it->second.buffer);
+                off = (size_t)it->second.offset; // P4: honor glBindBufferRange
+                c.NoteComputeWriter(it->second.buffer);
+            }
         } else {
-            auto it = c.uniformBindPoints.find((GLuint)bs.binding);
+            auto it = c.uniformBindPoints.find(bind);
             if (it != c.uniformBindPoints.end()) b = BufOf(c, it->second.buffer);
         }
         if (!b) {
             c.LogDebug(0, 0, 0, 0, "glDispatchCompute: block unbound, zero fallback");
             b = zero.get();
         }
-        if (b) enc->setBuffer(b, (uint32_t)bs.slot);
+        if (b) {
+            if (bs.isStorage) enc->setBuffer(b, (uint32_t)bs.slot, off);
+            else enc->setBuffer(b, (uint32_t)bs.slot);
+        }
     }
     // P9 atomic counters: bind atomicBindPoints[binding] → buffer(slot) + offset(layout).
     for (auto& as : pr.computeAtomics) {
         metal::IBuffer* b = nullptr;
         auto it = c.atomicBindPoints.find((GLuint)as.binding);
-        if (it != c.atomicBindPoints.end()) b = BufOf(c, it->second.buffer);
+        if (it != c.atomicBindPoints.end()) {
+            b = BufOf(c, it->second.buffer);
+            c.NoteComputeWriter(it->second.buffer);
+        }
         if (!b) {
             c.LogDebug(0, 0, 0, 0, "glDispatchCompute: atomic unbound, zero fallback");
             b = zero.get();
@@ -186,15 +257,154 @@ static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
         ls1 = (uint32_t)(pr.computeLocalSize[1] > 0 ? pr.computeLocalSize[1] : 1);
         ls2 = (uint32_t)(pr.computeLocalSize[2] > 0 ? pr.computeLocalSize[2] : 1);
     }
-    enc->dispatch3D((x ? x : 1) * ls0, (y ? y : 1) * ls1, (z ? z : 1) * ls2, ls0, ls1, ls2);
-    enc->endAndCommit(); // commit + waitUntilCompleted (compute hiếm, chấp nhận sync)
+    // GL §7.12.1: bất kỳ num_groups nào = 0 → không có work (skip hẳn — Metal
+    // dispatchThreads fault khi grid 0, và clamp lên 1 sẽ dispatch SAI theo GL).
+    if (x && y && z) {
+        enc->dispatch3D((uint32_t)x * ls0, (uint32_t)y * ls1, (uint32_t)z * ls2,
+                        ls0, ls1, ls2);
+    }
+    ++c.appleStats.computeDispatches;
+    if (syncMode) {
+        enc->endAndCommit(); // commit + waitUntilCompleted (sync mode)
+    } else {
+        // Deferred: dồn vào pendingCompute; commit tại điểm cần thứ tự
+        // (draw/clear/barrier/readback/finish/frame end — xem FlushPendingCompute).
+        ++c.pendingComputeDispatches;
+    }
 }
+// GL §7.12.1: params (3×uint32 num_workgroups) đọc từ buffer bound vào
+// GL_DISPATCH_INDIRECT_BUFFER (0x90EE) tại byte offset — GPU quyết định lúc
+// execute (thường do compute pass trước ghi, kèm GL_COMMAND_BARRIER_BIT).
+// Metal map thẳng: dispatchThreadgroupsWithIndirectBuffer (cùng layout struct).
+// Không đọc args bằng CPU: args có thể do GPU ghi (zero hoá cull → 0 group =
+// no-op hợp lệ theo GL; Metal không validate nội dung indirect buffer).
 void glDispatchComputeIndirect(GLintptr ind) {
-    (void)ind;
-    Context::Current().LogDebug(0, 0, 0, 0, "glDispatchComputeIndirect → dispatchThreads(indirect)");
+    Context& c = Context::Current();
+    if (ind < 0 || (ind & 0x3)) { c.errors.Record(0x0501); return; } // INVALID_VALUE
+    GLuint progId = c.state.BoundProgram();
+    auto itp = c.programs.find(progId);
+    if (itp == c.programs.end() || !itp->second.linked || itp->second.computeMSL.empty()) {
+        c.LogDebug(0, 0, 0, 0, "glDispatchComputeIndirect: no compute program bound");
+        return;
+    }
+    auto& pr = itp->second;
+    GLuint ib = c.state.BoundBuffer(0x90EE); // DISPATCH_INDIRECT_BUFFER
+    auto bit = c.buffers.find(ib);
+    if (!ib || bit == c.buffers.end()) { c.errors.Record(0x0502); return; } // INVALID_OPERATION
+    // GL 4.3 §7.12.1: source quá end buffer → INVALID_OPERATION (Mesa: Size < end).
+    if (BufferLen(bit->second) < (size_t)ind + 12) { c.errors.Record(0x0502); return; }
+    if (!c.device || c.device->isNull() || !pr.appleCSPipeline) {
+        c.LogDebug(0, 0, 0, 0,
+                   "glDispatchComputeIndirect → dispatchThreadgroups(indirect) (null/no-pipeline)");
+        return;
+    }
+    metal::IBuffer* gpu = bit->second.gpu ? bit->second.gpu.get() : nullptr;
+    if (!gpu) {
+        // Buffer có size nhưng chưa có MTLBuffer (chưa upload) — trung thực, không fault.
+        c.LogDebug(0, 0, 0, 0, "glDispatchComputeIndirect: indirect buffer chưa upload");
+        return;
+    }
+    // P1: args buffer + mọi nguồn khác phải staged → GPU trước khi encode.
+    FlushComputeResources(c, pr);
+    c.FlushBufferStaging(ib);
+    bool syncMode = false;
+    auto enc = AcquireComputeEncoder(c, syncMode);
+    if (!enc) return;
+    enc->setPipeline(pr.appleCSPipeline.get());
+    auto zero = ZeroBuf(c);
+    { // uniforms: đồng bộ với đường dispatch thường (slot 16)
+        size_t ubSize = pr.computeUBSize ? pr.computeUBSize : 16;
+        thread_local std::vector<uint8_t> ub;
+        if (ub.size() != ubSize) ub.assign(ubSize, 0); else std::fill(ub.begin(), ub.end(), 0);
+        for (auto& e : pr.uniformLayout) {
+            if (e.loc < 0) continue;
+            auto uit = pr.uniforms.find(e.loc);
+            if (uit == pr.uniforms.end()) continue;
+            size_t n = std::min(e.size, uit->second.size());
+            if (e.offset + n <= ub.size()) memcpy(ub.data() + e.offset, uit->second.data(), n);
+        }
+        auto ubuf = c.device->newBufferWithBytes(ub.data(), ub.size(), metal::StorageMode::Shared);
+        if (ubuf) enc->setBuffer(ubuf.get(), 16);
+        else if (zero) enc->setBuffer(zero.get(), 16);
+    }
+    for (auto& bs : pr.computeBlockSlots) {
+        metal::IBuffer* b = nullptr;
+        size_t off = 0;
+        GLuint bind = bs.isStorage ? pr.EffectiveSsboBinding(bs.name, bs.binding)
+                                   : (GLuint)(bs.binding < 0 ? 0 : bs.binding);
+        if (bs.isStorage) {
+            auto it = c.storageBindPoints.find(bind);
+            if (it != c.storageBindPoints.end()) {
+                b = BufOf(c, it->second.buffer);
+                off = (size_t)it->second.offset; // P4: honor glBindBufferRange
+                c.NoteComputeWriter(it->second.buffer);
+            }
+        } else {
+            auto it = c.uniformBindPoints.find(bind);
+            if (it != c.uniformBindPoints.end()) b = BufOf(c, it->second.buffer);
+        }
+        if (!b) {
+            c.LogDebug(0, 0, 0, 0, "glDispatchComputeIndirect: block unbound, zero fallback");
+            b = zero.get();
+        }
+        if (b) {
+            if (bs.isStorage) enc->setBuffer(b, (uint32_t)bs.slot, off);
+            else enc->setBuffer(b, (uint32_t)bs.slot);
+        }
+    }
+    for (auto& as : pr.computeAtomics) {
+        metal::IBuffer* b = nullptr;
+        auto it = c.atomicBindPoints.find((GLuint)as.binding);
+        if (it != c.atomicBindPoints.end()) {
+            b = BufOf(c, it->second.buffer);
+            c.NoteComputeWriter(it->second.buffer);
+        }
+        if (!b) b = zero.get();
+        if (b) enc->setBuffer(b, (uint32_t)as.slot, (size_t)as.offset);
+    }
+    auto ssDef = DefSampler(c);
+    auto black = BlackTex(c);
+    for (size_t k = 0; k < pr.computeSamplers.size(); ++k) {
+        const std::string& name = pr.computeSamplers[k];
+        auto uit = pr.samplerUnits.find(name);
+        GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+        auto kit = pr.samplerKind.find(name);
+        char kind = (kit == pr.samplerKind.end()) ? '2' : kit->second;
+        metal::ITexture* gpuTex = nullptr;
+        if (unit < 32) {
+            GLuint texId = c.state.BoundTexture(unit, KindTarget(kind));
+            auto tit = c.textures.find(texId);
+            if (tit != c.textures.end() && tit->second.gpu) gpuTex = tit->second.gpu.get();
+        }
+        if (!gpuTex && black) gpuTex = black.get();
+        if (gpuTex) enc->setTexture(gpuTex, (uint32_t)k);
+        if (ssDef) enc->setSamplerState(ssDef.get(), (uint32_t)k);
+    }
+    for (auto& isl : pr.computeImages) {
+        metal::ITexture* gpuTex = nullptr;
+        auto bit2 = c.imageBindPoints.find((GLuint)isl.binding);
+        if (bit2 != c.imageBindPoints.end() && bit2->second.texture) {
+            auto tit = c.textures.find(bit2->second.texture);
+            if (tit != c.textures.end() && tit->second.gpu) gpuTex = tit->second.gpu.get();
+        }
+        if (!gpuTex && black) gpuTex = black.get();
+        if (gpuTex) enc->setTexture(gpuTex, (uint32_t)isl.slot);
+    }
+    uint32_t ls0 = (uint32_t)(pr.computeLocalSize[0] > 0 ? pr.computeLocalSize[0] : 1);
+    uint32_t ls1 = (uint32_t)(pr.computeLocalSize[1] > 0 ? pr.computeLocalSize[1] : 1);
+    uint32_t ls2 = (uint32_t)(pr.computeLocalSize[2] > 0 ? pr.computeLocalSize[2] : 1);
+    enc->dispatchThreadgroupsIndirect(gpu, (size_t)ind, ls0, ls1, ls2);
+    ++c.appleStats.computeDispatches;
+    if (syncMode) enc->endAndCommit();
+    else ++c.pendingComputeDispatches;
 }
 void glMemoryBarrier(GLbitfield b) {
-    Context::Current().state.SetShadow(0x9280 /*MEMORY_BARRIER_MARKER*/, &b, 4);
+    Context& c = Context::Current();
+    c.state.SetShadow(0x9280 /*MEMORY_BARRIER_MARKER*/, &b, 4);
+    // P1: barrier = điểm cần thứ tự writes-trước → reads-sau. Commit compute CB
+    // đang dồn: mọi CB sau commit đó thấy kết quả (queue in-order + hazard
+    // tracking). CPU readback tự sync qua CommitAndWait (wait=true).
+    c.FlushPendingCompute(false);
 }
 void glMemoryBarrierByRegion(GLbitfield b) { glMemoryBarrier(b); }
 void glBindImageTexture(GLuint u, GLuint t, GLint l, GLboolean lay, GLint layer, GLenum acc, GLenum f) {

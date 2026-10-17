@@ -270,12 +270,23 @@ static const char* const kExts[] = {
     //  - Texture/buffer/framebuffer/VAO/sampler/query DSA ĐÃ implement đầy đủ
     //    (không bind, thao tác trực tiếp object). Verify bằng coverage + test.
     "GL_ARB_direct_state_access",
+    // ===== P4: SSBO graphics (ARB_shader_storage_buffer_object) — THẬT cả vs/fs. =====
+    //  - Converter nhận `buffer` block vs/fs (slot 17+k chung UBO), backend bind
+    //    device buffer + glShaderStorageBlockBinding override (e2e test_ssbo_graphics_apple).
+    //  - Indexed query SHADER_STORAGE_BUFFER_BINDING/START/SIZE + per-stage block
+    //    limits (0x90D6..0x90DC) + program interface SHADER_STORAGE_BLOCK (0x92E6).
+    "GL_ARB_shader_storage_buffer_object",
+    // ===== P4: ARB_draw_buffers_blend — indexed blend THẬT (P2 MRT). =====
+    //  - BlendFunci/BlendFuncSeparatei/BlendEquationi/BlendEquationSeparatei (core
+    //    GL 4.0) + ARB-suffixed aliases; bake per-slot vào pipeline MRT.
+    "GL_ARB_draw_buffers_blend",
     // LOẠI enum-ext behavior CHƯA implement đúng (nói dối nếu advertise):
     //  seamless_cube_map (cần shader), framebuffer_sRGB (cần format-toggle),
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),
     //  occlusion ANY_SAMPLES (cần GPU query), clear_texture (no-op),
     //  vertex_attrib_64bit (Double không render),
-    //  vertex_type_10f_11f_11f_rev (Metal không có Float101111) → P4/P7.
+    //  vertex_type_10f_11f_11f_rev (Metal không có Float101111),
+    //  texture_storage_multisample (multisample texture no-op — Iris không dùng) → P4/P7.
 };
 static const GLuint kNumExts = (GLuint)(sizeof(kExts) / sizeof(kExts[0]));
 const GLubyte* glGetStringi(GLenum n, GLuint i) {

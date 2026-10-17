@@ -18,6 +18,45 @@ static void OutI(Context& c, GLenum p, GLint* v, GLuint idx = 0) {
             *v = (idx == 0) ? 65535 : (idx == 1) ? 65535 : 65535; break;
         case 0x91BF: // MAX_COMPUTE_WORK_GROUP_SIZE
             *v = (idx == 0) ? 1024 : (idx == 1) ? 1024 : 64; break;
+        // P4: indexed buffer binding queries — đọc thẳng map bind point thật
+        // (glBindBufferBase/Range ghi vào đây), không nói dối sau khi advertise SSBO.
+        case 0x90D3: { auto it = c.storageBindPoints.find(idx); // SHADER_STORAGE_BUFFER_BINDING
+            *v = (it == c.storageBindPoints.end()) ? 0 : (GLint)it->second.buffer; break; }
+        case 0x90D4: { auto it = c.storageBindPoints.find(idx); // SHADER_STORAGE_BUFFER_START
+            *v = (it == c.storageBindPoints.end()) ? 0 : (GLint)it->second.offset; break; }
+        case 0x90D5: { auto it = c.storageBindPoints.find(idx); // SHADER_STORAGE_BUFFER_SIZE
+            // size=0 = BindBufferBase (toàn bộ buffer) → trả size buffer thật.
+            if (it == c.storageBindPoints.end()) *v = 0;
+            else if (it->second.size) *v = (GLint)it->second.size;
+            else {
+                auto bt = c.buffers.find(it->second.buffer);
+                *v = (bt == c.buffers.end()) ? 0 : (GLint)BufferLen(bt->second);
+            }
+            break; }
+        case 0x8A28: { auto it = c.uniformBindPoints.find(idx); // UNIFORM_BUFFER_BINDING
+            *v = (it == c.uniformBindPoints.end()) ? 0 : (GLint)it->second.buffer; break; }
+        case 0x8A29: { auto it = c.uniformBindPoints.find(idx); // UNIFORM_BUFFER_START
+            *v = (it == c.uniformBindPoints.end()) ? 0 : (GLint)it->second.offset; break; }
+        case 0x8A2A: { auto it = c.uniformBindPoints.find(idx); // UNIFORM_BUFFER_SIZE
+            if (it == c.uniformBindPoints.end()) *v = 0;
+            else if (it->second.size) *v = (GLint)it->second.size;
+            else {
+                auto bt = c.buffers.find(it->second.buffer);
+                *v = (bt == c.buffers.end()) ? 0 : (GLint)BufferLen(bt->second);
+            }
+            break; }
+        case 0x92C1: { auto it = c.atomicBindPoints.find(idx); // ATOMIC_COUNTER_BUFFER_BINDING
+            *v = (it == c.atomicBindPoints.end()) ? 0 : (GLint)it->second.buffer; break; }
+        case 0x92C2: { auto it = c.atomicBindPoints.find(idx); // ATOMIC_COUNTER_BUFFER_START
+            *v = (it == c.atomicBindPoints.end()) ? 0 : (GLint)it->second.offset; break; }
+        case 0x92C3: { auto it = c.atomicBindPoints.find(idx); // ATOMIC_COUNTER_BUFFER_SIZE
+            if (it == c.atomicBindPoints.end()) *v = 0;
+            else if (it->second.size) *v = (GLint)it->second.size;
+            else {
+                auto bt = c.buffers.find(it->second.buffer);
+                *v = (bt == c.buffers.end()) ? 0 : (GLint)BufferLen(bt->second);
+            }
+            break; }
         default: *v = 0; break;
     }
 }
@@ -91,6 +130,14 @@ static bool StaticLimit(GLenum p, GLint* v) {
         case 0x90DD: *v = 16; break;     // MAX_SHADER_STORAGE_BUFFER_BINDINGS
         case 0x90DE: *v = 134217728; break; // MAX_SHADER_STORAGE_BLOCK_SIZE (128MB)
         case 0x90DF: *v = 4; break;      // SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT
+        // ===== P4 SSBO graphics: block limits (graphics 17..30 chung UBO, compute 0..15) =====
+        case 0x90D6: *v = 8; break;      // MAX_VERTEX_SHADER_STORAGE_BLOCKS (conservative)
+        case 0x90D7: *v = 8; break;      // MAX_GEOMETRY_SHADER_STORAGE_BLOCKS
+        case 0x90D8: *v = 8; break;      // MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS
+        case 0x90D9: *v = 8; break;      // MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS
+        case 0x90DA: *v = 8; break;      // MAX_FRAGMENT_SHADER_STORAGE_BLOCKS
+        case 0x90DB: *v = 16; break;     // MAX_COMPUTE_SHADER_STORAGE_BLOCKS
+        case 0x90DC: *v = 32; break;     // MAX_COMBINED_SHADER_STORAGE_BLOCKS
         default: return false;
     }
     return true;
@@ -258,6 +305,24 @@ void glGetProgramiv(GLuint p, GLenum q, GLint* v) {
     // không chạy → Globals KHÔNG BAO GIỜ ĐƯỢC BIND cho prog ngoài pipeline
     // desc (terrain/blur) → CameraBlockPos rác, MenuBlurRadius rác.
     else if (q == 0x8A36) *v = (GLint)it->second.uniformBlocks.size();
+    // GL_COMPUTE_WORK_GROUP_SIZE (0x8267, GL 4.3 §7.12.3): trả 3 int
+    // local_size_x/y/z (Iris ComputeProgram đọc int[3] ngay sau link để tính
+    // số workgroup). Chưa có CS → 0 cả 3 (giống Mesa — query vô nghĩa ngoài CS).
+    else if (q == 0x8267) {
+        if (v) {
+            GLint lx = 0, ly = 0, lz = 0;
+            for (GLuint s : it->second.shaders) {
+                auto sit = c.shaders.find(s);
+                if (sit != c.shaders.end() && sit->second.type == 0x91B9) {
+                    lx = it->second.computeLocalSize[0];
+                    ly = it->second.computeLocalSize[1];
+                    lz = it->second.computeLocalSize[2];
+                    break;
+                }
+            }
+            v[0] = lx; v[1] = ly; v[2] = lz;
+        }
+    }
     // GL_ARB_get_program_binary
     else if (q == 0x8741) *v = gl::ProgramBinaryLength(p); // PROGRAM_BINARY_LENGTH
     else if (q == 0x87FE) *v = 1; // NUM_PROGRAM_BINARY_FORMATS (context-level)

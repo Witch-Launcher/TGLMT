@@ -63,6 +63,9 @@ public:
 
     // --- capability (glEnable/glDisable/glEnablei) ---
     void SetEnabled(GLenum cap, bool on, GLuint index = 0);
+    // glEnablei/glDisablei: LUÔN ghi state indexed (kể cả index 0) — tách khỏi
+    // caps_ toàn cục của glEnable (GL: glEnable(BLEND) = bật cho MỌI draw buffer).
+    void SetEnabledI(GLenum cap, bool on, GLuint index);
     bool IsEnabled(GLenum cap, GLuint index = 0) const;
 
     // --- blend ---

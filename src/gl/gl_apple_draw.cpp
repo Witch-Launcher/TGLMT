@@ -24,12 +24,15 @@ namespace tglmt {
 
 // kind sampler → target GL tương ứng: resolve binding THEO TARGET (per-target
 // slots), không để cube/buffer cùng unit clobber 2D (bug shadow/GUI sample sai).
+// P3: '1' (sampler1D) bind bằng GL_TEXTURE_1D → cùng slot 0 với 2D (TexSlotOf),
+// '3'/'x'/'y' (sampler3D) bind bằng GL_TEXTURE_3D → slot 4; 'i'/'u' như 2D.
 static GLenum KindTarget(char kind) {
     switch (kind) {
         case 'C': return 0x8513; // TEXTURE_CUBE_MAP
-        case 'B': return 0x8C2A; // TEXTURE_BUFFER
+        case 'B': case 'I': case 'U': return 0x8C2A; // TEXTURE_BUFFER (float/int/uint)
         case 'A': return 0x8C1A; // TEXTURE_2D_ARRAY
-        default: return 0x0DE1;  // TEXTURE_2D (+shadow 'S' approx 2D)
+        case '3': case 'x': case 'y': return 0x806F; // TEXTURE_3D
+        default: return 0x0DE1;  // TEXTURE_2D (+shadow 'S'/'1'/'i'/'u' approx 2D)
     }
 }
 static char KindOf(const std::unordered_map<std::string, char>& kinds, const std::string& n) {
@@ -208,6 +211,8 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
 static inline void ConsumeDeferredClear(Context& c) {
     c.applePendingClear = false;
     c.appleClearMask = 0;
+    c.appleClearColorSlots = 0;
+    c.appleClearColorAll = false;
 }
 
 // EXT_texture_swizzle: trả texture sẽ bind. Swizzle != identity → view
@@ -228,11 +233,17 @@ static metal::ITexture* SwzOrBase(const TextureObject& tx,
 // liên tiếp (clear đầu mất) và bị áp lên draw FBO khác (clrmiss) → sky transparent,
 // sprite/item atlas bị wipe, blur source rỗng.
 // Trả false → caller giữ deferred (Null backend / chưa có target / encoder fail).
-bool AppleClearNow(GLbitfield m) {
+//
+// MRT: fbo != 0 → wrap MỌI slot glDrawBuffers và clear từng attachment có texture.
+// slotOnly >= 0 (glClearBufferfv(COLOR, d)) → chỉ clear attachment tại slot d
+// (GL_NONE/chưa attach → no-op đúng spec); slotRGBA = màu riêng slot, nullptr →
+// c.clearColor (glClear dùng 1 màu chung cho mọi buffer enabled).
+static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
+                              const float* slotRGBA) {
     Context& c = Context::Current();
     if (!m || !c.device || c.device->isNull()) return false;
-    GLuint fbo = c.state.BoundDrawFBO();
-    // Resolve target (mượn đúng logic AppleDrawGL): FBO 0 → default, khác → wrap color+depth.
+    // Resolve target (mượn đúng logic AppleDrawGL): FBO 0 → default, khác → wrap
+    // các slot glDrawBuffers (+depth nếu có).
     std::shared_ptr<metal::IRenderTarget> target;
     bool hasDepthAny = false;
     if (fbo == 0) {
@@ -240,44 +251,65 @@ bool AppleClearNow(GLbitfield m) {
     } else {
         auto fit = c.fbos.find(fbo);
         if (fit == c.fbos.end()) return false;
-        auto cit = fit->second.colorTex.find(0);
-        auto tit = cit != fit->second.colorTex.end() ? c.textures.find(cit->second)
-                                                     : c.textures.end();
-        metal::ITexture* col = (tit != c.textures.end() && tit->second.gpu) ? tit->second.gpu.get()
-                                                                           : nullptr;
-        // Như AppleDrawGL: clear vào mip view level>0 của texture 1-level là
-        // no-op (tránh clear NHẦM level 0 = wipe atlas). Tiêu thụ deferred.
-        if (col) {
-            auto lit = fit->second.colorLevel.find(0);
+        const auto& dbs = fit->second.drawBuffers;
+        uint32_t nSlots = dbs.empty() ? 1 : (uint32_t)std::min<size_t>(dbs.size(), 8);
+        if (slotOnly >= 0) nSlots = (uint32_t)slotOnly + 1; // chỉ giữ đúng slot đích
+        metal::ITexture* colPtrs[8] = {};
+        for (uint32_t s = 0; s < nSlots && s < 8; ++s) {
+            if (slotOnly >= 0 && (GLint)s != slotOnly) continue;
+            GLenum db = dbs.empty() ? 0x8CE0 : dbs[s];
+            if (db < 0x8CE0 || db > 0x8CE7) continue; // GL_NONE
+            auto cit = fit->second.colorTex.find((GLint)(db - 0x8CE0));
+            if (cit == fit->second.colorTex.end()) continue;
+            auto tit = c.textures.find(cit->second);
+            if (tit == c.textures.end() || !tit->second.gpu) continue;
+            // Như AppleDrawGL: clear vào mip view level>0 của texture 1-level là
+            // no-op (tránh clear NHẦM level 0 = wipe atlas). Tiêu thụ deferred.
+            auto lit = fit->second.colorLevel.find((GLint)(db - 0x8CE0));
             GLint fboLevel = (lit == fit->second.colorLevel.end()) ? 0 : lit->second;
             if (fboLevel > 0 && tit->second.gpu->levelCount() <= (uint32_t)fboLevel) {
                 ++c.appleStats.mipLevelSkipped;
                 ConsumeDeferredClear(c);
                 return true;
             }
+            colPtrs[s] = tit->second.gpu.get();
+        }
+        if (slotOnly >= 0 && !colPtrs[slotOnly]) {
+            // d trỏ vào GL_NONE/chưa attach: GL spec — không clear gì.
+            ConsumeDeferredClear(c);
+            return true;
         }
         metal::ITexture* dep = nullptr;
-        if (fit->second.depthTex) {
+        if (slotOnly < 0 && fit->second.depthTex) {
             auto dit = c.textures.find(fit->second.depthTex);
             if (dit != c.textures.end() && dit->second.gpu) dep = dit->second.gpu.get();
         }
-        if (!col && !dep) return false;
+        bool anyCol = false;
+        for (uint32_t s = 0; s < nSlots; ++s) if (colPtrs[s]) { anyCol = true; break; }
+        if (!anyCol && !dep) return false;
         hasDepthAny = (dep != nullptr);
-        target = c.WrapTarget(fbo, col, dep);
+        target = c.WrapTarget(fbo, colPtrs, nSlots, dep);
         if (!target) return false;
     }
     if (fbo == 0 && target) hasDepthAny = target->hasDepth();
     if (!target) return false;
     metal::LoadOp cl = (m & 0x00004000u) ? metal::LoadOp::Clear : metal::LoadOp::Load;
-    metal::LoadOp dl = (m & 0x00000100u) ? metal::LoadOp::Clear : metal::LoadOp::Load;
+    metal::LoadOp dl = ((m & 0x00000100u) && slotOnly < 0) ? metal::LoadOp::Clear
+                                                           : metal::LoadOp::Load;
+    // Màu clear: slotRGBA (glClearBufferfv) ưu tiên, else clearColor chung (glClear).
+    metal::ClearColor cc{(double)c.clearColor[0], (double)c.clearColor[1],
+                         (double)c.clearColor[2], (double)c.clearColor[3]};
+    if (slotRGBA) cc = metal::ClearColor{(double)slotRGBA[0], (double)slotRGBA[1],
+                                         (double)slotRGBA[2], (double)slotRGBA[3]};
     // Scissor: GL clear tôn trọng SCISSOR_TEST (GuiItemAtlas clear vùng slot).
     // Metal loadAction=Clear KHÔNG clip theo setScissorRect (đã kiểm chứng
     // integration test) → color clear theo vùng qua fillRegionColor (blit);
     // depth clear full (vô hại: mỗi slot clear ngay trước draw của nó).
     // fill fail (MSAA/sRGB/format lạ) → fallback clear toàn attachment + diag.
+    // fillRegionColor chỉ ghi attachment slot 0 → dùng khi đích là slot 0/đơn.
     metal::ScissorRect sc{};
     const metal::ScissorRect* scp = nullptr;
-    if (c.state.IsEnabled(0x0C11)) {
+    if (c.state.IsEnabled(0x0C11) && slotOnly <= 0 && target->colorCount() == 1) {
         auto s = c.state.GetScissor();
         bool upper = c.state.ClipOrigin() == 0x8CA2;
         sc = GLScissorToMetal(s.x, s.y, s.w, s.h, (int)target->height(), upper);
@@ -291,10 +323,11 @@ bool AppleClearNow(GLbitfield m) {
     c.FlushAllBufferStaging();
     c.FlushAllTextureStaging();
     if (c.pendingEncoder) c.FlushPendingEncoder(); // draw trước end trước clear
+    // P1: compute đang dồn phải commit trước CB clear (queue in-order) — clear
+    // kế tiếp compute thấy kết quả, và compute thấy ghi trước đó.
+    c.FlushPendingCompute(false);
     metal::LoadOp clEff = cl, dlEff = dl;
     if (scp && cl == metal::LoadOp::Clear) {
-        metal::ClearColor cc{(double)c.clearColor[0], (double)c.clearColor[1],
-                             (double)c.clearColor[2], (double)c.clearColor[3]};
         // Region clear + depth clear gộp 1 command buffer (GuiItemAtlas ~300
         // lần/frame — 2 CB/ô là quá nhiều command buffer).
         const bool wantDepth = (dl == metal::LoadOp::Clear) && hasDepthAny;
@@ -325,10 +358,8 @@ bool AppleClearNow(GLbitfield m) {
         ConsumeDeferredClear(c); // color scissor fill xong + không depth → xong
         return true;
     }
-    auto enc = c.device->makeClearEncoder(target.get(),
-            metal::ClearColor{(double)c.clearColor[0], (double)c.clearColor[1],
-                              (double)c.clearColor[2], (double)c.clearColor[3]},
-            c.clearDepth, clEff, dlEff, nullptr);
+    auto enc = c.device->makeClearEncoder(target.get(), cc, c.clearDepth, clEff, dlEff,
+                                          nullptr);
     if (!enc) {
         if (c.DiagOn()) {
             static int nClrNil = 0;
@@ -344,6 +375,12 @@ bool AppleClearNow(GLbitfield m) {
     // cũ) để draw kế tiếp không clear thêm lần nữa với mask/color cũ.
     ConsumeDeferredClear(c);
     return true;
+}
+bool AppleClearNow(GLbitfield m) {
+    return AppleClearNowCore(m, Context::Current().state.BoundDrawFBO(), -1, nullptr);
+}
+bool AppleClearBufferImage(GLuint fbo, GLint slot, const float rgba[4]) {
+    return AppleClearNowCore(0x00004000u, fbo, slot, rgba);
 }
 
 // --- p6: cache viết lại index cho baseVertex ----------------------------------
@@ -629,29 +666,42 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
         }
     }
-    // 3. Target: FBO 0 → default; khác → wrap colorTex[0] (+depth nếu có)
+    // 3. Target: FBO 0 → default; khác → wrap các slot glDrawBuffers (+depth nếu có).
+    // MRT: mỗi slot = 1 draw buffer (GL_COLOR_ATTACHMENTn | GL_NONE), giữ đúng
+    // vị trí để fragment output i → attachment i khớp GL.
     std::shared_ptr<metal::IRenderTarget> target;
     bool hasDepthTex = false;
-    GLuint drawColorTexId = 0; // texture đích (so hazard feedback ở dưới)
+    GLuint drawColorTexId = 0; // texture att0 (so hazard feedback ở dưới)
+    metal::ITexture* colPtrs[8] = {};
+    GLuint colIds[8] = {};
+    metal::PixelFormat slotFmts[8] = {};
+    uint32_t nSlots = 1;
     if (c.state.BoundDrawFBO() == 0) {
         target = c.device->defaultRenderTarget();
         if (!target) { c.appleStats.noTarget++; return false; } // app chưa đặt target
     } else {
         auto fit = c.fbos.find(c.state.BoundDrawFBO());
         if (fit == c.fbos.end()) { c.appleStats.miscFail++; return false; }
-        auto cit = fit->second.colorTex.find(0);
-        if (cit == fit->second.colorTex.end()) { c.appleStats.miscFail++; return false; }
-        drawColorTexId = cit->second;
-        auto tit = c.textures.find(cit->second);
-        if (tit == c.textures.end() || !tit->second.gpu) { c.appleStats.miscFail++; return false; }
-        // Mip view (animate bake per-mip của TextureAtlas 26.x): FBO attach
-        // level>0 nhưng texture Metal chỉ có 1 level (non-mipmapped). Vẽ vào
-        // đây = alias level 0 → smear atlas (bake mip-N sai vị trí/scale đè
-        // lên base). Level 0 đã bake đúng + sampler NotMipmapped không bao giờ
-        // đọc mip>0 → BỎ QUA an toàn (đúng pixels + đỡ GPU). Khi nào texture
-        // thật sự mipmapped thì vẽ bình thường.
-        {
-            auto lit = fit->second.colorLevel.find(0);
+        const auto& dbs = fit->second.drawBuffers;
+        if (!dbs.empty()) nSlots = (uint32_t)std::min<size_t>(dbs.size(), 8);
+        for (uint32_t s = 0; s < nSlots; ++s) {
+            GLenum db = dbs.empty() ? 0x8CE0 : dbs[s];
+            if (db < 0x8CE0 || db > 0x8CE7) continue; // GL_NONE (0x0404) = slot rỗng
+            auto cit = fit->second.colorTex.find((GLint)(db - 0x8CE0));
+            if (cit == fit->second.colorTex.end()) continue;
+            auto tit = c.textures.find(cit->second);
+            if (tit == c.textures.end() || !tit->second.gpu) continue;
+            colPtrs[s] = tit->second.gpu.get();
+            colIds[s] = cit->second;
+            slotFmts[s] = tit->second.gpu->pixelFormat();
+            if (s == 0) drawColorTexId = cit->second;
+            // Mip view (animate bake per-mip của TextureAtlas 26.x): FBO attach
+            // level>0 nhưng texture Metal chỉ có 1 level (non-mipmapped). Vẽ vào
+            // đây = alias level 0 → smear atlas (bake mip-N sai vị trí/scale đè
+            // lên base). Level 0 đã bake đúng + sampler NotMipmapped không bao giờ
+            // đọc mip>0 → BỎ QUA an toàn (đúng pixels + đỡ GPU). Khi nào texture
+            // thật sự mipmapped thì vẽ bình thường.
+            auto lit = fit->second.colorLevel.find((GLint)(db - 0x8CE0));
             GLint fboLevel = (lit == fit->second.colorLevel.end()) ? 0 : lit->second;
             if (fboLevel > 0 && tit->second.gpu->levelCount() <= (uint32_t)fboLevel) {
                 ++c.appleStats.mipLevelSkipped;
@@ -666,7 +716,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 hasDepthTex = true;
             }
         }
-        target = c.WrapTarget(c.state.BoundDrawFBO(), tit->second.gpu.get(), dep);
+        bool anyColor = false;
+        for (uint32_t s = 0; s < nSlots; ++s) if (colPtrs[s]) { anyColor = true; break; }
+        if (!anyColor && !dep) { c.appleStats.miscFail++; return false; } // FBO trống
+        target = c.WrapTarget(c.state.BoundDrawFBO(), colPtrs, nSlots, dep);
         if (!target) { c.appleStats.noTarget++; return false; }
         // fixico8: log 1 lần/FBO format color+depth THẬT (depth RGBA8 = sai với
         // pipeline Depth32Float → encoder nil → icon bake bị bỏ).
@@ -675,33 +728,37 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             if (seenTgt.insert(c.state.BoundDrawFBO()).second)
                 fprintf(stderr,
                         "[TGLMT] tgt# fbo=%u colorTex=%u depthTex=%u hasDepth=%d "
-                        "colorFmt=%u depthFmt=%u\n",
+                        "colorFmt=%u depthFmt=%u slots=%u\n",
                         (unsigned)c.state.BoundDrawFBO(), (unsigned)drawColorTexId,
                         (unsigned)fit->second.depthTex, (int)hasDepthTex,
-                        (unsigned)tit->second.gpu->pixelFormat(),
-                        dep ? (unsigned)dep->pixelFormat() : 0u);
+                        (unsigned)slotFmts[0], dep ? (unsigned)dep->pixelFormat() : 0u,
+                        (unsigned)nSlots);
         }
     }
     // 3b. Staging đã flush ở 2a (TRƯỚC khi chụp con trỏ buffer) — cố ý bỏ
     // FlushAllBufferStaging ở đây: gọi lại sau khi đã chụp bindMap là chính là
     // nguồn gốc lỗi vertex buffer một-batch-trễ.
     // 3c. Feedback hazard pre-scan (TBDR đúng): nếu draw này sample đúng texture
-    // đang render (drawColorTexId), split pass trước khi reuse encoder.
+    // đang render (bất kỳ slot nào của pass), split pass trước khi reuse encoder.
     // Apple Best Practices: sampling-dependency giữa 2 encoders cùng target thì
     // KHÔNG merge được. Flush ở đây để draws trước commit với Store, draw này
     // mở pass mới với Load (thấy dữ liệu cũ, không fault).
-    if (drawColorTexId != 0 && c.pendingEncoder) {
+    if (c.pendingEncoder) {
         bool hz = false;
-        for (auto& sn : pr.vsSamplers) {
-            auto uit = pr.samplerUnits.find(sn);
-            GLuint u = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
-            if (u < 32 && c.state.AnyBoundAtUnit(u, drawColorTexId)) { hz = true; break; }
-        }
-        if (!hz) {
-            for (auto& sn : pr.fsSamplers) {
+        for (uint32_t s = 0; s < nSlots && !hz; ++s) {
+            GLuint id = colIds[s];
+            if (!id) continue;
+            for (auto& sn : pr.vsSamplers) {
                 auto uit = pr.samplerUnits.find(sn);
                 GLuint u = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
-                if (u < 32 && c.state.AnyBoundAtUnit(u, drawColorTexId)) { hz = true; break; }
+                if (u < 32 && c.state.AnyBoundAtUnit(u, id)) { hz = true; break; }
+            }
+            if (!hz) {
+                for (auto& sn : pr.fsSamplers) {
+                    auto uit = pr.samplerUnits.find(sn);
+                    GLuint u = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+                    if (u < 32 && c.state.AnyBoundAtUnit(u, id)) { hz = true; break; }
+                }
             }
         }
         if (hz) {
@@ -709,17 +766,21 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             ++c.appleStats.hazardSplits;
         }
     }
-    // 4. Pipeline: depth khi depthTest bật (+ có depth thật), blend khi BLEND bật
+    // 4. Pipeline: depth khi depthTest bật (+ có depth thật). MRT: per-slot blend
+    // (glEnablei/glBlendFunci) + colorWriteMask (glColorMaski); slot rỗng → Invalid.
     metal::PipelineOpts opts;
     opts.depth = c.state.IsEnabled(0x0B71) && (c.state.BoundDrawFBO() == 0 ? false : hasDepthTex);
-    opts.blend = c.state.IsEnabled(0x0BE2);
-    opts.colorWriteMask = c.state.ColorMask(0);
-    if (opts.blend) {
-        const BlendState& b = c.state.Blend()[0];
-        opts.blend0.enabled = true;
-        opts.blend0.srcRGB = b.srcRGB; opts.blend0.dstRGB = b.dstRGB;
-        opts.blend0.srcAlpha = b.srcAlpha; opts.blend0.dstAlpha = b.dstAlpha;
-        opts.blend0.rgbOp = b.rgbEq; opts.blend0.alphaOp = b.alphaEq;
+    bool defaultFB = (c.state.BoundDrawFBO() == 0);
+    opts.colorCount = defaultFB ? 1 : nSlots;
+    for (uint32_t s = 0; s < opts.colorCount && s < 8; ++s) {
+        opts.colorFmts[s] = colPtrs[s] ? slotFmts[s] : metal::PixelFormat::Invalid;
+        const BlendState& b = c.state.Blend()[s];
+        metal::AttachmentBlend& ab = opts.blends[s];
+        ab.enabled = c.state.IsEnabled(0x0BE2, s) && (defaultFB ? s == 0 : colPtrs[s] != nullptr);
+        ab.srcRGB = b.srcRGB; ab.dstRGB = b.dstRGB;
+        ab.srcAlpha = b.srcAlpha; ab.dstAlpha = b.dstAlpha;
+        ab.rgbOp = b.rgbEq; ab.alphaOp = b.alphaEq;
+        ab.writeMask = defaultFB ? c.state.ColorMask(0) : c.state.ColorMask(s);
     }
     // IR: identity của render pass đang muốn (để quyết định reuse encoder).
     // Default FB: colorTex=0; FBO: colorTex id thật. hasDepth phân biệt pass có depth.
@@ -732,9 +793,16 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // NOTE: target cho pipeline key phải là target sẽ dùng (pendingTarget khi reuse,
     // target mới khi tạo mới). Khi reuse, pendingTarget và target mới cùng format/size
     // (đã kiểm tra FBO id + hasDepth), nên dùng format của pendingTarget cũng đúng.
+    // MRT: encoder cũ chỉ reuse khi đúng bộ attachment (id từng slot khớp).
+    auto attachmentsMatch = [&]() -> bool {
+        if (c.pendingColorCount != nSlots) return false;
+        for (uint32_t s = 0; s < nSlots; ++s)
+            if (c.pendingColorIds[s] != colIds[s]) return false;
+        return true;
+    };
     metal::PixelFormat pipeFmt = target->pixelFormat();
     if (c.pendingEncoder && c.pendingTarget && !c.applePendingClear &&
-        c.pendingDrawFBO == curDrawFBO && c.pendingColorTex == curColorTex &&
+        c.pendingDrawFBO == curDrawFBO && attachmentsMatch() &&
         c.pendingHasDepth == opts.depth) {
         pipeFmt = c.pendingTarget->pixelFormat();
     }
@@ -749,9 +817,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         want.fmt = pipeFmt;
         want.stride = casN ? cas[0].stride : 0;
         want.depth = opts.depth;
-        want.blend = opts.blend;
-        want.colorWriteMask = opts.colorWriteMask;
-        if (opts.blend) want.blend0 = opts.blend0;
+        want.colorCount = opts.colorCount;
+        for (uint32_t i = 0; i < opts.colorCount && i < 8; ++i) {
+            want.colorFmts[i] = opts.colorFmts[i];
+            want.blends[i] = opts.blends[i];
+        }
         want.nAttribs = casN;
         for (uint32_t k = 0; k < casN; ++k) want.attribs[k] = cas[k];
         int hit = -1;
@@ -795,7 +865,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     bool isNewEncoder = false;
     {
         bool canReuse = c.pendingEncoder && c.pendingTarget && !c.applePendingClear &&
-                        c.pendingDrawFBO == curDrawFBO && c.pendingColorTex == curColorTex &&
+                        c.pendingDrawFBO == curDrawFBO && attachmentsMatch() &&
                         c.pendingHasDepth == opts.depth;
         if (canReuse) {
             enc = c.pendingEncoder;
@@ -803,7 +873,24 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             c.appleStats.encoderReused++;
         } else {
             if (c.pendingEncoder) c.FlushPendingEncoder();
+            // P1: CB render mới phải commit SAU compute CB đang dồn (draw này +
+            // draw sau đọc kết quả compute qua hazard tracking của queue).
+            c.FlushPendingCompute(false);
             metal::LoadOp cl = metal::LoadOp::Load, dl = metal::LoadOp::Load;
+            // MRT per-slot: LoadOp + ClearColor từng attachment (slotLoads[s]
+            // nullptr → pass-level cl/cc cho mọi slot). glClear → Clear mọi slot
+            // với clearColor; glClearBufferfv(COLOR,d) → chỉ slot d.
+            metal::LoadOp slotLoads[8];
+            metal::ClearColor slotColors[8];
+            for (uint32_t s = 0; s < 8; ++s) {
+                slotLoads[s] = metal::LoadOp::Load;
+                slotColors[s] = metal::ClearColor{(double)c.clearColor[0],
+                                                  (double)c.clearColor[1],
+                                                  (double)c.clearColor[2],
+                                                  (double)c.clearColor[3]};
+            }
+            const metal::LoadOp* slotLoadsPtr = nullptr;
+            const metal::ClearColor* slotColorsPtr = nullptr;
             if (c.applePendingClear) {
                 // clrmiss#: glClear ghi vào fbo A nhưng draw tiêu thụ đang bound
                 // fbo B → clear áp sai target (Metal loadAction gắn theo encoder
@@ -820,20 +907,52 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                                 c.clearColor[0], c.clearColor[1], c.clearColor[2],
                                 c.clearColor[3]);
                 }
-                if (c.appleClearMask & 0x00004000u) cl = metal::LoadOp::Clear; // COLOR_BUFFER_BIT
+                if (c.appleClearMask & 0x00004000u) { // COLOR_BUFFER_BIT
+                    bool all = c.appleClearColorAll;
+                    uint8_t bits = (uint8_t)(c.appleClearColorSlots & 0xFFu);
+                    cl = metal::LoadOp::Clear; // pass-level (đường không-MRT giữ nguyên)
+                    if (all || bits) {
+                        bool anyLoad = false;
+                        for (uint32_t s = 0; s < nSlots && s < 8; ++s) {
+                            bool doS = all || ((bits >> s) & 1u);
+                            if (doS && (bits >> s & 1u))
+                                slotColors[s] = metal::ClearColor{
+                                    (double)c.appleClearColorSlot[s][0],
+                                    (double)c.appleClearColorSlot[s][1],
+                                    (double)c.appleClearColorSlot[s][2],
+                                    (double)c.appleClearColorSlot[s][3]};
+                            slotLoads[s] = doS ? metal::LoadOp::Clear : metal::LoadOp::Load;
+                            anyLoad |= !doS;
+                        }
+                        if (anyLoad || !all) {
+                            // Có slot phải giữ nội dung → per-slot arrays bắt buộc.
+                            slotLoadsPtr = slotLoads;
+                            slotColorsPtr = slotColors;
+                        }
+                    }
+                }
                 if (c.appleClearMask & 0x00000100u) dl = metal::LoadOp::Clear; // DEPTH_BUFFER_BIT
                 c.applePendingClear = false;
                 c.appleClearMask = 0;
+                c.appleClearColorSlots = 0;
+                c.appleClearColorAll = false;
             }
+            // Đồng bộ slotLoads từ pass-level (để bật per-slot pointer bất kỳ lúc
+            // nào cũng không mất giá trị Clear của các slot trước đó).
+            if (!slotLoadsPtr)
+                for (uint32_t s = 0; s < nSlots && s < 8; ++s) slotLoads[s] = cl;
             // glInvalidateFramebuffer (spec §18.4): attachment đã bị invalidate →
             // nội dung undefined → loadAction=DontCare (TBDR không cần đọc tile từ
             // DRAM). Chỉ áp khi KHÔNG có pending Clear cho bit đó. Tiêu thụ cờ khi
             // encoder sinh ra (nội dung mới do chính pass này tạo).
             {
-                if (cl == metal::LoadOp::Load && curColorTex) {
-                    auto tit = c.textures.find(curColorTex);
+                // MRT: từng slot theo texture id của chính slot đó.
+                for (uint32_t s = 0; s < nSlots && s < 8; ++s) {
+                    if (slotLoads[s] != metal::LoadOp::Load || !colIds[s]) continue;
+                    auto tit = c.textures.find(colIds[s]);
                     if (tit != c.textures.end() && tit->second.contentUndefined) {
-                        cl = metal::LoadOp::DontCare;
+                        slotLoads[s] = metal::LoadOp::DontCare;
+                        slotLoadsPtr = slotLoads;
                         tit->second.contentUndefined = false;
                     }
                 }
@@ -851,8 +970,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             enc = c.device->makeRenderEncoderActions(
                 target.get(), pipe.get(),
                 metal::ClearColor{(double)c.clearColor[0], (double)c.clearColor[1],
-                                 (double)c.clearColor[2], (double)c.clearColor[3]},
-                c.clearDepth, cl, dl);
+                                  (double)c.clearColor[2], (double)c.clearColor[3]},
+                c.clearDepth, cl, dl, slotLoadsPtr, slotColorsPtr);
             if (!enc) {
                 c.appleStats.miscFail++;
                 // fixico8: encoder nil thường = depth-attachment sai format
@@ -874,6 +993,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             c.pendingHasDepth = opts.depth;
             c.pendingDrawFBO = curDrawFBO;
             c.pendingColorTex = curColorTex;
+            c.pendingColorCount = (uint8_t)(nSlots > 8 ? 8 : nSlots);
+            for (uint32_t s = 0; s < nSlots && s < 8; ++s)
+                c.pendingColorIds[s] = colIds[s];
             // Encoder mới đã có pipeline (bridge set ở creation) + chưa có state nào:
             // đánh dấu mọi shadow là invalid để lần set đầu luôn encode.
             c.pendingViewportValid = false;
@@ -1336,9 +1458,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             r.buf = raw; r.off = roff;
             return r;
         };
-        // Tương thích ngược: program link trước khi có vsBlocks/fsBlocks
-        // (link cũ) → vsBlocks/fsBlocks rỗng → dùng merged order cho cả 2 stage.
-        bool legacy = pr.vsBlocks.empty() && pr.fsBlocks.empty();
+        // Tương thích ngược: program link trước khi có vsShaderBlocks/blocks
+        // (link cũ) → mọi list rỗng → dùng merged order cho cả 2 stage.
+        bool legacy = pr.vsBlocks.empty() && pr.fsBlocks.empty() &&
+                      pr.vsShaderBlocks.empty() && pr.fsShaderBlocks.empty();
         if (legacy) {
             int slot = 17;
             for (auto& b : pr.uniformBlocks) {
@@ -1356,21 +1479,47 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 ++slot;
             }
         } else {
-            int slot = 17;
-            for (auto& nm : pr.vsBlocks) {
-                if (slot > 30) break;
-                auto ub = uploadBlock(nm);
-                if (ub.buf) enc->setVertexBuffer(ub.buf, ub.off, (uint32_t)slot);
-                else bindZeroV(slot);
-                ++slot;
+            // P4: bind theo slot THẬT từ converter (UBO + SSBO xen kẽ 17+k).
+            // SSBO: buffer device trực tiếp (không ring copy), override binding
+            // theo glShaderStorageBlockBinding nếu app đã gọi.
+            auto ssboBindingOf = [&](const std::string& nm) -> GLuint {
+                for (auto& s : pr.storageBlocks)
+                    if (s.name == nm) return pr.EffectiveSsboBinding(nm, s.layoutBinding);
+                return 0;
+            };
+            auto bindStorage = [&](const ProgramObject::StageBlockSlot& sb, bool isVS) {
+                metal::IBuffer* b = nullptr;
+                size_t off = 0;
+                auto it = c.storageBindPoints.find(ssboBindingOf(sb.name));
+                if (it != c.storageBindPoints.end() && it->second.buffer) {
+                    auto bt = c.buffers.find(it->second.buffer);
+                    if (bt != c.buffers.end() && bt->second.gpu) {
+                        b = bt->second.gpu.get();
+                        off = (size_t)it->second.offset;
+                        c.NoteComputeWriter(it->second.buffer); // shader có thể ghi
+                    }
+                }
+                if (b) {
+                    if (isVS) enc->setVertexBuffer(b, off, (uint32_t)sb.slot);
+                    else enc->setFragmentBuffer(b, off, (uint32_t)sb.slot);
+                } else {
+                    if (isVS) bindZeroV(sb.slot);
+                    else bindZeroF(sb.slot);
+                }
+            };
+            for (auto& sb : pr.vsShaderBlocks) {
+                if (sb.slot < 0 || sb.slot > 30) continue;
+                if (sb.isStorage) { bindStorage(sb, true); continue; }
+                auto ub = uploadBlock(sb.name);
+                if (ub.buf) enc->setVertexBuffer(ub.buf, ub.off, (uint32_t)sb.slot);
+                else bindZeroV(sb.slot);
             }
-            slot = 17;
-            for (auto& nm : pr.fsBlocks) {
-                if (slot > 30) break;
-                auto ub = uploadBlock(nm);
-                if (ub.buf) enc->setFragmentBuffer(ub.buf, ub.off, (uint32_t)slot);
-                else bindZeroF(slot);
-                ++slot;
+            for (auto& sb : pr.fsShaderBlocks) {
+                if (sb.slot < 0 || sb.slot > 30) continue;
+                if (sb.isStorage) { bindStorage(sb, false); continue; }
+                auto ub = uploadBlock(sb.name);
+                if (ub.buf) enc->setFragmentBuffer(ub.buf, ub.off, (uint32_t)sb.slot);
+                else bindZeroF(sb.slot);
             }
         }
     }
@@ -1393,7 +1542,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         // Chỉ chặn mismatch CHẮC CHẮN (cả hai đã biết mà khác nhau).
         if (target == 0) return true;
         switch (kind) {
-            case 'B': return target == 0x8C2A; // TEXTURE_BUFFER
+            case 'B': case 'I': case 'U': return target == 0x8C2A; // TEXTURE_BUFFER (f/i/u)
+            // P3: sampler1D → object target TEXTURE_1D (slot 0 chung 2D, storage 2D w×1).
+            case '1': return target == 0x0DE0 || target == 0x0DE1;
+            // P3: sampler3D → TEXTURE_3D (MTLTextureType3D).
+            case '3': case 'x': case 'y': return target == 0x806F;
             default: return target == 0x0DE1;  // TEXTURE_2D (+shadow approx)
         }
     };

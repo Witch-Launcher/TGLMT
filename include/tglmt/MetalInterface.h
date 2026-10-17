@@ -74,9 +74,14 @@ struct CustomAttrib {
 // Tùy chọn pipeline cho M5b GL-driven render (depth/blend bake cùng descriptor).
 struct PipelineOpts {
     bool depth = false;              // target có depth → depthAttachmentPixelFormat
-    bool blend = false;              // bật blending attachment 0
-    AttachmentBlend blend0;          // cấu hình blend khi blend=true (kèm writeMask)
-    uint32_t colorWriteMask = 0xF;   // glColorMask att0 (áp dụng cả khi blend tắt)
+    // MRT: số color attachment (draw slot) pipeline ghi. Slot không ghi
+    // (GL_NONE / không có texture) → colorFmts[i] = Invalid (Metal cho phép slot
+    // rỗng giữa các attachment có format).
+    uint32_t colorCount = 1;
+    PixelFormat colorFmts[8] = {};   // format từng slot; giá trị 0 → dùng `fmt` truyền vào
+    // Per-attachment: blending (glEnablei/glBlendFunci) + writeMask (glColorMaski).
+    // writeMask áp dụng cả khi enabled=false (glColorMask độc lập với blend).
+    AttachmentBlend blends[8];
 };
 
 class ISamplerState {
@@ -118,6 +123,8 @@ public:
     virtual ~ITexture() = default;
     virtual uint32_t width() const = 0;
     virtual uint32_t height() const = 0;
+    // P3: depth của texture 3D (GL_TEXTURE_3D / sampler3D). 2D/cube → 1.
+    virtual uint32_t depth() const { return 1; }
     virtual PixelFormat pixelFormat() const = 0;
     // Số mip level trên GPU (quyết định lọc mip an toàn; default 1).
     virtual uint32_t levelCount() const { return 1; }
@@ -137,6 +144,11 @@ public:
         (void)fmt; (void)baseLevel; (void)levelCount; (void)baseSlice; (void)sliceCount;
         return nullptr;
     }
+    // Đánh dấu depth texture đã có nội dung hợp lệ (GPU blit/full-define vào).
+    // Backend có cơ chế "first-attach clear" cho depth Private (Apple: takeDepthInit)
+    // phải gọi khi texture được ghi nội dung trước lần dùng làm depth attachment
+    // — không thì lần attach đầu clear trắng nội dung vừa copy (Iris depth copy).
+    virtual void markDepthInited() {}
 };
 
 using LogFn = std::function<void(const std::string&)>;
@@ -177,6 +189,8 @@ public:
     virtual PixelFormat pixelFormat() const { return PixelFormat::RGBA8Unorm; }
     // Target có depth attachment không (để gộp clear màu+depth 1 command buffer).
     virtual bool hasDepth() const { return false; }
+    // MRT: số slot color đang attach theo glDrawBuffers (>=1).
+    virtual uint32_t colorCount() const { return 1; }
 };
 
 class IRenderEncoder {
@@ -265,6 +279,19 @@ public:
         (void)gz; (void)tx; (void)ty; (void)tz;
         dispatch2D(gx, gy);
     }
+    // P1 glDispatchComputeIndirect: dispatch với num_workgroups (3×uint32, GL ≡
+    // MTLDispatchThreadgroupsIndirectArguments) đọc từ GPU buffer tại byte offset.
+    // threadsPerThreadgroup từ layout(local_size) của shader. Default: no-op.
+    virtual void dispatchThreadgroupsIndirect(IBuffer* b, size_t offset,
+                                              uint32_t tx, uint32_t ty, uint32_t tz) {
+        (void)b; (void)offset; (void)tx; (void)ty; (void)tz;
+    }
+    // P1 deferred compute: end encoder nhưng GIỮ command buffer mở (chưa commit)
+    // để dồn nhiều dispatch / hoặc commit sau tại điểm cần thứ tự. Default →
+    // endAndCommit (backend cũ giữ nguyên hành vi sync, vẫn đúng).
+    virtual void endEncodingNoCommit() { endAndCommit(); }
+    // P1: commit CB đang giữ (sau endEncodingNoCommit), không waitUntilCompleted.
+    virtual void commitNoWait() {}
     virtual bool endAndCommit() { return false; }
 };
 
@@ -405,6 +432,12 @@ public:
     virtual std::shared_ptr<IRenderTarget> wrapAsTarget(ITexture* color, ITexture* depth) {
         (void)color; (void)depth; return nullptr;
     }
+    // MRT: nColors slot theo đúng thứ tự glDrawBuffers; slot null (GL_NONE /
+    // texture chưa realize) được phép xen kẽ. Default build: chỉ hỗ trợ 1 slot.
+    virtual std::shared_ptr<IRenderTarget> wrapAsTarget(const ITexture* const* colors,
+            uint32_t nColors, ITexture* depth) {
+        return wrapAsTarget(nColors ? const_cast<ITexture*>(colors[0]) : nullptr, depth);
+    }
     // Encoder giữ nội dung cũ (LoadActionLoad) — cho draw thứ 2+ trong frame.
     // Default: encoder clear đen (fallback vô hại).
     virtual std::shared_ptr<IRenderEncoder> makeRenderEncoderLoad(IRenderTarget* target,
@@ -412,10 +445,13 @@ public:
         return makeRenderEncoder(target, pipeline, ClearColor{0, 0, 0, 1});
     }
     // Encoder với load action riêng color/depth (glClear mask). Default: clear cả hai.
+    // MRT: slotLoads/slotColors (n phần tử theo slot glDrawBuffers) override
+    // per-attachment — nullptr → dùng colorLoad/clear cho mọi slot.
     virtual std::shared_ptr<IRenderEncoder> makeRenderEncoderActions(IRenderTarget* target,
             IRenderPipeline* pipeline, const ClearColor& clear, double clearDepth,
-            LoadOp colorLoad, LoadOp depthLoad) {
-        (void)clearDepth; (void)depthLoad;
+            LoadOp colorLoad, LoadOp depthLoad, const LoadOp* slotLoads = nullptr,
+            const ClearColor* slotColors = nullptr) {
+        (void)clearDepth; (void)depthLoad; (void)slotLoads; (void)slotColors;
         if (colorLoad == LoadOp::Load) return makeRenderEncoderLoad(target, pipeline);
         return makeRenderEncoder(target, pipeline, clear);
     }
@@ -506,6 +542,17 @@ public:
     virtual bool updateTexture(ITexture* tex, uint32_t x, uint32_t y,
             uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) {
         (void)tex; (void)x; (void)y; (void)w; (void)h; (void)data; (void)bytesPerRow;
+        return false;
+    }
+    // P3: texture 3D (GL_TEXTURE_3D — Iris custom texture + sampler3D). Default
+    // fallback 2D (Null backend test vẫn chạy); Apple tạo MTLTextureType3D.
+    virtual std::shared_ptr<ITexture> newTexture3D(uint32_t w, uint32_t h, uint32_t d, PixelFormat f) {
+        (void)d; return newTexture(w, h, f);
+    }
+    // Upload MỘT slice z của texture 3D (glTexSubImage3D lặp per-slice).
+    virtual bool updateTexture3D(ITexture* tex, uint32_t z, uint32_t x, uint32_t y,
+            uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) {
+        (void)tex; (void)z; (void)x; (void)y; (void)w; (void)h; (void)data; (void)bytesPerRow;
         return false;
     }
     // Cubemap cho panorama vanilla (samplerCube + texturecube<float> MSL):

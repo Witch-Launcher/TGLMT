@@ -4,6 +4,7 @@
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 using namespace tglmt;
@@ -198,5 +199,154 @@ int main() {
     }
 
     printf("test_compute_dispatch: all cases OK (SSBO + uniform + texture + image + atomic)\n");
+
+    // --- Case 6: P1 COMPUTE_WORK_GROUP_SIZE + glDispatchComputeIndirect ---
+    {
+        // Shader: v[i] = i + 7 (local 8). Args CPU-write {8,1,1} qua DISPATCH_INDIRECT.
+        const char* src6 = "#version 460 core\n"
+            "layout(local_size_x=8) in;\n"
+            "layout(std430,binding=0) buffer B{float v[];};\n"
+            "void main(){ v[gl_GlobalInvocationID.x]=float(gl_GlobalInvocationID.x)+7.0; }\n";
+        GLuint sh6 = glCreateShader(0x91B9);
+        glShaderSource(sh6, 1, &src6, nullptr); glCompileShader(sh6);
+        GLuint pr6 = glCreateProgram(); glAttachShader(pr6, sh6); glLinkProgram(pr6);
+        GLint ok6 = 0; glGetProgramiv(pr6, 0x8B82, &ok6);
+        if (!ok6) { printf("test_compute_dispatch FAIL indirect link\n"); return 1; }
+        // Iris ComputeProgram đọc query này ngay sau link — phải khớp layout.
+        GLint wsz[3] = {0, 0, 0};
+        glGetProgramiv(pr6, 0x8267, wsz);
+        if (wsz[0] != 8 || wsz[1] != 1 || wsz[2] != 1) {
+            printf("test_compute_dispatch FAIL work group size {%d,%d,%d}\n",
+                   wsz[0], wsz[1], wsz[2]);
+            return 1;
+        }
+        float z6[64] = {0};
+        GLuint buf6; glGenBuffers(1, &buf6);
+        glBindBuffer(0x90D2, buf6); glBufferData(0x90D2, sizeof(z6), z6, 0x88E4);
+        glBindBufferBase(0x90D2, 0, buf6);
+        GLuint ib; glGenBuffers(1, &ib);
+        glBindBuffer(0x90EE, ib); // DISPATCH_INDIRECT_BUFFER
+        unsigned int args[3] = {8, 1, 1};
+        glBufferData(0x90EE, sizeof(args), args, 0x88E4);
+        glUseProgram(pr6);
+        glDispatchComputeIndirect(0);
+        glMemoryBarrier(0x0020 | 0x0040);
+        glBindBuffer(0x90D2, buf6);
+        const float* r6 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z6), 0x0008 | 0x0010);
+        if (!r6) { printf("test_compute_dispatch FAIL indirect map\n"); return 1; }
+        int bad6 = 0;
+        for (int i = 0; i < 64; ++i) if (r6[i] != (float)i + 7.0f) ++bad6;
+        glUnmapBuffer(0x90D2);
+        if (bad6) { printf("test_compute_dispatch FAIL indirect: %d/64 wrong\n", bad6); return 1; }
+        printf("test_compute_dispatch: indirect OK (wgsz {8,1,1}, 64/64)\n");
+    }
+
+    // --- Case 7: P1 chain 2 dispatch deferred — B đọc SSBO A ghi (barrier giữa) ---
+    {
+        const char* srcA = "#version 460 core\n"
+            "layout(local_size_x=8) in;\n"
+            "layout(std430,binding=0) buffer A{uvec4 v[];};\n"
+            "void main(){ v[gl_GlobalInvocationID.x].x=gl_GlobalInvocationID.x*3u+1u; }\n";
+        const char* srcB = "#version 460 core\n"
+            "layout(local_size_x=8) in;\n"
+            "layout(std430,binding=0) buffer A{uvec4 v[];};\n"
+            "layout(std430,binding=1) buffer W{uvec4 w[];};\n"
+            "void main(){ w[gl_GlobalInvocationID.x].x = v[gl_GlobalInvocationID.x].x * 2u; }\n";
+        GLuint shA = glCreateShader(0x91B9); glShaderSource(shA, 1, &srcA, nullptr); glCompileShader(shA);
+        GLuint shB = glCreateShader(0x91B9); glShaderSource(shB, 1, &srcB, nullptr); glCompileShader(shB);
+        GLuint prA = glCreateProgram(); glAttachShader(prA, shA); glLinkProgram(prA);
+        GLuint prB = glCreateProgram(); glAttachShader(prB, shB); glLinkProgram(prB);
+        GLint okA = 0, okB = 0;
+        glGetProgramiv(prA, 0x8B82, &okA); glGetProgramiv(prB, 0x8B82, &okB);
+        if (!okA || !okB) { printf("test_compute_dispatch FAIL chain link (%d,%d)\n", okA, okB); return 1; }
+        // 8 group × 8 thread = 64 phần tử uvec4 (stride 16B/lane đúng std430).
+        unsigned int zA[64 * 4] = {0}, zB[64 * 4] = {0};
+        GLuint bufA, bufB;
+        glGenBuffers(1, &bufA); glGenBuffers(1, &bufB);
+        glBindBuffer(0x90D2, bufA); glBufferData(0x90D2, sizeof(zA), zA, 0x88E4);
+        glBindBuffer(0x90D2, bufB); glBufferData(0x90D2, sizeof(zB), zB, 0x88E4);
+        glBindBufferBase(0x90D2, 0, bufA);
+        glUseProgram(prA);
+        glDispatchCompute(8, 1, 1);                    // CB1 (deferred)
+        glMemoryBarrier(0x0020 | 0x0040);              // commit CB1
+        glBindBufferBase(0x90D2, 0, bufA);
+        glBindBufferBase(0x90D2, 1, bufB);
+        glUseProgram(prB);
+        glDispatchCompute(8, 1, 1);                    // CB2 (deferred), đọc A ghi B
+        glMemoryBarrier(0x0020 | 0x0040);
+        glBindBuffer(0x90D2, bufB);
+        const unsigned int* rB = (const unsigned int*)glMapBufferRange(0x90D2, 0, sizeof(zB), 0x0008 | 0x0010);
+        if (!rB) { printf("test_compute_dispatch FAIL chain map\n"); return 1; }
+        int badB = 0;
+        for (int i = 0; i < 64; ++i) {
+            unsigned int want = ((unsigned int)i * 3u + 1u) * 2u;
+            if (rB[i * 4] != want) ++badB;
+        }
+        glUnmapBuffer(0x90D2);
+        if (badB) { printf("test_compute_dispatch FAIL chain: %d/64 wrong\n", badB); return 1; }
+        printf("test_compute_dispatch: chain OK (B đọc A qua 2 CB deferred)\n");
+    }
+
+    // --- Case 8: P1 glDispatchCompute(0,1,1) = no work (GL §7.12.1), không fault ---
+    {
+        const char* src8 = "#version 460 core\n"
+            "layout(local_size_x=8) in;\n"
+            "layout(std430,binding=0) buffer B{float v[];};\n"
+            "void main(){ v[gl_GlobalInvocationID.x]=123.0; }\n";
+        GLuint sh8 = glCreateShader(0x91B9);
+        glShaderSource(sh8, 1, &src8, nullptr); glCompileShader(sh8);
+        GLuint pr8 = glCreateProgram(); glAttachShader(pr8, sh8); glLinkProgram(pr8);
+        float z8[64];
+        for (int i = 0; i < 64; ++i) z8[i] = 5.0f;
+        GLuint buf8; glGenBuffers(1, &buf8);
+        glBindBuffer(0x90D2, buf8); glBufferData(0x90D2, sizeof(z8), z8, 0x88E4);
+        glBindBufferBase(0x90D2, 0, buf8);
+        glUseProgram(pr8);
+        glDispatchCompute(0, 1, 1); // x=0 → KHÔNG thread nào chạy
+        glMemoryBarrier(0x0020 | 0x0040);
+        glBindBuffer(0x90D2, buf8);
+        const float* r8 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z8), 0x0008 | 0x0010);
+        if (!r8) { printf("test_compute_dispatch FAIL zero-group map\n"); return 1; }
+        int bad8 = 0;
+        for (int i = 0; i < 64; ++i) if (r8[i] != 5.0f) ++bad8;
+        glUnmapBuffer(0x90D2);
+        if (bad8) { printf("test_compute_dispatch FAIL zero-group: %d/64 changed\n", bad8); return 1; }
+        printf("test_compute_dispatch: zero-group OK (không thread nào chạy)\n");
+    }
+
+    // --- Case 9: TGLMT_COMPUTE_SYNC=1 escape hatch (commit+wait mỗi dispatch) ---
+    {
+        setenv("TGLMT_COMPUTE_SYNC", "1", 1);
+        Context sync("apple");
+        if (!sync.device->isNull()) {
+            Context::MakeCurrent(&sync);
+            const char* src9 = "#version 460 core\n"
+                "layout(local_size_x=8) in;\n"
+                "layout(std430,binding=0) buffer B{float v[];};\n"
+                "void main(){ v[gl_GlobalInvocationID.x]=float(gl_GlobalInvocationID.x); }\n";
+            GLuint sh9 = glCreateShader(0x91B9);
+            glShaderSource(sh9, 1, &src9, nullptr); glCompileShader(sh9);
+            GLuint pr9 = glCreateProgram(); glAttachShader(pr9, sh9); glLinkProgram(pr9);
+            GLint ok9 = 0; glGetProgramiv(pr9, 0x8B82, &ok9);
+            if (!ok9) { printf("test_compute_dispatch FAIL sync link\n"); return 1; }
+            float z9[64] = {0};
+            GLuint buf9; glGenBuffers(1, &buf9);
+            glBindBuffer(0x90D2, buf9); glBufferData(0x90D2, sizeof(z9), z9, 0x88E4);
+            glBindBufferBase(0x90D2, 0, buf9);
+            glUseProgram(pr9);
+            glDispatchCompute(8, 1, 1); // sync mode: commit+wait ngay
+            // KHÔNG barrier/map-sync — sync mode đã wait, contents phải sẵn sàng.
+            const float* r9 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z9), 0x0008 | 0x0010);
+            if (!r9) { printf("test_compute_dispatch FAIL sync map\n"); return 1; }
+            int bad9 = 0;
+            for (int i = 0; i < 64; ++i) if (r9[i] != (float)i) ++bad9;
+            glUnmapBuffer(0x90D2);
+            if (bad9) { printf("test_compute_dispatch FAIL sync mode: %d/64 wrong\n", bad9); return 1; }
+            printf("test_compute_dispatch: sync mode OK (TGLMT_COMPUTE_SYNC=1)\n");
+        }
+        unsetenv("TGLMT_COMPUTE_SYNC");
+    }
+
+    printf("test_compute_dispatch: all P1 cases OK (indirect + chain + zero + sync)\n");
     return 0;
 }

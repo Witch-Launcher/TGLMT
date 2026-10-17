@@ -698,6 +698,8 @@ static std::string ParamBaseName(const std::string& p) {
 }
 // Loại sampler theo từ kiểu GLSL: '2' 2D, 'S' shadow, 'C' cube, 'A' array,
 // 'B' buffer-float, 'I' buffer-int, 'U' buffer-uint, 0 = không phải sampler.
+// P3: '1' sampler1D (approx texture2d + eps y), '3' sampler3D (texture3d<float>),
+// 'i' isampler2D, 'u' usampler2D, 'x' isampler3D, 'y' usampler3D.
 static char SamplerKindOf(const std::string& glslType) {
     if (glslType == "sampler2D") return '2';
     if (glslType == "sampler2DShadow") return 'S';
@@ -706,9 +708,15 @@ static char SamplerKindOf(const std::string& glslType) {
     if (glslType == "samplerBuffer") return 'B';
     if (glslType == "isamplerBuffer") return 'I';
     if (glslType == "usamplerBuffer") return 'U';
+    if (glslType == "sampler1D") return '1';
+    if (glslType == "sampler3D") return '3';
+    if (glslType == "isampler2D") return 'i';
+    if (glslType == "usampler2D") return 'u';
+    if (glslType == "isampler3D") return 'x';
+    if (glslType == "usampler3D") return 'y';
     return 0;
 }
-// Kiểu texture MSL theo kind sampler (cho split param).
+// Kind sampler → MSL texture type (declaration của _tex param).
 static std::string SamplerTexType(char kind, const std::string& elem = "float") {
     switch (kind) {
         case 'C': return "texturecube<float>";
@@ -716,15 +724,44 @@ static std::string SamplerTexType(char kind, const std::string& elem = "float") 
         case 'I': return "texture2d<int>";
         case 'U': return "texture2d<uint>";
         case 'B': return "texture2d<" + elem + ">";
+        case '1': return "texture2d<" + elem + ">";       // 1D ≈ 2D w×1
+        case '3': return "texture3d<" + elem + ">";       // 3D
+        case 'i': return "texture2d<int>";
+        case 'u': return "texture2d<uint>";
+        case 'x': return "texture3d<int>";
+        case 'y': return "texture3d<uint>";
         default: return "texture2d<float>";
+    }
+}
+// P3: kind sampler → elem (float/int/uint) cho entry-level _tex param.
+static std::string SamplerElemOf(char kind) {
+    switch (kind) {
+        case 'I': case 'i': case 'x': return "int";
+        case 'U': case 'u': case 'y': return "uint";
+        default: return "float";
     }
 }
 // Bảng sampler cho rewrite sampling calls: tên → (kind, elem).
 struct SampEntry {
-    char kind = '2'; // 2/S/C/A/B/I/U (xem SamplerKindOf)
+    char kind = '2'; // 1/2/S/3/C/A/B/I/U/i/u/x/y (xem SamplerKindOf)
     std::string elem = "float";
 };
 using SampTable = std::map<std::string, SampEntry>;
+// P3: entry cho 1 sampler var đã parse (dùng chung các chỗ build SampTable).
+static SampEntry EntryOfSampler(const GLSLVar& s) {
+    SampEntry e;
+    if (s.isBuffer)       e.kind = (s.sampleType == "int") ? 'I' : (s.sampleType == "uint") ? 'U' : 'B';
+    else if (s.isCube)    e.kind = 'C';
+    else if (s.isArray)   e.kind = 'A';
+    else if (s.isShadow)  e.kind = 'S';
+    else if (s.is1D)      e.kind = '1';
+    else if (s.is3D)      e.kind = (s.sampleType == "int") ? 'x' : (s.sampleType == "uint") ? 'y' : '3';
+    else if (s.sampleType == "int")  e.kind = 'i';
+    else if (s.sampleType == "uint") e.kind = 'u';
+    else                  e.kind = '2';
+    e.elem = s.sampleType;
+    return e;
+}
 // P6g: bảng image (tên → kind '2'/'A'/'C'/'3') cho rewrite imageLoad/Store/Size.
 using ImgTable = std::map<std::string, char>;
 // P-Tess T1: rewrite TCS body → MSL kernel body.
@@ -1251,6 +1288,12 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             } else if (sv.kind == 'A') {
                 rep = sname + "_tex.sample(" + sname + "_smp, float2((" + args[1] + ").xy), uint((" +
                       args[1] + ").z)" + bias + ")";
+            } else if (sv.kind == '1') {
+                // P3: sampler1D ≈ texture2d w×1 — y=0.5 rơi đúng texel hàng 0.
+                rep = sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + ", 0.5)" + bias + ")";
+            } else if (sv.kind == '3' || sv.kind == 'x' || sv.kind == 'y') {
+                // P3: sampler3D → texture3d<float/int/uint>.
+                rep = sname + "_tex.sample(" + sname + "_smp, float3(" + args[1] + ")" + bias + ")";
             } else {
                 std::string uv = sv.kind == 'S' ? "float2((" + args[1] + ").xy)" : "float2(" + args[1] + ")";
                 rep = sname + "_tex.sample(" + sname + "_smp, " + uv + bias + ")";
@@ -1291,7 +1334,12 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             } else {
                 if (args.size() < 2 || args.size() > 3) { err = "texelFetch 2D cần (sampler, coord[, lod])"; return false; }
                 std::string lod = args.size() == 3 ? args[2] : "0";
-                rep = sname + "_tex.read(uint2(" + args[1] + "), " + lod + ")";
+                if (sv.kind == '1')
+                    rep = sname + "_tex.read(uint2(uint(" + args[1] + "), 0u), " + lod + ")";
+                else if (sv.kind == '3' || sv.kind == 'x' || sv.kind == 'y')
+                    rep = sname + "_tex.read(uint3(" + args[1] + "), " + lod + ")";
+                else
+                    rep = sname + "_tex.read(uint2(" + args[1] + "), " + lod + ")";
             }
             out += rep;
             i = k + 1;
@@ -1336,8 +1384,13 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             std::string sname = Trim(args[0]);
             SampEntry sv;
             if (!findSamp(sname, sv)) { err = "textureLod sampler không khai báo: " + sname; return false; }
-            if (sv.kind != '2') { err = "textureLod chỉ hỗ trợ sampler2D"; return false; }
-            out += sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + "), float(" + args[2] + "))";
+            if (sv.kind == '1')
+                out += sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + ", 0.5), float(" + args[2] + "))";
+            else if (sv.kind == '3' || sv.kind == 'x' || sv.kind == 'y')
+                out += sname + "_tex.sample(" + sname + "_smp, float3(" + args[1] + "), float(" + args[2] + "))";
+            else if (sv.kind == '2')
+                out += sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + "), float(" + args[2] + "))";
+            else { err = "textureLod chỉ hỗ trợ sampler2D/1D/3D"; return false; }
             i = k + 1;
         }
         body = out;
@@ -1400,9 +1453,15 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
                 // array: ivec3(w,h,array_size)
                 rep = "int3(int(" + tn + ".get_width(" + lod + ")), int(" + tn +
                       ".get_height(" + lod + ")), int(" + tn + ".get_array_size()))";
-            } else if (sv.kind == 'C' || sv.kind == '2' || sv.kind == 'S') {
+            } else if (sv.kind == 'C' || sv.kind == '2' || sv.kind == 'S' ||
+                       sv.kind == 'i' || sv.kind == 'u') {
                 rep = "int2(int(" + tn + ".get_width(" + lod + ")), int(" + tn +
                       ".get_height(" + lod + ")))";
+            } else if (sv.kind == '1') {
+                rep = "int(" + tn + ".get_width(" + lod + "))";
+            } else if (sv.kind == '3' || sv.kind == 'x' || sv.kind == 'y') {
+                rep = "int3(int(" + tn + ".get_width(" + lod + ")), int(" + tn +
+                      ".get_height(" + lod + ")), int(" + tn + ".get_depth(" + lod + ")))";
             } else {
                 err = "textureSize không hỗ trợ sampler kind cho " + sname;
                 return false;
@@ -2081,7 +2140,8 @@ static bool ThreadHelpersMSL(
         if (git == globalSamp.end()) return;
         char k = git->second.kind;
         items.push_back("T:" + sname + "_tex");
-        if (k == '2' || k == 'S' || k == 'C' || k == 'A') items.push_back("T:" + sname + "_smp");
+        // P3: mọi kind sample()-được đều cần _smp; chỉ B/I/U (buffer read()) không.
+        if (k != 'B' && k != 'I' && k != 'U') items.push_back("T:" + sname + "_smp");
     };
     auto declFor = [&](const std::string& item) -> std::string {
         if (item == "U:") return "constant TGLMTUniforms& tglmt_u";
@@ -2390,7 +2450,7 @@ static bool ThreadHelpersMSL(
                     std::string elem = "float";
                     auto se = d.splitElem.find(nm);
                     if (se != d.splitElem.end()) elem = se->second;
-                    if (k == '2' || k == 'S' || k == 'C' || k == 'A') {
+                    if (k != 'B' && k != 'I' && k != 'U') {
                         emitP(SamplerTexType(k, elem) + " " + nm + "_tex");
                         emitP("sampler " + nm + "_smp");
                     } else {
@@ -3317,14 +3377,25 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                         continue;
                     }
                     if (isU && (v.glslType == "sampler2D" || v.glslType == "sampler2DShadow" ||
-                                v.glslType == "samplerCube" || v.glslType == "sampler2DArray")) {
+                                v.glslType == "samplerCube" || v.glslType == "sampler2DArray" ||
+                                v.glslType == "sampler1D" || v.glslType == "sampler3D" ||
+                                v.glslType == "isampler2D" || v.glslType == "usampler2D" ||
+                                v.glslType == "isampler3D" || v.glslType == "usampler3D")) {
                         // samplerCube → texturecube (panorama); Array → texture2d_array;
                         // Shadow → texture2d approx (bỏ compare ref, xem texture() bên dưới).
+                        // P3: 1D → texture2d (storage w×1); 3D → texture3d; i/u → <int>/<uint>.
                         v.mslType = "sampler";
                         v.isSampler = true;
                         v.isCube = (v.glslType == "samplerCube");
                         v.isArray = (v.glslType == "sampler2DArray");
                         v.isShadow = (v.glslType == "sampler2DShadow");
+                        v.is1D = (v.glslType == "sampler1D");
+                        v.is3D = (v.glslType == "sampler3D" || v.glslType == "isampler3D" ||
+                                  v.glslType == "usampler3D");
+                        if (v.glslType == "isampler2D" || v.glslType == "isampler3D")
+                            v.sampleType = "int";
+                        else if (v.glslType == "usampler2D" || v.glslType == "usampler3D")
+                            v.sampleType = "uint";
                         uniforms.push_back(v);
                         continue;
                     }
@@ -3962,7 +4033,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 if (nm.empty()) continue;
                 SampEntry e;
                 e.kind = k;
-                e.elem = (k == 'I') ? "int" : (k == 'U' ? "uint" : "float");
+                e.elem = SamplerElemOf(k);
                 helperSamp[h.name].emplace_back(nm, e);
             }
         }
@@ -3972,13 +4043,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     {
         SampTable tab;
         for (auto& s : R.samplers) {
-            SampEntry e;
-            e.kind = s.isBuffer ? (s.sampleType == "int" ? 'I' : s.sampleType == "uint" ? 'U' : 'B')
-                     : s.isCube   ? 'C'
-                     : s.isArray  ? 'A'
-                     : s.isShadow ? 'S'
-                                  : '2';
-            e.elem = s.sampleType;
+            SampEntry e = EntryOfSampler(s);
             tab[s.name] = e;
         }
         for (auto& [hn, vec] : helperSamp)
@@ -4162,17 +4227,22 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // UBO/SSBO members → param. UBO: `ubo_Block.member` (constant, buffer(17+ubi)).
     // SSBO struct: `ssbo_Block.member` (device); SSBO unsized-array single-member:
     // flatten device T* (param tên member). Metal buffer index max = 30.
-    // Vertex/graphics: buffer(0..15) = vertex attrs → SSBO graphics fail trung thực.
-    // Compute (0..15 trống): SSBO slot bắt từ 0+sbi.
+    // P4: vertex/graphics cũng nhận SSBO — UBO lẫn SSBO dùng CHUNG dải 17+30,
+    // gán tuần tự theo thứ tự khai báo (không chồng slot nhau). Compute/tess giữ
+    // nguyên: SSBO 0+sbi (0..15 trống cho kernel), UBO 17+ubi.
     struct SSBOFlat { std::string type, param; int slot; };
     std::vector<SSBOFlat> ssboFlat;
     std::vector<int> ssboSlot(blocks.size(), -1); // storage-struct slot; -1 = UBO/flat
+    std::vector<int> blkEmitSlot(blocks.size(), -1); // slot [[buffer]] emit (UBO + SSBO)
     int uboCnt = 0, ssboCnt = 0;
-    int ssboBase = (R.isCompute || R.isTessControl) ? 0 : -1; // -1 = graphics → SSBO chưa hỗ trợ
+    bool kernelLike = R.isCompute || R.isTessControl;
+    int gfxNext = 17; // graphics: con trỏ slot tuần tự cho MỌI block (UBO + SSBO)
     for (size_t bi = 0; bi < blocks.size(); ++bi) {
         auto& b = blocks[bi];
         if (b.isStorage) {
-            if (ssboBase < 0) return fail("SSBO trong vertex/fragment chưa hỗ trợ (chỉ compute/tess)");
+            int slot = kernelLike ? ssboCnt : gfxNext++;
+            if (kernelLike && slot > 15) return fail("SSBO vượt slot compute (0..15, max 30)");
+            if (!kernelLike && slot > 30) return fail("SSBO graphics vượt slot buffer(30)");
             bool hasUnsized = false;
             for (auto& m : b.members) if (m.arraySize == -1) hasUnsized = true;
             if (hasUnsized) {
@@ -4180,15 +4250,13 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 if (b.members.size() != 1) return fail("SSBO nhiều member + mảng unsized ngoài subset");
                 std::string mn = b.members[0].name;
                 if (mn.find('.') != std::string::npos) return fail("SSBO unsized-array có instance ngoài subset");
-                ssboFlat.push_back({b.members[0].mslType, mn, ssboBase + ssboCnt});
-                if (ssboBase + ssboCnt > 15) return fail("SSBO vượt slot compute (0..15, max 30)");
-                R.blockSlots.push_back({b.binding, ssboBase + ssboCnt, true, b.name});
+                ssboFlat.push_back({b.members[0].mslType, mn, slot});
+                R.blockSlots.push_back({b.binding, slot, true, b.name});
                 ++ssboCnt;
                 continue; // member name = param name → không cần mpShared (identity)
             }
-            if (ssboBase + ssboCnt > 15) return fail("SSBO vượt slot compute (0..15, max 30)");
-            ssboSlot[bi] = ssboBase + ssboCnt;
-            R.blockSlots.push_back({b.binding, ssboBase + ssboCnt, true, b.name});
+            ssboSlot[bi] = slot;
+            R.blockSlots.push_back({b.binding, slot, true, b.name});
             ++ssboCnt;
             std::string inst;
             for (auto& m : b.members) {
@@ -4204,7 +4272,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             continue;
         }
         ++uboCnt;
-        R.blockSlots.push_back({b.binding, 17 + uboCnt - 1, false, b.name});
+        int uslot = kernelLike ? (17 + uboCnt - 1) : gfxNext++;
+        if (!kernelLike && uslot > 30) return fail("UBO graphics vượt slot buffer(30)");
+        blkEmitSlot[bi] = uslot;
+        R.blockSlots.push_back({b.binding, uslot, false, b.name});
         std::string inst;
         for (auto& m : b.members) {
             size_t dot = m.name.find('.');
@@ -4337,13 +4408,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     {
         SampTable tab;
         for (auto& s : R.samplers) {
-            SampEntry e;
-            e.kind = s.isBuffer ? (s.sampleType == "int" ? 'I' : s.sampleType == "uint" ? 'U' : 'B')
-                     : s.isCube   ? 'C'
-                     : s.isArray  ? 'A'
-                     : s.isShadow ? 'S'
-                                  : '2';
-            e.elem = s.sampleType;
+            SampEntry e = EntryOfSampler(s);
             tab[s.name] = e;
         }
         std::string err;
@@ -4708,13 +4773,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         // global sampler table (cho declOf global pairs)
         SampTable globalSamp;
         for (auto& s : R.samplers) {
-            SampEntry e;
-            e.kind = s.isBuffer ? (s.sampleType == "int" ? 'I' : s.sampleType == "uint" ? 'U' : 'B')
-                     : s.isCube   ? 'C'
-                     : s.isArray  ? 'A'
-                     : s.isShadow ? 'S'
-                                  : '2';
-            e.elem = s.sampleType;
+            SampEntry e = EntryOfSampler(s);
             globalSamp[s.name] = e;
         }
         std::vector<std::string> uboNames;
@@ -4860,40 +4919,39 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             ++ubi;
         }
     }
-    // Param buffer cho block: UBO constant (17+ubi), SSBO-struct device (32+sbi),
-    // SSBO-flat device T* (32+sbi). Dùng chung cho 4 entry (vertex/frag/compute).
+    // Param buffer cho block: UBO constant (slot từ blkEmitSlot — graphics 17+k
+    // tuần tự chung SSBO; kernel 17+ubi), SSBO-struct device (ssboSlot), SSBO-flat
+    // device T* (slot trong ssboFlat). Dùng chung cho 4 entry (vertex/frag/compute).
     std::string blockParams;
     {
-        int ubi = 0, sbi = 0;
         for (size_t bi = 0; bi < blocks.size(); ++bi) {
             auto& b = blocks[bi];
             if (b.isStorage) {
                 if (ssboSlot[bi] == -1) continue; // flat — param thêm ở ssboFlat loop
                 blockParams += ",\n    device TGLMTSSBO_" + b.name + "& ssbo_" + b.name +
                                " [[buffer(" + std::to_string(ssboSlot[bi]) + ")]]";
-                ++sbi;
                 continue;
             }
             blockParams += ",\n    constant TGLMTUBO_" + b.name + "& ubo_" + b.name +
-                           " [[buffer(" + std::to_string(17 + ubi) + ")]]";
-            ++ubi;
+                           " [[buffer(" + std::to_string(blkEmitSlot[bi]) + ")]]";
         }
         for (auto& f : ssboFlat)
             blockParams += ",\n    device " + f.type + "* " + f.param +
                            " [[buffer(" + std::to_string(f.slot) + ")]]";
         // P9 atomic counters: device atomic_uint* tại buffer slot.
-        // Compute/TCS-kernel: sau SSBOs (0+). Graphics (không SSBO): slot 24+ (tránh
-        // vertex 0-15, uniforms 16, UBO 17+; fail nếu vượt 30).
+        // Compute/TCS-kernel: sau SSBOs (0+). Graphics: SAU block cuối (P4 — UBO/
+        // SSBO graphics dùng 17+k tuần tự); giữ 24 khi ít block như cũ, fail nếu vượt 30.
         {
             int baseSlot = 0;
-            bool kernelLike = R.isCompute || R.isTessControl;
             if (!kernelLike) {
-                baseSlot = 24;
+                baseSlot = std::max(24, 17 + (int)blocks.size());
+                if (!R.atomicCounters.empty() && baseSlot + (int)R.atomicCounters.size() - 1 > 30)
+                    return fail("atomic counter graphics vượt slot buffer(30)");
             } else {
-                int ssboCnt = (int)ssboFlat.size();
+                int ssboCnt2 = (int)ssboFlat.size();
                 for (size_t bi = 0; bi < blocks.size(); ++bi)
-                    if (blocks[bi].isStorage && ssboSlot[bi] != -1) ++ssboCnt;
-                baseSlot = ssboCnt;
+                    if (blocks[bi].isStorage && ssboSlot[bi] != -1) ++ssboCnt2;
+                baseSlot = ssboCnt2;
             }
             for (size_t k = 0; k < R.atomicCounters.size(); ++k) {
                 int slot = baseSlot + (int)k;
@@ -4918,7 +4976,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             continue;
         }
         std::string ttype = s.isCube ? "texturecube<float>"
-                          : s.isArray ? "texture2d_array<float>" : "texture2d<float>";
+                          : s.isArray ? "texture2d_array<float>"
+                          : s.is1D ? "texture2d<" + s.sampleType + ">"        // P3: 1D ≈ 2D
+                          : s.is3D ? "texture3d<" + s.sampleType + ">"        // P3: 3D thật
+                                   : "texture2d<" + s.sampleType + ">";       // 2D (i/u → int/uint)
         texParams += ", " + ttype + " " + s.name + "_tex [[texture(" + ks +
                      ")]], sampler " + s.name + "_smp [[sampler(" + ks + ")]]";
     }

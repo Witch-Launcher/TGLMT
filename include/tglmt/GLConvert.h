@@ -12,12 +12,17 @@ namespace tglmt {
 // (top-down) nên GL cần viewport h<0 (đã verify: Metal chấp nhận negative
 // viewport + GPU validation OK; winding visually lật theo → caller đổi frontFace).
 // clipOriginUpperLeft=true khi glClipControl(GL_CLIP_ORIGIN... = UPPER_LEFT);
-// zeroToOneDepth=true khi glClipControl depth = ZERO_TO_ONE (GL 4.5+),
-// ngược lại map [-1,1]→[0,1].
+// zeroToOneDepth=true khi glClipControl depth = ZERO_TO_ONE (GL 4.5+).
+// Depth n/f: VS converter ĐÃ bake kZConv (GL clip z [-w,w] → Metal NDC [0,w]) nên
+// z ra rasterizer = GL window depth chuẩn hóa [0,1]. glDepthRange(n,f) trong GL:
+// window_z = n + z_norm*(f−n) — Metal viewport znear/zfar có đúng công thức đó →
+// passthrough n/f (KHÔNG transform 0.5 thêm lần nữa, trước đây double-convert làm
+// raster z nén vào [0.5,1] lệch với glClearDepth + gl_FragCoord.z).
 inline metal::Viewport GLViewportToMetal(float x, float y, float w, float h,
         double n, double f, float targetHeight,
         bool clipOriginUpperLeft = false, bool zeroToOneDepth = false) {
     (void)targetHeight; // không còn flip theo targetHeight (memory = GL-order)
+    (void)zeroToOneDepth; // kZConv xử lý ở VS converter (ZERO_TO_ONE là known-limitation)
     metal::Viewport vp;
     vp.x = x;
     if (clipOriginUpperLeft) {
@@ -28,13 +33,8 @@ inline metal::Viewport GLViewportToMetal(float x, float y, float w, float h,
         vp.h = -(double)h;            // negative viewport height = lật y
     }
     vp.w = w;
-    if (zeroToOneDepth) {
-        vp.n = n;
-        vp.f = f;
-    } else {
-        vp.n = n * 0.5 + 0.5; // GL NDC z [-1,1] → Metal [0,1] (làm trong shader/projection;
-        vp.f = f * 0.5 + 0.5; // viewport depth ở đây chỉ ghi nhận, driver Metal dùng trực tiếp)
-    }
+    vp.n = n; // glDepthRange n/f passthrough (shader đã convert z → [0,1]) — xem trên
+    vp.f = f;
     return vp;
 }
 

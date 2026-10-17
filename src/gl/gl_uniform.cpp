@@ -99,7 +99,16 @@ void glUniformBlockBinding(GLuint p, GLuint b, GLuint bi) {
     }
     (void)bi;
 }
-void glShaderStorageBlockBinding(GLuint a, GLuint b, GLuint c_) { (void)a;(void)b;(void)c_; }
+// P4: đổi binding point của shader storage block — override layout(binding=N).
+// storageBlockIndex = thứ tự block `buffer` program-scope (vs rồi fs, dedupe tên).
+// Áp ở bind time (draw + compute) qua ProgramObject::EffectiveSsboBinding.
+void glShaderStorageBlockBinding(GLuint p, GLuint storageBlockIndex, GLuint storageBlockBinding) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end() || !it->second.linked) { c.errors.Record(0x0501); return; }
+    if (storageBlockIndex >= it->second.storageBlocks.size()) { c.errors.Record(0x0501); return; }
+    it->second.ssboBindOverride[it->second.storageBlocks[storageBlockIndex].name] = storageBlockBinding;
+}
 void glUniform1f(GLint l, GLfloat a) { Context& c=Context::Current(); if(auto* pr=CurProg(c)) SetU(*pr,l,&a,4); }
 void glUniform1fv(GLint l, GLsizei n, const GLfloat* v) { Context& c=Context::Current(); if(auto* pr=CurProg(c)) SetU(*pr,l,v,(size_t)n*4); }
 void glUniform1i(GLint l, GLint a) { Context& c=Context::Current(); if(auto* pr=CurProg(c)) { SetU(*pr,l,&a,4); TrackSamplerUnit(*pr,l,a); } }

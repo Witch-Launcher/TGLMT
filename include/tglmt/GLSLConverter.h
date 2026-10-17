@@ -46,6 +46,8 @@ struct GLSLVar {
     bool isCube = false;   // samplerCube → texturecube (panorama)
     bool isArray = false;  // sampler2DArray → texture2d_array
     bool isShadow = false; // sampler2DShadow → texture2D approx (bỏ compare ref)
+    bool is1D = false;     // P3: sampler1D → texture2d approx (storage w×1, y=0.5)
+    bool is3D = false;     // P3: sampler3D → texture3d (GL_TEXTURE_3D thật)
     // P6g image: `layout(rgba8[, binding=N]) uniform [readonly|writeonly] image2D img;`
     // → texture2d<T, access::RW> (imageLoad/Store → .read/.write). access: 'R' read,
     // 'W' write, 'B' read_write (mặc định). binding: layout binding, -1 = glUniform1i.

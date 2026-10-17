@@ -9,8 +9,8 @@ using namespace tglmt;
 namespace tglmt::gl {
 void glEnable(GLenum cap) { Context::Current().state.SetEnabled(cap, true); }
 void glDisable(GLenum cap) { Context::Current().state.SetEnabled(cap, false); }
-void glEnablei(GLenum t, GLuint i) { Context::Current().state.SetEnabled(t, true, i); }
-void glDisablei(GLenum t, GLuint i) { Context::Current().state.SetEnabled(t, false, i); }
+void glEnablei(GLenum t, GLuint i) { Context::Current().state.SetEnabledI(t, true, i); }
+void glDisablei(GLenum t, GLuint i) { Context::Current().state.SetEnabledI(t, false, i); }
 GLboolean glIsEnabled(GLenum cap) { return Context::Current().state.IsEnabled(cap) ? 1 : 0; }
 GLboolean glIsEnabledi(GLenum t, GLuint i) { return Context::Current().state.IsEnabled(t, i) ? 1 : 0; }
 void glBlendColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { Context::Current().state.SetBlendColor(r, g, b, a); }

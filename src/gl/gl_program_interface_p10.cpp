@@ -36,6 +36,9 @@ void InterfaceInfo(ProgramObject& pr, GLenum iface, GLuint& count, GLsizei& maxL
         // Tạm: 0 resources (fragment outputs không introspect được qua API này ở TGLMT).
         // Trung thực: trả 0 thay vì đoán.
         count = 0; maxLen = 0;
+    } else if (iface == 0x92E6 /*SHADER_STORAGE_BLOCK*/) {
+        count = (GLuint)pr.storageBlocks.size();
+        for (auto& b : pr.storageBlocks) maxLen = std::max(maxLen, (GLsizei)b.name.size() + 1);
     }
 }
 } // namespace
@@ -46,7 +49,8 @@ void glGetProgramInterfaceiv(GLuint program, GLenum programInterface, GLenum pna
     GLuint count = 0; GLsizei maxLen = 0;
     InterfaceInfo(*pr, programInterface, count, maxLen);
     if (programInterface != 0x92E1 && programInterface != 0x92E2 &&
-        programInterface != 0x92E3 && programInterface != 0x92E4) {
+        programInterface != 0x92E3 && programInterface != 0x92E4 &&
+        programInterface != 0x92E6 /*P4: SHADER_STORAGE_BLOCK*/) {
         Context::Current().errors.Record(0x0500); return; // INVALID_ENUM
     }
     if (pname == 0x92F5 /*ACTIVE_RESOURCES*/) *params = (GLint)count;
@@ -71,6 +75,9 @@ GLuint glGetProgramResourceIndex(GLuint program, GLenum programInterface, const 
             if (kv.first == nm) return i;
             ++i;
         }
+    } else if (programInterface == 0x92E6 /*P4: SHADER_STORAGE_BLOCK*/) {
+        for (GLuint i = 0; i < pr->storageBlocks.size(); ++i)
+            if (pr->storageBlocks[i].name == nm) return i;
     }
     return 0xFFFFFFFFu; // không tìm thấy
 }
@@ -90,6 +97,8 @@ void glGetProgramResourceName(GLuint program, GLenum programInterface, GLuint in
             ++i;
         }
     }
+    else if (programInterface == 0x92E6 && index < pr->storageBlocks.size())
+        nm = pr->storageBlocks[index].name;
     if (nm.empty()) { Context::Current().errors.Record(0x0501); return; } // INVALID_VALUE (index quá)
     if (length) *length = (GLsizei)nm.size();
     if (name && bufSize > 0) {
@@ -128,6 +137,21 @@ void glGetProgramResourceiv(GLuint program, GLenum programInterface, GLuint inde
             } else if (p == 0x92F5 /*DATA_SIZE? Thực tế UNIFORM_BLOCK_DATA_SIZE=0x8A30*/) {
                 v = (GLint)b.minSize;
             } else { Context::Current().errors.Record(0x0500); return; }
+        } else if (programInterface == 0x92E6 /*P4: SHADER_STORAGE_BLOCK*/ &&
+                   index < pr->storageBlocks.size()) {
+            auto& b = pr->storageBlocks[index];
+            if (p == 0x92F9 /*NAME_LENGTH*/) v = (GLint)b.name.size() + 1;
+            // BUFFER_BINDING = binding point HIỆU LỰC (glShaderStorageBlockBinding
+            // override → đúng spec: query phản ánh giá trị đã đổi).
+            else if (p == 0x9302 /*BUFFER_BINDING*/)
+                v = (GLint)pr->EffectiveSsboBinding(b.name, b.layoutBinding);
+            else if (p == 0x9303 /*BUFFER_DATA_SIZE*/) v = (GLint)b.size;
+            else if (p == 0x9304 /*NUM_ACTIVE_VARIABLES*/) v = b.numMembers;
+            else if (p == 0x9306 /*REFERENCED_BY_VERTEX_SHADER*/) v = (b.stageMask & 1u) ? 1 : 0;
+            else if (p == 0x930A /*REFERENCED_BY_FRAGMENT_SHADER*/) v = (b.stageMask & 2u) ? 1 : 0;
+            else if (p == 0x930B /*REFERENCED_BY_COMPUTE_SHADER*/) v = (b.stageMask & 4u) ? 1 : 0;
+            else if (p == 0x9307 || p == 0x9308 || p == 0x9309) v = 0; // tess/geom chưa hỗ trợ
+            else { Context::Current().errors.Record(0x0500); return; }
         } else {
             Context::Current().errors.Record(0x0501); return; // index quá
         }

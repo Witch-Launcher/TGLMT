@@ -18,15 +18,22 @@ void StateTracker::SetEnabled(GLenum cap, bool on, GLuint index) {
     dirtyPipeline_ = true; dirtyDepth_ = true;
     ++stateSeq_;
 }
+void StateTracker::SetEnabledI(GLenum cap, bool on, GLuint index) {
+    auto& m = capsI_[cap];
+    auto it = m.find(index);
+    if (it != m.end() && it->second == on) return;
+    m[index] = on;
+}
 bool StateTracker::IsEnabled(GLenum cap, GLuint index) const {
-    if (index == 0) {
-        auto it = caps_.find(cap);
-        return it != caps_.end() && it->second;
+    // Override indexed (glEnablei) nếu đã set cho slot này; ngược lại theo state
+    // toàn cục glEnable/glDisable (áp cho mọi draw buffer — đúng GL).
+    auto itI = capsI_.find(cap);
+    if (itI != capsI_.end()) {
+        auto j = itI->second.find(index);
+        if (j != itI->second.end()) return j->second;
     }
-    auto it = capsI_.find(cap);
-    if (it == capsI_.end()) return false;
-    auto j = it->second.find(index);
-    return j != it->second.end() && j->second;
+    auto it = caps_.find(cap);
+    return it != caps_.end() && it->second;
 }
 void StateTracker::SetBlendColor(float r, float g, float b, float a) {
     if (blendColor_[0]==r && blendColor_[1]==g && blendColor_[2]==b && blendColor_[3]==a)

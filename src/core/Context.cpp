@@ -92,6 +92,11 @@ Context::Options Context::LoadOptions() {
         o.diag = (e[0] == '1' || e[0] == 'y' || e[0] == 'Y' || e[0] == 't' ||
                   e[0] == 'T');
 #endif
+    // P1 deferred compute escape hatch: TGLMT_COMPUTE_SYNC=1 → mỗi dispatch
+    // commit+wait ngay (hành vi cũ). Mặc định deferred (dồn 1 CB/dispatch chain).
+    if (const char* e = std::getenv("TGLMT_COMPUTE_SYNC"))
+        o.computeSync = (e[0] == '1' || e[0] == 'y' || e[0] == 'Y' || e[0] == 't' ||
+                         e[0] == 'T');
     return o;
 }
 Context& Context::Current() {
@@ -107,13 +112,41 @@ void Context::LogDebug(GLenum src, GLenum type, GLuint id, GLenum sev, const std
 // IR lowering: flush encoder đang mở (nếu có). Commit KHÔNG đợi để giữ throughput;
 // thứ tự đảm bảo bởi cùng queue. Xóa shadow Metal (viewport/cull/...) nhưng GIỮ
 // pipeline cache của device và uniform cache (vẫn đúng sau flush).
+// P1 deferred compute: xả compute encoder đang dồn.
+// wait=true (điểm đọc CPU: glFinish/readback/fence): end + commit + wait.
+// wait=false (điểm cần thứ tự GPU: draw/clear/barrier kế tiếp): end + commit
+// NoWait — queue Metal in-order + hazard tracking đảm bảo CB sau thấy kết quả.
+void Context::FlushPendingCompute(bool wait) {
+    if (!pendingCompute) return;
+    if (wait) {
+        pendingCompute->endAndCommit(); // end + commit + waitUntilCompleted
+    } else {
+        pendingCompute->endEncodingNoCommit();
+        pendingCompute->commitNoWait();
+    }
+    pendingCompute.reset();
+    pendingComputeDispatches = 0;
+    ++appleStats.computeCBs;
+}
+// P1: CPU đọc buffer mà compute có thể đang ghi (map/GetBufferSubData/PBO) →
+// chờ GPU thật. Tập computeWriteBuffers được clear trong CommitAndWait (mọi
+// đường chờ GPU đi qua đó), nên sau wait contents là coherent.
+void Context::SyncComputeWritesTo(GLuint buf) {
+    if (!BufferWrittenByCompute(buf)) return;
+    if (pendingCompute || GpuBusy()) CommitAndWait();
+    else computeWriteBuffers.clear(); // GPU đã execute hết, không cần chờ
+}
 void Context::FlushPendingEncoder() {
+    // Draw/open render pass phải nằm SAU compute CB đang dồn (thứ tự GL draw
+    // trước/sau compute). Commit compute trước khi mở render encoder mới.
+    FlushPendingCompute(false);
     if (!pendingEncoder) {
         pendingTarget.reset();
         pendingPipeline.reset();
         pendingHasDepth = false;
         pendingDrawFBO = 0xFFFFFFFFu;
         pendingColorTex = 0xFFFFFFFFu;
+        pendingColorCount = 0;
         pendingViewportValid = false;
         pendingCullValid = false;
         pendingDepthClampValid = false;
@@ -136,6 +169,7 @@ void Context::FlushPendingEncoder() {
     pendingHasDepth = false;
     pendingDrawFBO = 0xFFFFFFFFu;
     pendingColorTex = 0xFFFFFFFFu;
+    pendingColorCount = 0;
     pendingViewportValid = false;
     pendingCullValid = false;
     pendingDepthClampValid = false;
@@ -175,7 +209,13 @@ void Context::NoteBufferUsed(GLuint buf) {
 // ghi tại chỗ. Tăng waitGen để FlushBufferStaging phân biệt in-flight.
 void Context::CommitAndWait() {
     PhaseTimer pt(appleStats, &AppleStats::nsStall);
+    // P1: compute đang dồn phải end+commit+wait trước (mọi readback CPU đi qua
+    // đây — map buffer/GetTexImage/ReadPixels/finish cần kết quả compute).
+    FlushPendingCompute(true);
     if (device) device->commitAndWait();
+    // Mọi CB trước CB vừa wait đã execute xong (queue in-order) → dữ liệu
+    // GPU ghi vào buffer đã coherent với CPU.
+    computeWriteBuffers.clear();
     ++waitGen;
     cbCompleted.store(cbCommitted.load(std::memory_order_relaxed),
                       std::memory_order_relaxed);
@@ -347,15 +387,44 @@ bool Context::MustFlushForTextureStage(GLuint tex) {
 // nên không bao giờ trả nhầm target đã bị giải phóng.
 std::shared_ptr<metal::IRenderTarget> Context::WrapTarget(GLuint fbo,
         metal::ITexture* col, metal::ITexture* dep) {
+    const metal::ITexture* cols[1] = {col};
+    return WrapTarget(fbo, cols, 1, dep);
+}
+std::shared_ptr<metal::IRenderTarget> Context::WrapTarget(GLuint fbo,
+        const metal::ITexture* const* cols, uint32_t nCols, metal::ITexture* dep) {
+    if (nCols > 8) nCols = 8;
+    if (nCols > 1) {
+        for (int i = 0; i < kWrapCacheN; ++i) {
+            WrapEntry& e = wrapCache[i];
+            if (e.tgt && e.gen == objectGen && e.fbo == fbo && e.nCols == nCols &&
+                e.dep == dep) {
+                bool same = true;
+                for (uint32_t k = 0; k < nCols; ++k)
+                    if (e.cols[k] != cols[k]) { same = false; break; }
+                if (same) return e.tgt;
+            }
+        }
+        auto tgt = device->wrapAsTarget(cols, nCols, dep);
+        WrapEntry& e = wrapCache[wrapNext];
+        wrapNext = (wrapNext + 1) % kWrapCacheN;
+        e.gen = objectGen; e.fbo = fbo; e.dep = dep; e.tgt = tgt;
+        e.nCols = (uint8_t)nCols;
+        e.col = cols[0];
+        for (uint32_t k = 0; k < nCols; ++k) e.cols[k] = cols[k];
+        return tgt;
+    }
+    metal::ITexture* col = nCols ? const_cast<metal::ITexture*>(cols[0]) : nullptr;
     for (int i = 0; i < kWrapCacheN; ++i) {
         WrapEntry& e = wrapCache[i];
-        if (e.tgt && e.gen == objectGen && e.fbo == fbo && e.col == col && e.dep == dep)
+        if (e.tgt && e.gen == objectGen && e.fbo == fbo && e.col == col && e.dep == dep &&
+            e.nCols == 0)
             return e.tgt;
     }
     auto tgt = device->wrapAsTarget(col, dep);
     WrapEntry& e = wrapCache[wrapNext];
     wrapNext = (wrapNext + 1) % kWrapCacheN;
     e.gen = objectGen; e.fbo = fbo; e.col = col; e.dep = dep; e.tgt = tgt;
+    e.nCols = 0;
     return tgt;
 }
 // Ring allocator: bump-pointer trên 1 trong 3 buffers, xoay theo frameSeq.

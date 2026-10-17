@@ -1,6 +1,6 @@
 // AUTO-GENERATED bởi tools/gen_ext_aliases.py — KHÔNG SỬA TAY.
-// Alias extension functions: extern "C" forward 1:1 sang core-đã-implement.
-// Chỉ sinh khi signature gl.xml TRÙNG core-base (trung thực, không đoán).
+// Alias extension functions: extern "C" forward 1:1 sang hàm đã implement.
+// Chỉ sinh khi chữ ký khớp (gl.xml ↔ gl.xml, hoặc parse từ src/gl).
 // LWJGL dlsym("glXxxARB") thấy symbol này khi extension được advertise.
 #include "tglmt/gl46.h"
 using namespace tglmt;
@@ -22,6 +22,8 @@ void glGenVertexArrays(GLsizei a0, GLuint * a1);
 GLboolean glIsVertexArray(GLuint a0);
 void glPrimitiveBoundingBox(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4, GLfloat a5, GLfloat a6, GLfloat a7);
 void glClampColor(GLenum a0, GLenum a1);
+void glDispatchComputeGroupSize(GLuint a0, GLuint a1, GLuint a2, GLuint a3, GLuint a4, GLuint a5);
+void glDebugMessageCallback(GLDEBUGPROC a0, const void * a1);
 void glDebugMessageControl(GLenum a0, GLenum a1, GLenum a2, GLsizei a3, const GLuint * a4, GLboolean a5);
 void glDebugMessageInsert(GLenum a0, GLenum a1, GLuint a2, GLenum a3, GLsizei a4, const GLchar * a5);
 GLuint glGetDebugMessageLog(GLuint a0, GLsizei a1, GLenum * a2, GLenum * a3, GLuint * a4, GLenum * a5, GLsizei * a6, GLchar * a7);
@@ -34,6 +36,7 @@ void glDrawArraysInstanced(GLenum a0, GLint a1, GLsizei a2, GLsizei a3);
 void glDrawElementsInstanced(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4);
 GLboolean glIsProgram(GLuint a0);
 void glFramebufferTexture(GLenum a0, GLenum a1, GLuint a2, GLint a3);
+void glFramebufferTextureFace(GLenum a0, GLenum a1, GLuint a2, GLint a3, GLenum a4);
 void glFramebufferTextureLayer(GLenum a0, GLenum a1, GLuint a2, GLint a3, GLint a4);
 void glProgramParameteri(GLuint a0, GLenum a1, GLint a2);
 void glSpecializeShader(GLuint a0, const GLchar * a1, GLuint a2, const GLuint * a3, const GLuint * a4);
@@ -50,6 +53,7 @@ void glGetQueryObjectiv(GLuint a0, GLenum a1, GLint * a2);
 void glGetQueryObjectuiv(GLuint a0, GLenum a1, GLuint * a2);
 void glGetQueryiv(GLenum a0, GLenum a1, GLint * a2);
 GLboolean glIsQuery(GLuint a0);
+void glMaxShaderCompilerThreads(GLuint a0);
 void glPointParameterf(GLenum a0, GLfloat a1);
 void glPointParameterfv(GLenum a0, const GLfloat * a1);
 GLenum glGetGraphicsResetStatus(void);
@@ -110,10 +114,13 @@ void glCompressedTexSubImage2D(GLenum a0, GLint a1, GLint a2, GLint a3, GLsizei 
 void glCompressedTexSubImage3D(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLsizei a5, GLsizei a6, GLsizei a7, GLenum a8, GLsizei a9, const void * a10);
 void glGetCompressedTexImage(GLenum a0, GLint a1, void * a2);
 void glBindBuffer(GLenum a0, GLuint a1);
+void glBufferData(GLenum a0, GLsizeiptr a1, const void * a2, GLenum a3);
+void glBufferSubData(GLenum a0, GLintptr a1, GLsizeiptr a2, const void * a3);
 void glDeleteBuffers(GLsizei a0, const GLuint * a1);
 void glGenBuffers(GLsizei a0, GLuint * a1);
 void glGetBufferParameteriv(GLenum a0, GLenum a1, GLint * a2);
 void glGetBufferPointerv(GLenum a0, GLenum a1, void ** a2);
+void glGetBufferSubData(GLenum a0, GLintptr a1, GLsizeiptr a2, void * a3);
 GLboolean glIsBuffer(GLuint a0);
 void * glMapBuffer(GLenum a0, GLenum a1);
 GLboolean glUnmapBuffer(GLenum a0);
@@ -232,6 +239,10 @@ void glCopyTexSubImage1D(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLsi
 void glCopyTexSubImage2D(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLsizei a6, GLsizei a7);
 void glCopyTexSubImage3D(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLsizei a7, GLsizei a8);
 void glGetObjectLabel(GLenum a0, GLuint a1, GLsizei a2, GLsizei * a3, GLchar * a4);
+void glLabelObject(GLenum a0, GLuint a1, GLsizei a2, const GLchar * a3);
+void glInsertEventMarker(GLsizei a0, const GLchar * a1);
+void glPopGroupMarker(void);
+void glPushGroupMarker(GLsizei a0, const GLchar * a1);
 GLenum glCheckNamedFramebufferStatus(GLuint a0, GLenum a1);
 void glClearNamedBufferData(GLuint a0, GLenum a1, GLenum a2, GLenum a3, const void * a4);
 void glClearNamedBufferSubData(GLuint a0, GLenum a1, GLintptr a2, GLsizeiptr a3, GLenum a4, GLenum a5, const void * a6);
@@ -308,6 +319,7 @@ void glProgramUniformMatrix4x2fv(GLuint a0, GLint a1, GLsizei a2, GLboolean a3, 
 void glProgramUniformMatrix4x3dv(GLuint a0, GLint a1, GLsizei a2, GLboolean a3, const GLdouble * a4);
 void glProgramUniformMatrix4x3fv(GLuint a0, GLint a1, GLsizei a2, GLboolean a3, const GLfloat * a4);
 GLboolean glUnmapNamedBuffer(GLuint a0);
+void glDiscardFramebuffer(GLenum a0, GLsizei a1, const GLenum * a2);
 void glBeginQuery(GLenum a0, GLuint a1);
 void glDeleteQueries(GLsizei a0, const GLuint * a1);
 void glEndQuery(GLenum a0);
@@ -514,6 +526,7 @@ void glVertexAttribL3dv(GLuint a0, const GLdouble * a1);
 void glVertexAttribL4d(GLuint a0, GLdouble a1, GLdouble a2, GLdouble a3, GLdouble a4);
 void glVertexAttribL4dv(GLuint a0, const GLdouble * a1);
 void glVertexAttribLPointer(GLuint a0, GLint a1, GLenum a2, GLsizei a3, const void * a4);
+void glDebugMessageCallback(GLDEBUGPROC a0, const void * a1);
 void glDebugMessageControl(GLenum a0, GLenum a1, GLenum a2, GLsizei a3, const GLuint * a4, GLboolean a5);
 void glDebugMessageInsert(GLenum a0, GLenum a1, GLuint a2, GLenum a3, GLsizei a4, const GLchar * a5);
 GLuint glGetDebugMessageLog(GLuint a0, GLsizei a1, GLenum * a2, GLenum * a3, GLuint * a4, GLenum * a5, GLsizei * a6, GLchar * a7);
@@ -524,6 +537,7 @@ void glObjectLabel(GLenum a0, GLuint a1, GLsizei a2, const GLchar * a3);
 void glObjectPtrLabel(const void * a0, GLsizei a1, const GLchar * a2);
 void glPopDebugGroup(void);
 void glPushDebugGroup(GLenum a0, GLuint a1, GLsizei a2, const GLchar * a3);
+void glMaxShaderCompilerThreads(GLuint a0);
 GLenum glGetGraphicsResetStatus(void);
 void glGetnUniformfv(GLuint a0, GLint a1, GLsizei a2, GLfloat * a3);
 void glGetnUniformiv(GLuint a0, GLint a1, GLsizei a2, GLint * a3);
@@ -542,6 +556,7 @@ void glGetMultisamplefv(GLenum a0, GLuint a1, GLfloat * a2);
 void glBlitFramebuffer(GLint a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLint a7, GLbitfield a8, GLenum a9);
 void glRenderbufferStorageMultisample(GLenum a0, GLsizei a1, GLenum a2, GLsizei a3, GLsizei a4);
 void glFramebufferTexture(GLenum a0, GLenum a1, GLuint a2, GLint a3);
+void glFramebufferTextureFace(GLenum a0, GLenum a1, GLuint a2, GLint a3, GLenum a4);
 void glFramebufferTextureLayer(GLenum a0, GLenum a1, GLuint a2, GLint a3, GLint a4);
 void glVertexAttribDivisor(GLuint a0, GLuint a1);
 void glUniformMatrix2x3fv(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3);
@@ -704,6 +719,42 @@ void glViewportIndexedf(GLuint a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a
 void glViewportIndexedfv(GLuint a0, const GLfloat * a1);
 void glPointParameterf(GLenum a0, GLfloat a1);
 void glPointParameterfv(GLenum a0, const GLfloat * a1);
+void glAttachObjectARB(GLuint a0, GLuint a1);
+GLuint glCreateProgramObjectARB(void);
+GLuint glCreateShaderObjectARB(GLenum a0);
+void glDeleteObjectARB(GLuint a0);
+void glDetachObjectARB(GLuint a0, GLuint a1);
+void glGetAttachedObjectsARB(GLuint a0, GLsizei a1, GLsizei* a2, GLuint* a3);
+GLuint glGetHandleARB(GLenum a0);
+void glGetInfoLogARB(GLuint a0, GLsizei a1, GLsizei* a2, GLchar* a3);
+void glGetObjectParameterfvARB(GLuint a0, GLenum a1, GLfloat* a2);
+void glGetObjectParameterivARB(GLuint a0, GLenum a1, GLint* a2);
+void glUseProgramObjectARB(GLuint a0);
+void glDepthRangeArraydvNV(GLuint a0, GLsizei a1, const GLdouble* a2);
+void glDepthRangeIndexeddNV(GLuint a0, GLdouble a1, GLdouble a2);
+void glDisableIndexedEXT(GLenum a0, GLuint a1);
+void glEnableIndexedEXT(GLenum a0, GLuint a1);
+void glGetBooleanIndexedvEXT(GLenum a0, GLuint a1, GLboolean* a2);
+void glGetIntegerIndexedvEXT(GLenum a0, GLuint a1, GLint* a2);
+GLboolean glIsEnabledIndexedEXT(GLenum a0, GLuint a1);
+void glColorMaskIndexedEXT(GLuint a0, GLboolean a1, GLboolean a2, GLboolean a3, GLboolean a4);
+void glDisableIndexedEXT(GLenum a0, GLuint a1);
+void glEnableIndexedEXT(GLenum a0, GLuint a1);
+void glGetBooleanIndexedvEXT(GLenum a0, GLuint a1, GLboolean* a2);
+void glGetIntegerIndexedvEXT(GLenum a0, GLuint a1, GLint* a2);
+GLboolean glIsEnabledIndexedEXT(GLenum a0, GLuint a1);
+void glSamplePatternEXT(GLenum a0);
+void glFramebufferTexture2DMultisampleEXT(GLenum a0, GLenum a1, GLenum a2, GLuint a3, GLint a4, GLsizei a5);
+void glActiveProgramEXT(GLuint a0);
+GLuint glCreateShaderProgramEXT(GLenum a0, const GLchar* a1);
+void glUseShaderProgramEXT(GLenum a0, GLuint a1);
+void glActiveStencilFaceEXT(GLenum a0);
+void glClearColorIiEXT(GLint a0, GLint a1, GLint a2, GLint a3);
+void glClearColorIuiEXT(GLuint a0, GLuint a1, GLuint a2, GLuint a3);
+void glBindBufferOffsetEXT(GLenum a0, GLuint a1, GLuint a2, GLintptr a3);
+void glBlendBarrierKHR(void);
+void glDepthRangeArrayfvOES(GLuint a0, GLsizei a1, const GLfloat* a2);
+void glDepthRangeIndexedfOES(GLuint a0, GLfloat a1, GLfloat a2);
 } }
 
 extern "C" {
@@ -724,6 +775,8 @@ void glGenVertexArraysAPPLE(GLsizei a0, GLuint * a1) { tglmt::gl::glGenVertexArr
 GLboolean glIsVertexArrayAPPLE(GLuint a0) { return tglmt::gl::glIsVertexArray(a0); }
 void glPrimitiveBoundingBoxARB(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4, GLfloat a5, GLfloat a6, GLfloat a7) { tglmt::gl::glPrimitiveBoundingBox(a0, a1, a2, a3, a4, a5, a6, a7); }
 void glClampColorARB(GLenum a0, GLenum a1) { tglmt::gl::glClampColor(a0, a1); }
+void glDispatchComputeGroupSizeARB(GLuint a0, GLuint a1, GLuint a2, GLuint a3, GLuint a4, GLuint a5) { tglmt::gl::glDispatchComputeGroupSize(a0, a1, a2, a3, a4, a5); }
+void glDebugMessageCallbackARB(GLDEBUGPROC a0, const void * a1) { tglmt::gl::glDebugMessageCallback(a0, a1); }
 void glDebugMessageControlARB(GLenum a0, GLenum a1, GLenum a2, GLsizei a3, const GLuint * a4, GLboolean a5) { tglmt::gl::glDebugMessageControl(a0, a1, a2, a3, a4, a5); }
 void glDebugMessageInsertARB(GLenum a0, GLenum a1, GLuint a2, GLenum a3, GLsizei a4, const GLchar * a5) { tglmt::gl::glDebugMessageInsert(a0, a1, a2, a3, a4, a5); }
 GLuint glGetDebugMessageLogARB(GLuint a0, GLsizei a1, GLenum * a2, GLenum * a3, GLuint * a4, GLenum * a5, GLsizei * a6, GLchar * a7) { return tglmt::gl::glGetDebugMessageLog(a0, a1, a2, a3, a4, a5, a6, a7); }
@@ -736,6 +789,7 @@ void glDrawArraysInstancedARB(GLenum a0, GLint a1, GLsizei a2, GLsizei a3) { tgl
 void glDrawElementsInstancedARB(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4) { tglmt::gl::glDrawElementsInstanced(a0, a1, a2, a3, a4); }
 GLboolean glIsProgramARB(GLuint a0) { return tglmt::gl::glIsProgram(a0); }
 void glFramebufferTextureARB(GLenum a0, GLenum a1, GLuint a2, GLint a3) { tglmt::gl::glFramebufferTexture(a0, a1, a2, a3); }
+void glFramebufferTextureFaceARB(GLenum a0, GLenum a1, GLuint a2, GLint a3, GLenum a4) { tglmt::gl::glFramebufferTextureFace(a0, a1, a2, a3, a4); }
 void glFramebufferTextureLayerARB(GLenum a0, GLenum a1, GLuint a2, GLint a3, GLint a4) { tglmt::gl::glFramebufferTextureLayer(a0, a1, a2, a3, a4); }
 void glProgramParameteriARB(GLuint a0, GLenum a1, GLint a2) { tglmt::gl::glProgramParameteri(a0, a1, a2); }
 void glSpecializeShaderARB(GLuint a0, const GLchar * a1, GLuint a2, const GLuint * a3, const GLuint * a4) { tglmt::gl::glSpecializeShader(a0, a1, a2, a3, a4); }
@@ -752,6 +806,7 @@ void glGetQueryObjectivARB(GLuint a0, GLenum a1, GLint * a2) { tglmt::gl::glGetQ
 void glGetQueryObjectuivARB(GLuint a0, GLenum a1, GLuint * a2) { tglmt::gl::glGetQueryObjectuiv(a0, a1, a2); }
 void glGetQueryivARB(GLenum a0, GLenum a1, GLint * a2) { tglmt::gl::glGetQueryiv(a0, a1, a2); }
 GLboolean glIsQueryARB(GLuint a0) { return tglmt::gl::glIsQuery(a0); }
+void glMaxShaderCompilerThreadsARB(GLuint a0) { tglmt::gl::glMaxShaderCompilerThreads(a0); }
 void glPointParameterfARB(GLenum a0, GLfloat a1) { tglmt::gl::glPointParameterf(a0, a1); }
 void glPointParameterfvARB(GLenum a0, const GLfloat * a1) { tglmt::gl::glPointParameterfv(a0, a1); }
 GLenum glGetGraphicsResetStatusARB(void) { return tglmt::gl::glGetGraphicsResetStatus(); }
@@ -812,10 +867,13 @@ void glCompressedTexSubImage2DARB(GLenum a0, GLint a1, GLint a2, GLint a3, GLsiz
 void glCompressedTexSubImage3DARB(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLsizei a5, GLsizei a6, GLsizei a7, GLenum a8, GLsizei a9, const void * a10) { tglmt::gl::glCompressedTexSubImage3D(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10); }
 void glGetCompressedTexImageARB(GLenum a0, GLint a1, void * a2) { tglmt::gl::glGetCompressedTexImage(a0, a1, a2); }
 void glBindBufferARB(GLenum a0, GLuint a1) { tglmt::gl::glBindBuffer(a0, a1); }
+void glBufferDataARB(GLenum a0, GLsizeiptr a1, const void * a2, GLenum a3) { tglmt::gl::glBufferData(a0, a1, a2, a3); }
+void glBufferSubDataARB(GLenum a0, GLintptr a1, GLsizeiptr a2, const void * a3) { tglmt::gl::glBufferSubData(a0, a1, a2, a3); }
 void glDeleteBuffersARB(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteBuffers(a0, a1); }
 void glGenBuffersARB(GLsizei a0, GLuint * a1) { tglmt::gl::glGenBuffers(a0, a1); }
 void glGetBufferParameterivARB(GLenum a0, GLenum a1, GLint * a2) { tglmt::gl::glGetBufferParameteriv(a0, a1, a2); }
 void glGetBufferPointervARB(GLenum a0, GLenum a1, void ** a2) { tglmt::gl::glGetBufferPointerv(a0, a1, a2); }
+void glGetBufferSubDataARB(GLenum a0, GLintptr a1, GLsizeiptr a2, void * a3) { tglmt::gl::glGetBufferSubData(a0, a1, a2, a3); }
 GLboolean glIsBufferARB(GLuint a0) { return tglmt::gl::glIsBuffer(a0); }
 void * glMapBufferARB(GLenum a0, GLenum a1) { return tglmt::gl::glMapBuffer(a0, a1); }
 GLboolean glUnmapBufferARB(GLenum a0) { return tglmt::gl::glUnmapBuffer(a0); }
@@ -890,6 +948,10 @@ void glCopyTexSubImage1DEXT(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, G
 void glCopyTexSubImage2DEXT(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLsizei a6, GLsizei a7) { tglmt::gl::glCopyTexSubImage2D(a0, a1, a2, a3, a4, a5, a6, a7); }
 void glCopyTexSubImage3DEXT(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLsizei a7, GLsizei a8) { tglmt::gl::glCopyTexSubImage3D(a0, a1, a2, a3, a4, a5, a6, a7, a8); }
 void glGetObjectLabelEXT(GLenum a0, GLuint a1, GLsizei a2, GLsizei * a3, GLchar * a4) { tglmt::gl::glGetObjectLabel(a0, a1, a2, a3, a4); }
+void glLabelObjectEXT(GLenum a0, GLuint a1, GLsizei a2, const GLchar * a3) { tglmt::gl::glLabelObject(a0, a1, a2, a3); }
+void glInsertEventMarkerEXT(GLsizei a0, const GLchar * a1) { tglmt::gl::glInsertEventMarker(a0, a1); }
+void glPopGroupMarkerEXT(void) { tglmt::gl::glPopGroupMarker(); }
+void glPushGroupMarkerEXT(GLsizei a0, const GLchar * a1) { tglmt::gl::glPushGroupMarker(a0, a1); }
 GLenum glCheckNamedFramebufferStatusEXT(GLuint a0, GLenum a1) { return tglmt::gl::glCheckNamedFramebufferStatus(a0, a1); }
 void glClearNamedBufferDataEXT(GLuint a0, GLenum a1, GLenum a2, GLenum a3, const void * a4) { tglmt::gl::glClearNamedBufferData(a0, a1, a2, a3, a4); }
 void glClearNamedBufferSubDataEXT(GLuint a0, GLenum a1, GLsizeiptr a2, GLsizeiptr a3, GLenum a4, GLenum a5, const void * a6) { tglmt::gl::glClearNamedBufferSubData(a0, a1, a2, a3, a4, a5, a6); }
@@ -966,6 +1028,7 @@ void glProgramUniformMatrix4x2fvEXT(GLuint a0, GLint a1, GLsizei a2, GLboolean a
 void glProgramUniformMatrix4x3dvEXT(GLuint a0, GLint a1, GLsizei a2, GLboolean a3, const GLdouble * a4) { tglmt::gl::glProgramUniformMatrix4x3dv(a0, a1, a2, a3, a4); }
 void glProgramUniformMatrix4x3fvEXT(GLuint a0, GLint a1, GLsizei a2, GLboolean a3, const GLfloat * a4) { tglmt::gl::glProgramUniformMatrix4x3fv(a0, a1, a2, a3, a4); }
 GLboolean glUnmapNamedBufferEXT(GLuint a0) { return tglmt::gl::glUnmapNamedBuffer(a0); }
+void glDiscardFramebufferEXT(GLenum a0, GLsizei a1, const GLenum * a2) { tglmt::gl::glDiscardFramebuffer(a0, a1, a2); }
 void glBeginQueryEXT(GLenum a0, GLuint a1) { tglmt::gl::glBeginQuery(a0, a1); }
 void glDeleteQueriesEXT(GLsizei a0, const GLuint * a1) { tglmt::gl::glDeleteQueries(a0, a1); }
 void glEndQueryEXT(GLenum a0) { tglmt::gl::glEndQuery(a0); }
@@ -1120,6 +1183,7 @@ void glVertexAttribL3dvEXT(GLuint a0, const GLdouble * a1) { tglmt::gl::glVertex
 void glVertexAttribL4dEXT(GLuint a0, GLdouble a1, GLdouble a2, GLdouble a3, GLdouble a4) { tglmt::gl::glVertexAttribL4d(a0, a1, a2, a3, a4); }
 void glVertexAttribL4dvEXT(GLuint a0, const GLdouble * a1) { tglmt::gl::glVertexAttribL4dv(a0, a1); }
 void glVertexAttribLPointerEXT(GLuint a0, GLint a1, GLenum a2, GLsizei a3, const void * a4) { tglmt::gl::glVertexAttribLPointer(a0, a1, a2, a3, a4); }
+void glDebugMessageCallbackKHR(GLDEBUGPROC a0, const void * a1) { tglmt::gl::glDebugMessageCallback(a0, a1); }
 void glDebugMessageControlKHR(GLenum a0, GLenum a1, GLenum a2, GLsizei a3, const GLuint * a4, GLboolean a5) { tglmt::gl::glDebugMessageControl(a0, a1, a2, a3, a4, a5); }
 void glDebugMessageInsertKHR(GLenum a0, GLenum a1, GLuint a2, GLenum a3, GLsizei a4, const GLchar * a5) { tglmt::gl::glDebugMessageInsert(a0, a1, a2, a3, a4, a5); }
 GLuint glGetDebugMessageLogKHR(GLuint a0, GLsizei a1, GLenum * a2, GLenum * a3, GLuint * a4, GLenum * a5, GLsizei * a6, GLchar * a7) { return tglmt::gl::glGetDebugMessageLog(a0, a1, a2, a3, a4, a5, a6, a7); }
@@ -1130,6 +1194,7 @@ void glObjectLabelKHR(GLenum a0, GLuint a1, GLsizei a2, const GLchar * a3) { tgl
 void glObjectPtrLabelKHR(const void * a0, GLsizei a1, const GLchar * a2) { tglmt::gl::glObjectPtrLabel(a0, a1, a2); }
 void glPopDebugGroupKHR(void) { tglmt::gl::glPopDebugGroup(); }
 void glPushDebugGroupKHR(GLenum a0, GLuint a1, GLsizei a2, const GLchar * a3) { tglmt::gl::glPushDebugGroup(a0, a1, a2, a3); }
+void glMaxShaderCompilerThreadsKHR(GLuint a0) { tglmt::gl::glMaxShaderCompilerThreads(a0); }
 GLenum glGetGraphicsResetStatusKHR(void) { return tglmt::gl::glGetGraphicsResetStatus(); }
 void glGetnUniformfvKHR(GLuint a0, GLint a1, GLsizei a2, GLfloat * a3) { tglmt::gl::glGetnUniformfv(a0, a1, a2, a3); }
 void glGetnUniformivKHR(GLuint a0, GLint a1, GLsizei a2, GLint * a3) { tglmt::gl::glGetnUniformiv(a0, a1, a2, a3); }
@@ -1147,6 +1212,7 @@ void glDrawElementsInstancedNV(GLenum a0, GLsizei a1, GLenum a2, const void * a3
 void glGetMultisamplefvNV(GLenum a0, GLuint a1, GLfloat * a2) { tglmt::gl::glGetMultisamplefv(a0, a1, a2); }
 void glBlitFramebufferNV(GLint a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLint a7, GLbitfield a8, GLenum a9) { tglmt::gl::glBlitFramebuffer(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9); }
 void glRenderbufferStorageMultisampleNV(GLenum a0, GLsizei a1, GLenum a2, GLsizei a3, GLsizei a4) { tglmt::gl::glRenderbufferStorageMultisample(a0, a1, a2, a3, a4); }
+void glFramebufferTextureFaceEXT(GLenum a0, GLenum a1, GLuint a2, GLint a3, GLenum a4) { tglmt::gl::glFramebufferTextureFace(a0, a1, a2, a3, a4); }
 void glVertexAttribDivisorNV(GLuint a0, GLuint a1) { tglmt::gl::glVertexAttribDivisor(a0, a1); }
 void glUniformMatrix2x3fvNV(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3) { tglmt::gl::glUniformMatrix2x3fv(a0, a1, a2, a3); }
 void glUniformMatrix2x4fvNV(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3) { tglmt::gl::glUniformMatrix2x4fv(a0, a1, a2, a3); }
@@ -1281,4 +1347,35 @@ void glViewportIndexedfOES(GLuint a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloa
 void glViewportIndexedfvOES(GLuint a0, const GLfloat * a1) { tglmt::gl::glViewportIndexedfv(a0, a1); }
 void glPointParameterfSGIS(GLenum a0, GLfloat a1) { tglmt::gl::glPointParameterf(a0, a1); }
 void glPointParameterfvSGIS(GLenum a0, const GLfloat * a1) { tglmt::gl::glPointParameterfv(a0, a1); }
+void glAttachObjectARB(GLuint a0, GLuint a1) { tglmt::gl::glAttachObjectARB(a0, a1); }
+GLuint glCreateProgramObjectARB(void) { return tglmt::gl::glCreateProgramObjectARB(); }
+GLuint glCreateShaderObjectARB(GLenum a0) { return tglmt::gl::glCreateShaderObjectARB(a0); }
+void glDeleteObjectARB(GLuint a0) { tglmt::gl::glDeleteObjectARB(a0); }
+void glDetachObjectARB(GLuint a0, GLuint a1) { tglmt::gl::glDetachObjectARB(a0, a1); }
+void glGetAttachedObjectsARB(GLuint a0, GLsizei a1, GLsizei * a2, GLuint * a3) { tglmt::gl::glGetAttachedObjectsARB(a0, a1, a2, a3); }
+GLuint glGetHandleARB(GLenum a0) { return tglmt::gl::glGetHandleARB(a0); }
+void glGetInfoLogARB(GLuint a0, GLsizei a1, GLsizei * a2, GLchar * a3) { tglmt::gl::glGetInfoLogARB(a0, a1, a2, a3); }
+void glGetObjectParameterfvARB(GLuint a0, GLenum a1, GLfloat * a2) { tglmt::gl::glGetObjectParameterfvARB(a0, a1, a2); }
+void glGetObjectParameterivARB(GLuint a0, GLenum a1, GLint * a2) { tglmt::gl::glGetObjectParameterivARB(a0, a1, a2); }
+void glUseProgramObjectARB(GLuint a0) { tglmt::gl::glUseProgramObjectARB(a0); }
+void glDepthRangeArraydvNV(GLuint a0, GLsizei a1, const GLdouble * a2) { tglmt::gl::glDepthRangeArraydvNV(a0, a1, a2); }
+void glDepthRangeIndexeddNV(GLuint a0, GLdouble a1, GLdouble a2) { tglmt::gl::glDepthRangeIndexeddNV(a0, a1, a2); }
+void glDisableIndexedEXT(GLenum a0, GLuint a1) { tglmt::gl::glDisableIndexedEXT(a0, a1); }
+void glEnableIndexedEXT(GLenum a0, GLuint a1) { tglmt::gl::glEnableIndexedEXT(a0, a1); }
+void glGetBooleanIndexedvEXT(GLenum a0, GLuint a1, GLboolean * a2) { tglmt::gl::glGetBooleanIndexedvEXT(a0, a1, a2); }
+void glGetIntegerIndexedvEXT(GLenum a0, GLuint a1, GLint * a2) { tglmt::gl::glGetIntegerIndexedvEXT(a0, a1, a2); }
+GLboolean glIsEnabledIndexedEXT(GLenum a0, GLuint a1) { return tglmt::gl::glIsEnabledIndexedEXT(a0, a1); }
+void glColorMaskIndexedEXT(GLuint a0, GLboolean a1, GLboolean a2, GLboolean a3, GLboolean a4) { tglmt::gl::glColorMaskIndexedEXT(a0, a1, a2, a3, a4); }
+void glSamplePatternEXT(GLenum a0) { tglmt::gl::glSamplePatternEXT(a0); }
+void glFramebufferTexture2DMultisampleEXT(GLenum a0, GLenum a1, GLenum a2, GLuint a3, GLint a4, GLsizei a5) { tglmt::gl::glFramebufferTexture2DMultisampleEXT(a0, a1, a2, a3, a4, a5); }
+void glActiveProgramEXT(GLuint a0) { tglmt::gl::glActiveProgramEXT(a0); }
+GLuint glCreateShaderProgramEXT(GLenum a0, const GLchar * a1) { return tglmt::gl::glCreateShaderProgramEXT(a0, a1); }
+void glUseShaderProgramEXT(GLenum a0, GLuint a1) { tglmt::gl::glUseShaderProgramEXT(a0, a1); }
+void glActiveStencilFaceEXT(GLenum a0) { tglmt::gl::glActiveStencilFaceEXT(a0); }
+void glClearColorIiEXT(GLint a0, GLint a1, GLint a2, GLint a3) { tglmt::gl::glClearColorIiEXT(a0, a1, a2, a3); }
+void glClearColorIuiEXT(GLuint a0, GLuint a1, GLuint a2, GLuint a3) { tglmt::gl::glClearColorIuiEXT(a0, a1, a2, a3); }
+void glBindBufferOffsetEXT(GLenum a0, GLuint a1, GLuint a2, GLintptr a3) { tglmt::gl::glBindBufferOffsetEXT(a0, a1, a2, a3); }
+void glBlendBarrierKHR(void) { tglmt::gl::glBlendBarrierKHR(); }
+void glDepthRangeArrayfvOES(GLuint a0, GLsizei a1, const GLfloat * a2) { tglmt::gl::glDepthRangeArrayfvOES(a0, a1, a2); }
+void glDepthRangeIndexedfOES(GLuint a0, GLfloat a1, GLfloat a2) { tglmt::gl::glDepthRangeIndexedfOES(a0, a1, a2); }
 } // extern "C"

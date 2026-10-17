@@ -61,8 +61,8 @@ int main() {
     cas[1].divisor = 0;
     PipelineOpts opts;
     opts.depth = false;
-    opts.blend = false;
-    opts.colorWriteMask = 0xF;
+    opts.blends[0].enabled = false;
+    opts.blends[0].writeMask = 0xF;
     auto pipe = dev->makeCustomPipeline(lib.get(), "narrowVS", lib.get(), "narrowFS",
                                         PixelFormat::RGBA8Unorm, cas, 2, 8, &opts);
     if (!pipe) {

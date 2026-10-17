@@ -168,8 +168,8 @@ struct DepthInitSet {
 
 class AppleTexture : public ITexture {
 public:
-    AppleTexture(id<MTLTexture> t, uint32_t w, uint32_t h, PixelFormat f)
-        : tex_(t), w_(w), h_(h), f_(f) {}
+    AppleTexture(id<MTLTexture> t, uint32_t w, uint32_t h, PixelFormat f, uint32_t d = 1)
+        : tex_(t), w_(w), h_(h), f_(f), d_(d) {}
     // Depth Private khởi đầu rác: device nhớ texture nào đã init (per-texture,
     // không per-wrapper — wrapper tạo mới mỗi draw nên flag trên wrapper sai
     // thành force-clear mọi encoder mới = mất depth giữa frame = X-RAY).
@@ -181,8 +181,17 @@ public:
         }
     }
     void trackDepthInit(std::shared_ptr<struct DepthInitSet> s) { depthInitSet_ = s; }
+    // GPU blit/full-define đã ghi nội dung depth hợp lệ: lần dùng depth attachment
+    // kế tiếp phải LOAD (không first-clear) — nếu không nội dung vừa copy bị xóa
+    // (Iris copyPreTranslucentDepth/handDepth: copy depth rồi render depth-test).
+    void markDepthInited() override {
+        if (!depthInitSet_ || !tex_) return;
+        std::lock_guard<std::mutex> l(depthInitSet_->mu);
+        depthInitSet_->inited.insert((__bridge void*)tex_);
+    }
     uint32_t width() const override { return w_; }
     uint32_t height() const override { return h_; }
+    uint32_t depth() const override { return d_; }
     PixelFormat pixelFormat() const override { return f_; }
     uint32_t levelCount() const override {
         @try { return (uint32_t)[tex_ mipmapLevelCount]; } @catch (NSException*) { return 1; }
@@ -233,6 +242,7 @@ private:
     }
     id<MTLTexture> tex_;
     uint32_t w_, h_;
+    uint32_t d_ = 1;
     PixelFormat f_;
     std::shared_ptr<struct DepthInitSet> depthInitSet_;
     std::unordered_map<uint32_t, std::shared_ptr<AppleTexture>> swzCache_;
@@ -359,17 +369,57 @@ public:
         MTLSize tg = {(NSUInteger)(tx ? tx : 1), (NSUInteger)(ty ? ty : 1), (NSUInteger)(tz ? tz : 1)};
         [enc_ dispatchThreads:grid threadsPerThreadgroup:tg];
     }
-    bool endAndCommit() override {
-        if (!enc_ || !cb_) return false;
+    // P1 glDispatchComputeIndirect: num_workgroups đọc từ GPU buffer lúc GPU
+    // execute (GL ≡ MTLDispatchThreadgroupsIndirectArguments — cùng layout
+    // 3×uint32). Zero count do GPU quyết định (shader pack cull → 0) — Metal
+    // không validate nội dung indirect buffer nên pass-through hợp lệ.
+    void dispatchThreadgroupsIndirect(IBuffer* b, size_t offset,
+                                      uint32_t tx, uint32_t ty, uint32_t tz) override {
+        if (!enc_ || !b) return;
+        AppleBuffer* ab = dynamic_cast<AppleBuffer*>(b);
+        if (!ab) return;
+        MTLSize tg = {(NSUInteger)(tx ? tx : 1), (NSUInteger)(ty ? ty : 1), (NSUInteger)(tz ? tz : 1)};
+        [enc_ dispatchThreadgroupsWithIndirectBuffer:ab->get()
+                              indirectBufferOffset:(NSUInteger)offset
+                             threadsPerThreadgroup:tg];
+    }
+    // P1 deferred: in-flight tracking (ThrottleGpu + staging hazard) cần thấy CB
+    // compute như CB render.
+    void setCounters(std::atomic<uint64_t>* committed, std::atomic<uint64_t>* completed) {
+        countCommitted_ = committed;
+        countCompleted_ = completed;
+    }
+    void endEncodingNoCommit() override {
+        if (!enc_) return;
         [enc_ endEncoding];
         enc_ = nil;
+    }
+    void commitNoWait() override {
+        if (!cb_ || committed_) return;
+        if (countCompleted_) {
+            std::atomic<uint64_t>* done = countCompleted_;
+            [cb_ addCompletedHandler:^(id<MTLCommandBuffer>) {
+                done->fetch_add(1, std::memory_order_relaxed);
+            }];
+        }
+        if (countCommitted_) countCommitted_->fetch_add(1, std::memory_order_relaxed);
+        NoteInflightCB(cb_); // ThrottleGpu chờ CB này thay vì drain cả pipeline
         [cb_ commit];
+        committed_ = true;
+    }
+    bool endAndCommit() override {
+        if (!enc_ || !cb_) return false;
+        endEncodingNoCommit();
+        commitNoWait();
         [cb_ waitUntilCompleted];
         return [cb_ status] == MTLCommandBufferStatusCompleted;
     }
 private:
     id<MTLCommandBuffer> cb_;
     id<MTLComputeCommandEncoder> enc_;
+    std::atomic<uint64_t>* countCommitted_ = nullptr;
+    std::atomic<uint64_t>* countCompleted_ = nullptr;
+    bool committed_ = false;
 };
 
 // Render target đầy đủ: color (+resolve khi MSAA) + depth tùy chọn.
@@ -379,20 +429,46 @@ public:
     AppleTarget(id<MTLTexture> color, PixelFormat fmt, id<MTLTexture> resolve,
                 id<MTLTexture> depth, uint32_t w, uint32_t h, bool msaa,
                 bool depthFirstClear)
-        : color_(color), fmt_(fmt), resolve_(resolve ? resolve : color), depth_(depth),
-          w_(w), h_(h), msaa_(msaa), depthFirstClear_(depthFirstClear) {}
-    PixelFormat pixelFormat() const override { return fmt_; }
+        : color_(color), resolve_(resolve ? resolve : color), depth_(depth),
+          w_(w), h_(h), msaa_(msaa), depthFirstClear_(depthFirstClear) {
+        colors_[0] = color;
+        resolves_[0] = resolve_ ? resolve_ : color;
+        fmts_[0] = fmt;
+        nColors_ = 1;
+    }
+    // MRT: colors[i] theo slot glDrawBuffers (nullptr = slot rỗng/GL_NONE).
+    AppleTarget(id<MTLTexture> const* colors, const PixelFormat* fmts, uint32_t nColors,
+                id<MTLTexture> depth, uint32_t w, uint32_t h, bool depthFirstClear)
+        : depth_(depth), w_(w), h_(h), msaa_(false),
+          depthFirstClear_(depthFirstClear) {
+        if (nColors > 8) nColors = 8;
+        nColors_ = nColors ? nColors : 1;
+        for (uint32_t i = 0; i < nColors_; ++i) {
+            colors_[i] = colors[i];
+            resolves_[i] = colors[i];
+            fmts_[i] = fmts[i];
+        }
+        color_ = colors_[0];
+        resolve_ = resolves_[0] ? resolves_[0] : color_;
+    }
+    PixelFormat pixelFormat() const override { return fmts_[0]; }
     uint32_t width() const override { return w_; }
     uint32_t height() const override { return h_; }
     bool readback(void* dst, size_t bpr) override {
-        if (!dst || !resolve_) return false;
+        id<MTLTexture> rd = resolve();
+        if (!dst || !rd) return false;
         @try {
-            [resolve_ getBytes:dst bytesPerRow:bpr
+            [rd getBytes:dst bytesPerRow:bpr
                 fromRegion:MTLRegionMake2D(0, 0, w_, h_) mipmapLevel:0];
         } @catch (NSException*) { return false; }
         return true;
     }
     id<MTLTexture> color() const { return color_; }
+    id<MTLTexture> color(uint32_t i) const { return i < 8 ? colors_[i] : nil; }
+    id<MTLTexture> resolve(uint32_t i) const { return i < 8 ? resolves_[i] : nil; }
+    PixelFormat pixelFormat(uint32_t i) const { return i < 8 ? fmts_[i] : PixelFormat::Invalid; }
+    uint32_t colorCount() const override { return nColors_; }
+    id<MTLTexture> forSlot(uint32_t i) const { return i < 8 ? resolves_[i] : nil; }
     id<MTLTexture> resolve() const { return resolve_; }
     id<MTLTexture> depth() const { return depth_; }
     bool isMSAA() const { return msaa_; }
@@ -404,8 +480,11 @@ public:
         return r;
     }
 private:
+    id<MTLTexture> colors_[8] = {};
+    id<MTLTexture> resolves_[8] = {};
+    PixelFormat fmts_[8] = {};
+    uint32_t nColors_ = 0;
     id<MTLTexture> color_, resolve_, depth_;
-    PixelFormat fmt_;
     uint32_t w_, h_;
     bool msaa_;
     bool depthFirstClear_ = true;
@@ -751,6 +830,45 @@ public:
             tex->trackDepthInit(depthInit_);
         return tex;
     }
+    std::shared_ptr<ITexture> newTexture3D(uint32_t w, uint32_t h, uint32_t d,
+            PixelFormat f) override {
+        if (!w || !h || !d) return nullptr;
+        const NSUInteger maxD = 2048; // maxTextureDimension3D A9+ = 2048
+        if (w > maxD || h > maxD || d > maxD) {
+            if (log_)
+                log_("TGLMT: newTexture3D " + std::to_string(w) + "x" +
+                     std::to_string(h) + "x" + std::to_string(d) +
+                     " vuot Metal max 3D (" + std::to_string(maxD) + ") → bỏ qua");
+            return nullptr;
+        }
+        MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+        td.textureType = MTLTextureType3D;
+        td.pixelFormat = ToMTL(f);
+        td.width = w;
+        td.height = h;
+        td.depth = d;
+        td.mipmapLevelCount = 1;
+        // 3D chỉ đọc (chưa hỗ trợ attach GL_TEXTURE_3D làm FBO color 3D-slice).
+        td.usage = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModeShared;
+        id<MTLTexture> t = nil;
+        @try { t = [dev_ newTextureWithDescriptor:td]; } @catch (NSException*) { return nullptr; }
+        if (!t) return nullptr;
+        return std::make_shared<AppleTexture>(t, w, h, f, d);
+    }
+    bool updateTexture3D(ITexture* tex, uint32_t z, uint32_t x, uint32_t y,
+            uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) override {
+        AppleTexture* a = dynamic_cast<AppleTexture*>(tex);
+        if (!a || !data || !w || !h) return false;
+        @try {
+            if ([a->get() textureType] != MTLTextureType3D) return false;
+            // API 3D: slice = 0 (z nằm trong region origin), bytesPerImage = 1 slice.
+            [a->get() replaceRegion:MTLRegionMake3D(x, y, z, w, h, 1) mipmapLevel:0
+                              slice:0 withBytes:data bytesPerRow:bytesPerRow
+                       bytesPerImage:bytesPerRow * h];
+            return true;
+        } @catch (NSException*) { return false; }
+    }
     std::shared_ptr<IEncoder> makeEncoder() override {
         return std::make_shared<TraceEncoder>(trace_);
     }
@@ -983,6 +1101,29 @@ public:
                                                      takeDepthInit(d->get()));
         return std::make_shared<AppleTarget>(c->get(), c->pixelFormat(), nil,
                                              d ? d->get() : nil, c->width(), c->height(), false,
+                                             d ? takeDepthInit(d->get()) : false);
+    }
+    std::shared_ptr<IRenderTarget> wrapAsTarget(const ITexture* const* colors,
+            uint32_t nColors, ITexture* depth) override {
+        if (nColors <= 1) {
+            return wrapAsTarget(nColors ? const_cast<ITexture*>(colors[0]) : nullptr, depth);
+        }
+        if (nColors > 8) nColors = 8;
+        AppleTexture* d = dynamic_cast<AppleTexture*>(depth);
+        id<MTLTexture> mtl[8] = {};
+        PixelFormat fmts[8] = {};
+        uint32_t w = 0, h = 0;
+        for (uint32_t i = 0; i < nColors; ++i) {
+            AppleTexture* at = dynamic_cast<AppleTexture*>(const_cast<ITexture*>(colors[i]));
+            if (!at) continue; // slot rỗng (GL_NONE) — hợp lệ
+            mtl[i] = at->get();
+            fmts[i] = at->pixelFormat();
+            if (!w) { w = at->width(); h = at->height(); }
+        }
+        if (!w && d) { w = d->width(); h = d->height(); }
+        if (!w && !d) return nullptr;
+        return std::make_shared<AppleTarget>(mtl, fmts, nColors,
+                                             d ? d->get() : nil, w, h,
                                              d ? takeDepthInit(d->get()) : false);
     }
     void setDefaultRenderTarget(std::shared_ptr<IRenderTarget> t) override { defaultTarget_ = t; }
@@ -1220,7 +1361,13 @@ public:
         AppleTexture* b = dynamic_cast<AppleTexture*>(dst);
         if (!a || !b || !w || !h) return false;
         if (a->pixelFormat() != b->pixelFormat()) return false; // khác format → caller fallback CPU
-        return blitTex(a->get(), b->get(), sx, sy, w, h, dx, dy);
+        if (!blitTex(a->get(), b->get(), sx, sy, w, h, dx, dy)) return false;
+        // Depth dst: blit ghi nội dung vào dst → first-attach kế tiếp phải LOAD
+        // (nếu không takeDepthInit clear trắng — depth copy thành vô nghĩa).
+        if (b->pixelFormat() == PixelFormat::Depth32Float ||
+            b->pixelFormat() == PixelFormat::Depth24Stencil8)
+            b->markDepthInited();
+        return true;
     }
     // Helper dùng chung cho blitCopy + blitTo/FromTarget (target cũng là texture).
     bool blitTex(id<MTLTexture> s, id<MTLTexture> d, uint32_t sx, uint32_t sy, uint32_t w,
@@ -1507,15 +1654,30 @@ public:
                    std::to_string(attribs[i].divisor) + "," +
                    std::to_string(attribs[i].stride) + ";";
         bool useDepth = opts && opts->depth;
-        bool useBlend = opts && opts->blend;
-        uint32_t writeMask = opts ? opts->colorWriteMask : 0xFu;
+        uint32_t colorCount = (opts && opts->colorCount) ? opts->colorCount : 1;
+        if (colorCount > 8) colorCount = 8;
+        // colorFmts authoritative khi MRT (colorCount>1): 0 = slot rỗng → Invalid
+        // (KHÔNG fallback về fmt — PSO khai báo format cho slot không có texture
+        // sẽ fail validation của Metal ở render pass). colorCount==1: 0 → fmt.
+        auto slotFmt = [&](uint32_t i) -> PixelFormat {
+            PixelFormat sf = opts ? opts->colorFmts[i] : PixelFormat::Invalid;
+            if (sf != PixelFormat::Invalid) return sf;
+            return colorCount > 1 ? PixelFormat::Invalid : fmt;
+        };
+        static const AttachmentBlend kDefaultBlend{};
+        auto slotBlend = [&](uint32_t i) -> const AttachmentBlend& {
+            return opts ? opts->blends[i] : kDefaultBlend;
+        };
         key += useDepth ? "D" : "-";
-        key += "W" + std::to_string(writeMask);
-        if (useBlend) {
-            const AttachmentBlend& b = opts->blend0;
-            key += "B" + std::to_string(b.srcRGB) + "," + std::to_string(b.dstRGB) + "," +
-                   std::to_string(b.srcAlpha) + "," + std::to_string(b.dstAlpha) + "," +
-                   std::to_string(b.rgbOp) + "," + std::to_string(b.alphaOp);
+        for (uint32_t i = 0; i < colorCount; ++i) {
+            const AttachmentBlend& b = slotBlend(i);
+            key += "A" + std::to_string(i) + ":" +
+                   std::to_string((uint32_t)slotFmt(i)) +
+                   ",W" + std::to_string(b.writeMask) +
+                   (b.enabled ? ",B" + std::to_string(b.srcRGB) + "," + std::to_string(b.dstRGB) +
+                                    "," + std::to_string(b.srcAlpha) + "," + std::to_string(b.dstAlpha) +
+                                    "," + std::to_string(b.rgbOp) + "," + std::to_string(b.alphaOp)
+                              : ",b-") + ";";
         }
         {
             std::lock_guard<std::mutex> l(pmu_);
@@ -1528,20 +1690,26 @@ public:
         MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
         d.vertexFunction = vs; d.fragmentFunction = fs;
         d.vertexDescriptor = vd;
-        d.colorAttachments[0].pixelFormat = ToMTL(fmt);
-        if (useDepth) d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-        // glColorMask bits R=1 G=2 B=4 A=8 khớp MTLColorWriteMask (Red=1 ...).
-        d.colorAttachments[0].writeMask = (MTLColorWriteMask)(writeMask & 0xFu);
-        if (useBlend) {
-            const AttachmentBlend& b = opts->blend0;
-            d.colorAttachments[0].blendingEnabled = YES;
-            d.colorAttachments[0].sourceRGBBlendFactor = ToMTLBlend(b.srcRGB);
-            d.colorAttachments[0].destinationRGBBlendFactor = ToMTLBlend(b.dstRGB);
-            d.colorAttachments[0].sourceAlphaBlendFactor = ToMTLBlend(b.srcAlpha);
-            d.colorAttachments[0].destinationAlphaBlendFactor = ToMTLBlend(b.dstAlpha);
-            d.colorAttachments[0].rgbBlendOperation = ToMTLBlendOp(b.rgbOp);
-            d.colorAttachments[0].alphaBlendOperation = ToMTLBlendOp(b.alphaOp);
+        // MRT: format + writeMask + blend per-attachment. Slot format Invalid →
+        // không gắn (fragment output tương ứng bị bỏ, khớp GL_NONE).
+        for (uint32_t i = 0; i < colorCount; ++i) {
+            PixelFormat pf = slotFmt(i);
+            d.colorAttachments[i].pixelFormat = ToMTL(pf);
+            const AttachmentBlend& b = slotBlend(i);
+            // glColorMask bits R=1 G=2 B=4 A=8 khớp MTLColorWriteMask (Red=1 ...).
+            d.colorAttachments[i].writeMask =
+                (MTLColorWriteMask)(b.writeMask & 0xFu);
+            if (b.enabled) {
+                d.colorAttachments[i].blendingEnabled = YES;
+                d.colorAttachments[i].sourceRGBBlendFactor = ToMTLBlend(b.srcRGB);
+                d.colorAttachments[i].destinationRGBBlendFactor = ToMTLBlend(b.dstRGB);
+                d.colorAttachments[i].sourceAlphaBlendFactor = ToMTLBlend(b.srcAlpha);
+                d.colorAttachments[i].destinationAlphaBlendFactor = ToMTLBlend(b.dstAlpha);
+                d.colorAttachments[i].rgbBlendOperation = ToMTLBlendOp(b.rgbOp);
+                d.colorAttachments[i].alphaBlendOperation = ToMTLBlendOp(b.alphaOp);
+            }
         }
+        if (useDepth) d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
         NSError* e = nil;
         // Chẩn đoán đen màn hình: PSO compile đồng bộ trên render thread, A11 có
         // thể mất hàng giây/shader đầu. Log mỗi lần miss để latestlog thấy được
@@ -1568,7 +1736,11 @@ public:
         flushClearBatch(); // p7: clear đang dồn đi trước compute CB
         id<MTLCommandBuffer> cb = [queue_ commandBuffer];
         if (!cb) return nullptr;
-        return std::make_shared<AppleComputeEncoder>(cb);
+        auto enc = std::make_shared<AppleComputeEncoder>(cb);
+        // P1 deferred: CB compute phải tính vào in-flight (cbCommitted/cbCompleted)
+        // để staging flush biết GPU còn đọc shared memory + ThrottleGpu trừ đúng.
+        enc->setCounters(cbCommitted_, cbCompleted_);
+        return enc;
     }
     std::shared_ptr<IDepthStencilState> makeDepthStencilState(uint32_t func, bool write) override {
         // IR cache: chỉ 8 compare func × 2 writeMask = 16 trạng thái. Trước đây mỗi draw
@@ -1693,7 +1865,8 @@ public:
     }
     std::shared_ptr<IRenderEncoder> makeRenderEncoderActions(IRenderTarget* target,
             IRenderPipeline* pipeline, const ClearColor& clear, double clearDepth,
-            LoadOp colorLoad, LoadOp depthLoad) override {
+            LoadOp colorLoad, LoadOp depthLoad, const LoadOp* slotLoads,
+            const ClearColor* slotColors) override {
         AppleTarget* at = dynamic_cast<AppleTarget*>(target);
         ApplePipeline* ap = dynamic_cast<ApplePipeline*>(pipeline);
         if (!at || !ap || !queue_) return nullptr;
@@ -1701,15 +1874,23 @@ public:
         id<MTLCommandBuffer> cb = [queue_ commandBuffer];
         if (!cb) return nullptr;
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.colorAttachments[0].texture = at->color();
-        rp.colorAttachments[0].loadAction = ToMTLLoad(colorLoad);
-        if (at->isMSAA()) {
-            rp.colorAttachments[0].resolveTexture = at->resolve();
-            rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
-        } else {
-            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        // MRT: attach theo slot glDrawBuffers; per-slot loadAction/clearColor.
+        uint32_t nCols = at->colorCount();
+        for (uint32_t i = 0; i < nCols; ++i) {
+            id<MTLTexture> ct = at->color(i);
+            if (!ct) continue; // slot GL_NONE / texture chưa realize
+            rp.colorAttachments[i].texture = ct;
+            rp.colorAttachments[i].loadAction =
+                slotLoads ? ToMTLLoad(slotLoads[i]) : ToMTLLoad(colorLoad);
+            if (at->isMSAA() && i == 0) {
+                rp.colorAttachments[i].resolveTexture = at->resolve();
+                rp.colorAttachments[i].storeAction = MTLStoreActionMultisampleResolve;
+            } else {
+                rp.colorAttachments[i].storeAction = MTLStoreActionStore;
+            }
+            ClearColor cc = slotColors ? slotColors[i] : clear;
+            rp.colorAttachments[i].clearColor = MTLClearColorMake(cc.r, cc.g, cc.b, cc.a);
         }
-        rp.colorAttachments[0].clearColor = MTLClearColorMake(clear.r, clear.g, clear.b, clear.a);
         if (at->depth() && ap->hasDepth()) {
             MTLLoadAction dl = ToMTLLoad(depthLoad);
             if (at->takeDepthFirstClear()) dl = MTLLoadActionClear; // depth Private khởi đầu rác
@@ -1734,13 +1915,18 @@ public:
         id<MTLCommandBuffer> cb = [queue_ commandBuffer];
         if (!cb) return nullptr;
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.colorAttachments[0].texture = at->color();
-        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
-        if (at->isMSAA()) {
-            rp.colorAttachments[0].resolveTexture = at->resolve();
-            rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
-        } else {
-            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        uint32_t nCols = at->colorCount();
+        for (uint32_t i = 0; i < nCols; ++i) {
+            id<MTLTexture> ct = at->color(i);
+            if (!ct) continue;
+            rp.colorAttachments[i].texture = ct;
+            rp.colorAttachments[i].loadAction = MTLLoadActionLoad;
+            if (at->isMSAA() && i == 0) {
+                rp.colorAttachments[i].resolveTexture = at->resolve();
+                rp.colorAttachments[i].storeAction = MTLStoreActionMultisampleResolve;
+            } else {
+                rp.colorAttachments[i].storeAction = MTLStoreActionStore;
+            }
         }
         if (at->depth() && ap->hasDepth()) {
             MTLLoadAction dl = MTLLoadActionLoad;
@@ -1764,7 +1950,10 @@ public:
             const ScissorRect* scissor) override {
         AppleTarget* at = dynamic_cast<AppleTarget*>(target);
         if (!at || !queue_) return nullptr;
-        bool doColor = (colorLoad == LoadOp::Clear) && at->color();
+        bool anyColor = false;
+        for (uint32_t i = 0; i < at->colorCount(); ++i)
+            if (at->color(i)) { anyColor = true; break; }
+        bool doColor = (colorLoad == LoadOp::Clear) && anyColor;
         bool doDepth = (depthLoad == LoadOp::Clear) && at->depth();
         if (!doColor && !doDepth) return nullptr;
         // p7: clear-ONLY pass nối tiếp vào CB đang dồn. Metal cho nhiều render
@@ -1780,17 +1969,22 @@ public:
         id<MTLCommandBuffer> cb = clrCB_;
         ++clrEncN_;
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        if (at->color()) {
-            rp.colorAttachments[0].texture = at->color();
-            rp.colorAttachments[0].loadAction =
+        // MRT: clear mọi slot có texture (glClear trên FBO ghi đúng các draw
+        // buffer đang bật — slots không attach nằm ngoài pass, giữ nguyên).
+        uint32_t nCols = at->colorCount();
+        for (uint32_t i = 0; i < nCols; ++i) {
+            id<MTLTexture> ct = at->color(i);
+            if (!ct) continue;
+            rp.colorAttachments[i].texture = ct;
+            rp.colorAttachments[i].loadAction =
                 doColor ? MTLLoadActionClear : MTLLoadActionLoad; // depth-only: giữ color
-            if (at->isMSAA()) {
-                rp.colorAttachments[0].resolveTexture = at->resolve();
-                rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+            if (at->isMSAA() && i == 0) {
+                rp.colorAttachments[i].resolveTexture = at->resolve();
+                rp.colorAttachments[i].storeAction = MTLStoreActionMultisampleResolve;
             } else {
-                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rp.colorAttachments[i].storeAction = MTLStoreActionStore;
             }
-            rp.colorAttachments[0].clearColor =
+            rp.colorAttachments[i].clearColor =
                 MTLClearColorMake(clear.r, clear.g, clear.b, clear.a);
         }
         if (doDepth) {

@@ -65,6 +65,7 @@ std::vector<uint8_t>* Context::MutablePbo(GLuint buf, size_t end) {
     if (it == buffers.end()) return nullptr;
     BufferObject& b = it->second;
     if (b.data.empty()) {
+        SyncComputeWritesTo(buf); // P1: compute có thể đang ghi buffer này
         FlushBufferStaging(buf); // staged ranges chưa lên GPU
         if (b.gpu && b.gpu->contents()) {
             const uint8_t* g = (const uint8_t*)b.gpu->contents();
@@ -82,8 +83,12 @@ Context::BufferView Context::SyncBuffer(GLuint buf) {
     if (it == buffers.end()) return {};
     BufferObject& b = it->second;
     // Shadow rỗng (Apple backend đã bỏ nhân bản CPU) → nội dung nằm ở GPU,
-    // phải xả staged ranges trước khi đọc.
-    if (b.data.empty()) FlushBufferStaging(buf);
+    // phải xả staged ranges trước khi đọc. P1: compute đang ghi buffer này →
+    // chờ GPU execute xong trước (contents() sẽ coherent).
+    if (b.data.empty()) {
+        SyncComputeWritesTo(buf);
+        FlushBufferStaging(buf);
+    }
     return {BufferBytes(b), BufferLen(b)};
 }
 } // namespace tglmt
@@ -558,6 +563,7 @@ void* glMapBufferRange(GLenum target, GLintptr off, GLsizeiptr len, GLbitfield a
     BufferObject* bo = BoundBuf(target);
     if (!bo) return nullptr;
     if (off < 0 || len < 0 || (size_t)(off + len) > BufferLen(*bo)) { c.errors.Record(0x0501); return nullptr; }
+    c.SyncComputeWritesTo(bid); // P1: compute đang ghi → chờ trước khi trả con trỏ
     c.FlushBufferStaging(bid);
     bo->mapped = true; bo->mapOffset = (size_t)off; bo->mapLength = (size_t)len; bo->mapAccess = access;
     if (bo->gpu) return (uint8_t*)bo->gpu->contents() + off;
@@ -568,6 +574,7 @@ void* glMapNamedBuffer(GLuint b, GLenum access) {
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return nullptr; }
     (void)access;
+    c.SyncComputeWritesTo(b); // P1
     c.FlushBufferStaging(b);
     it->second.mapped = true;
     it->second.mapOffset = 0;
@@ -583,6 +590,7 @@ void* glMapNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len, GLbitfield a
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return nullptr; }
     (void)access;
     if (off < 0 || len < 0 || (size_t)(off + len) > BufferLen(it->second)) { c.errors.Record(0x0501); return nullptr; }
+    c.SyncComputeWritesTo(b); // P1
     c.FlushBufferStaging(b);
     it->second.mapped = true;
     it->second.mapOffset = (size_t)off;

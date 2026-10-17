@@ -303,7 +303,9 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         if (identical) ++c.appleStats.blitIdentical;
         auto rit = c.fbos.find(readFbo);
         if (rit == c.fbos.end()) { c.errors.Record(0x0502); return; }
-        auto cit = rit->second.colorTex.find(0);
+        GLint rSlot = c.ReadBufferSlot();
+        if (rSlot < 0) { c.errors.Record(0x0502); return; } // READ_BUFFER=GL_NONE
+        auto cit = rit->second.colorTex.find(rSlot);
         if (cit == rit->second.colorTex.end()) return;
         auto tit = c.textures.find(cit->second);
         if (tit == c.textures.end() || !tit->second.gpu) return;
@@ -671,6 +673,7 @@ void glClear(GLbitfield m) {
     if (m & 0x00004000u) ClrProbeLog(c, fbo, m & 0x00004000u);
     // Immediate (đúng GL): clear trên CHÍNH fbo đang bind. Fallback deferred
     // (Null / chưa có target) giữ nguyên hành vi cũ cho tests.
+    if (m & 0x00004000u) c.appleClearColorAll = true; // glClear: mọi draw buffer 1 màu
     if (AppleClearNow(m)) return;
     c.applePendingClear = true; // M5b: draw Apple kế tiếp clear, sau đó LOAD
     c.appleClearMask |= m;
@@ -685,22 +688,18 @@ void glClearDepthf(GLfloat d) { Context::Current().clearDepth = d; }
 void glClearStencil(GLint s) { Context::Current().clearStencil = s; }
 void glClearBufferfv(GLenum b, GLint d, const GLfloat* v) {
     Context& c = Context::Current();
-    // COLOR (0x1800) với drawbuffer d: set clearColor shadow + pending clear cho draw kế tiếp.
-    // Metal loadActionClear chỉ clear toàn target 1 lần — per-attachment clear MRT cần
-    // clear từng pass (M5c). Hiện đúng cho single-target vanilla (d==0).
+    // COLOR (0x1800) drawbuffer d: GL clear ĐÚNG attachment tại slot d (GL_NONE
+    // → no-op). Immediate qua AppleClearBufferImage (wrap riêng slot d, không
+    // đụng slot khác); fallback deferred (Null) ghi màu riêng slot.
     if (b == 0x1800 /*COLOR*/ && v) {
-        if (d == 0) {
-            c.clearColor[0] = v[0]; c.clearColor[1] = v[1]; c.clearColor[2] = v[2];
-            c.clearColor[3] = (d >= 0 && v) ? v[3] : 1.0f;
-            if (v) { c.clearColor[0] = v[0]; c.clearColor[1] = v[1]; c.clearColor[2] = v[2]; c.clearColor[3] = v[3]; }
-            ClrProbeLog(c, c.state.BoundDrawFBO(), 0x00004000u);
-            if (AppleClearNow(0x00004000u)) return;
-            c.applePendingClear = true;
-            c.appleClearMask |= 0x00004000u;
-            c.appleClearFBO = c.state.BoundDrawFBO();
-        } else {
-            c.LogDebug(0, 0, 0, 0, "glClearBufferfv COLOR drawbuffer>0 giữ shadow (MRT clear M5c)");
-        }
+        if (d < 0 || d >= 8) { c.errors.Record(0x0501); return; } // INVALID_VALUE
+        ClrProbeLog(c, c.state.BoundDrawFBO(), 0x00004000u);
+        if (AppleClearBufferImage(c.state.BoundDrawFBO(), d, v)) return;
+        for (int k = 0; k < 4; ++k) c.appleClearColorSlot[d][k] = v[k];
+        c.appleClearColorSlots |= (uint8_t)(1u << d);
+        c.applePendingClear = true;
+        c.appleClearMask |= 0x00004000u;
+        c.appleClearFBO = c.state.BoundDrawFBO();
         return;
     }
     if (b == 0x1801 /*DEPTH*/ && v) {

@@ -32,7 +32,9 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
     if (readFbo != 0) {
         auto fit = c.fbos.find(readFbo);
         if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
-        auto cit = fit->second.colorTex.find(0); // READ_BUFFER đơn giản: attachment 0
+        GLint slot = c.ReadBufferSlot(); // READ_BUFFER (mặc định COLOR_ATTACHMENT0)
+        if (slot < 0) { c.errors.Record(0x0502); return; } // READ_BUFFER=GL_NONE
+        auto cit = fit->second.colorTex.find(slot);
         if (cit == fit->second.colorTex.end()) { c.errors.Record(0x0502); return; }
         auto tit = c.textures.find(cit->second);
         if (tit == c.textures.end()) { c.errors.Record(0x0502); return; }

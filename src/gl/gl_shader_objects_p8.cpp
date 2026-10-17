@@ -89,18 +89,13 @@ void glUseShaderProgramEXT(GLenum type, GLuint program) {
     if (!hasStage) { c.errors.Record(0x0502); return; } // INVALID_OPERATION
     glUseProgram(program);
 }
-void glActiveProgramEXT(GLuint pipeline, GLuint program) {
+void glActiveProgramEXT(GLuint program) {
+    // Spec EXT_separate_shader_objects: ActiveProgramEXT(program) đặt program
+    // cho các lần UseShaderProgramEXT(GL_PROGRAM_EXT) sau đó. Không phải
+    // pipeline — bản cũ (pipeline, program) sai chữ ký spec (1 tham số).
     Context& c = Context::Current();
-    // Validate pipeline + program tồn tại (pipelines tracked trong registry).
-    // TGLMT draw path dùng BoundProgram (monolithic), chưa consume pipeline stages
-    // riêng — ghi nhận active (đúng state), draw vẫn dùng BoundProgram.
-    if (pipeline && !c.registry.Is(ObjectKind::ProgramPipeline, pipeline)) {
-        c.errors.Record(0x0502); return;
-    }
     if (program && !c.programs.count(program)) { c.errors.Record(0x0502); return; }
-    // Lưu active program cho pipeline (mở rộng sau nếu draw path hỗ trợ pipeline).
-    // Hiện tại: no-op hợp lệ (state đã validate).
-    (void)pipeline; (void)program;
+    c.activeProgramEXT = program;
 }
 // ===== P8 small exts (1-2 hàm, behavior thật) =====
 // KHR_blend_equation_advanced: barrier giữa advanced blend passes.

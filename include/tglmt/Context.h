@@ -123,6 +123,7 @@ struct TextureObject {
     // GetTexImage(level>0)/CPU fallback đúng + sẵn sàng cho mipmapped sau này.
     struct MipLevel {
         GLsizei w = 0, h = 0;
+        GLsizei d = 0; // P3: depth cho mip 3D (0 = mip 2D)
         std::vector<uint8_t> pixels; // tight RGBA8 4B (w*h*4), rỗng = chưa upload
     };
     std::map<GLint, MipLevel> mipData; // level (>=1) -> shadow
@@ -277,6 +278,30 @@ struct ProgramObject {
     // uniformBlocks gộp chỉ còn dùng tra binding point theo tên.
     std::vector<std::string> vsBlocks;
     std::vector<std::string> fsBlocks;
+    // P4 SSBO graphics: converter gán slot [[buffer]] TUẦN TỰ 17+k theo thứ tự
+    // khai báo chung cho UBO lẫn SSBO mỗi stage (xem glsl_to_msl.cpp) → backend
+    // bind theo slot thật trong list này (không tự tính 17+bi).
+    struct StageBlockSlot { std::string name; int slot = -1; bool isStorage = false; };
+    std::vector<StageBlockSlot> vsShaderBlocks, fsShaderBlocks;
+    // Block `buffer` program-scope: index = storageBlockIndex (thứ tự vs rồi fs,
+    // dedupe tên giống uniformBlocks) cho glShaderStorageBlockBinding +
+    // SHADER_STORAGE_BLOCK query (0x92E6).
+    struct StorageBlock {
+        std::string name;
+        int layoutBinding = -1;
+        size_t size = 0;     // std140, round 16 (GL_BUFFER_DATA_SIZE)
+        int numMembers = 0;  // GL_NUM_ACTIVE_VARIABLES
+        unsigned stageMask = 0; // 1=VS 2=FS 4=CS (GL_REFERENCED_BY_*)
+    };
+    std::vector<StorageBlock> storageBlocks;
+    // Override binding point (glShaderStorageBlockBinding) theo tên block — áp khi
+    // bind graphics + compute, ưu tiên hơn layout(binding=N). Giữ qua relink.
+    std::unordered_map<std::string, GLuint> ssboBindOverride;
+    GLuint EffectiveSsboBinding(const std::string& name, int layoutBinding) const {
+        auto it = ssboBindOverride.find(name);
+        if (it != ssboBindOverride.end()) return it->second;
+        return (layoutBinding < 0) ? 0u : (GLuint)layoutBinding;
+    }
 };
 
 struct FramebufferObject {
@@ -394,6 +419,13 @@ public:
     // FBO đang bound khi glClear gọi (0xFFFFFFFF = wildcard do Renderer tự set
     // cho target mới). So với draw tiêu thụ để lộ clear áp sai target (clrmiss#).
     uint32_t appleClearFBO = 0xFFFFFFFFu;
+    // MRT: glClearBufferfv(COLOR, d) clear RIÊNG slot d (glClear thường = mọi slot).
+    // Bit d bật → slot d dùng appleClearColorSlot[d] thay vì clearColor chung.
+    uint8_t appleClearColorSlots = 0;
+    float appleClearColorSlot[8][4] = {};
+    // glClear(COLOR) → true: mọi slot của draw kế tiếp clear bằng clearColor chung.
+    // (glClearBufferfv(COLOR, d) chỉ bật bit trong appleClearColorSlots.)
+    bool appleClearColorAll = false;
     // Thống kê M5b cho HUD chẩn đoán trên máy (không cần debugger).
     struct AppleStats {
         uint64_t drawsAttempted = 0; // số lần EmitDraw gọi AppleDrawGL
@@ -493,6 +525,11 @@ public:
         // clears/clearCBs = tỉ lệ dồn (muốn ~1 CB cho nhiều clear liên tiếp).
         uint64_t clears = 0;
         uint64_t clearCBs = 0;
+        // P1 deferred compute: dispatches = số glDispatchCompute* đã encode;
+        // computeCBs = số CB compute đã commit (dispatches/computeCBs = tỉ lệ dồn;
+        // sync mode: mỗi dispatch 1 CB. Muốn computeCBs << dispatches).
+        uint64_t computeDispatches = 0;
+        uint64_t computeCBs = 0;
     };
     AppleStats appleStats;
 
@@ -562,9 +599,62 @@ public:
     std::shared_ptr<metal::IRenderEncoder> pendingEncoder;
     std::shared_ptr<metal::IRenderTarget> pendingTarget;
     std::shared_ptr<metal::IRenderPipeline> pendingPipeline;
+    // P1 deferred compute: glDispatchCompute* liên tiếp dồn vào 1 compute encoder
+    // (1 MTLCommandBuffer) tới điểm cần thứ tự: draw/clear kế tiếp (commit trước
+    // CB của chúng — queue Metal in-order + hazard tracking), glMemoryBarrier,
+    // readback/glFinish (commit + wait), frame end. Bất biến: pendingCompute và
+    // pendingEncoder không bao giờ cùng tồn tại (dispatch flush render trước;
+    // render encoder mới flush compute trước). TGLMT_COMPUTE_SYNC=1 → mỗi
+    // dispatch commit+wait ngay (hành vi cũ, an toàn chẩn đoán).
+    std::shared_ptr<metal::IComputeEncoder> pendingCompute;
+    uint64_t pendingComputeDispatches = 0;
+    // Flush compute encoder đang giữ: wait=true → end+commit+waitUntilCompleted
+    // (điểm đọc CPU); false → end+commit NoWait (điểm cần thứ tự GPU).
+    void FlushPendingCompute(bool wait);
+    // P1: buffer từng bind làm SSBO/atomic trong dispatch CHƯA được CPU chờ →
+    // có thể chứa dữ liệu GPU đang ghi dở. CPU đọc (map/GetBufferSubData/PBO)
+    // buffer này phải chờ compute (SyncComputeWritesTo) — ngoài ra 0 chi phí.
+    std::vector<uint32_t> computeWriteBuffers;
+    void NoteComputeWriter(GLuint buf) {
+        if (!buf) return;
+        for (uint32_t v : computeWriteBuffers)
+            if (v == buf) return;
+        computeWriteBuffers.push_back(buf);
+    }
+    bool BufferWrittenByCompute(GLuint buf) const {
+        for (uint32_t v : computeWriteBuffers)
+            if (v == buf) return true;
+        return false;
+    }
+    // Đồng bộ trước khi CPU đọc nội dung buffer: nếu buffer nằm trong tập compute
+    // ghi → chờ GPU execute xong (CommitAndWait clear luôn tập này).
+    void SyncComputeWritesTo(GLuint buf);
     bool pendingHasDepth = false;
     GLuint pendingDrawFBO = 0xFFFFFFFFu; // FBO id của pass đang mở (0=default)
-    GLuint pendingColorTex = 0xFFFFFFFFu; // color texture id khi FBO!=0
+    // EXT_separate_shader_objects: program đặt bởi glActiveProgramEXT (state thuần).
+    GLuint activeProgramEXT = 0;
+    GLuint pendingColorTex = 0xFFFFFFFFu; // color texture id att0 khi FBO!=0 (hazard)
+    // MRT: texture id từng slot glDrawBuffers của pass đang mở (so reuse + hazard).
+    GLuint pendingColorIds[8] = {};
+    uint8_t pendingColorCount = 0;
+    // Texture đang là attachment của pass mở? (realloc storage lúc đang render → phải flush trước)
+    bool IsPendingColorId(GLuint id) const {
+        if (pendingColorTex == id) return true;
+        for (uint8_t i = 0; i < pendingColorCount && i < 8; ++i)
+            if (pendingColorIds[i] == id && id != 0) return true;
+        return false;
+    }
+    // GL_READ_BUFFER shadow → attachment slot cho glReadPixels/glCopyTex*/blit
+    // (spec §18.2/§18.3: nguồn đọc là READ_BUFFER, không phải luôn attachment 0).
+    // GL_COLOR_ATTACHMENTi → i; GL_NONE → -1 (caller báo INVALID_OPERATION);
+    // GL_BACK/GL_FRONT/chưa set → 0 (default FB & hành vi cũ).
+    GLint ReadBufferSlot() const {
+        GLenum rb = 0x8CE0;
+        state.GetShadow(0x0C02 /*READ_BUFFER*/, &rb, sizeof(rb));
+        if (rb >= 0x8CE0 && rb <= 0x8CE7) return (GLint)(rb - 0x8CE0);
+        if (rb == 0x0404 /*GL_NONE*/) return -1;
+        return 0;
+    }
     bool pendingViewportValid = false;
     metal::Viewport pendingViewport{0,0,0,0,0,1};
     bool pendingCullValid = false;
@@ -611,24 +701,30 @@ public:
         metal::PixelFormat fmt = metal::PixelFormat::Invalid;
         uint32_t stride = 0;
         bool depth = false;
-        bool blend = false;
-        metal::AttachmentBlend blend0;
-        uint32_t colorWriteMask = 0xF;
+        // MRT: format + blend + writeMask từng slot glDrawBuffers.
+        uint32_t colorCount = 1;
+        metal::PixelFormat colorFmts[8] = {};
+        metal::AttachmentBlend blends[8];
         // Mảng cố định (tối đa 16 attrib theo GL): tránh vector + cấp phát lại
         // mỗi draw khi so sánh pipeline key.
         uint32_t nAttribs = 0;
         metal::CustomAttrib attribs[16] = {};
         bool operator==(const PipelineKey& o) const {
             if (vsLib != o.vsLib || fsLib != o.fsLib || fmt != o.fmt ||
-                stride != o.stride || depth != o.depth || blend != o.blend ||
-                colorWriteMask != o.colorWriteMask)
+                stride != o.stride || depth != o.depth ||
+                colorCount != o.colorCount)
                 return false;
-            if (blend) {
-                if (blend0.enabled != o.blend0.enabled || blend0.srcRGB != o.blend0.srcRGB ||
-                    blend0.dstRGB != o.blend0.dstRGB || blend0.srcAlpha != o.blend0.srcAlpha ||
-                    blend0.dstAlpha != o.blend0.dstAlpha || blend0.rgbOp != o.blend0.rgbOp ||
-                    blend0.alphaOp != o.blend0.alphaOp)
-                    return false;
+            for (uint32_t i = 0; i < colorCount && i < 8; ++i) {
+                if (colorFmts[i] != o.colorFmts[i]) return false;
+                const auto& a = blends[i];
+                const auto& b = o.blends[i];
+                if (a.enabled != b.enabled || a.writeMask != b.writeMask) return false;
+                if (a.enabled) {
+                    if (a.srcRGB != b.srcRGB || a.dstRGB != b.dstRGB ||
+                        a.srcAlpha != b.srcAlpha || a.dstAlpha != b.dstAlpha ||
+                        a.rgbOp != b.rgbOp || a.alphaOp != b.alphaOp)
+                        return false;
+                }
             }
             if (nAttribs != o.nAttribs) return false;
             for (uint32_t i = 0; i < nAttribs; ++i) {
@@ -734,8 +830,11 @@ public:
     struct WrapEntry {
         uint64_t gen = 0;
         GLuint fbo = 0;
-        const metal::ITexture* col = nullptr;
+        const metal::ITexture* col = nullptr; // att0 (so nhanh 1-attachment)
         const metal::ITexture* dep = nullptr;
+        // MRT: danh sách slot glDrawBuffers (nullptr = GL_NONE), so khớp khi n>1.
+        const metal::ITexture* cols[8] = {};
+        uint8_t nCols = 0;
         std::shared_ptr<metal::IRenderTarget> tgt;
     };
     static constexpr int kWrapCacheN = 4;
@@ -744,6 +843,9 @@ public:
     uint64_t objectGen = 1; // tăng khi texture/FBO bị xoá hoặc resize
     std::shared_ptr<metal::IRenderTarget> WrapTarget(GLuint fbo, metal::ITexture* col,
                                                      metal::ITexture* dep);
+    std::shared_ptr<metal::IRenderTarget> WrapTarget(GLuint fbo,
+                                                     const metal::ITexture* const* cols,
+                                                     uint32_t nCols, metal::ITexture* dep);
     // True nếu stage buffer/tex này bắt buộc flush encoder đang mở (đã dùng
     // trong pass). False → chỉ stage, giữ batching (đếm flushAvoided).
     bool MustFlushForBufferStage(GLuint buf);
@@ -802,6 +904,9 @@ public:
         // góp phần chạm jetsam (limit 2148MB). Vượt trần → KHÔNG alloc slot mới,
         // rớt vào nhánh chờ (CommitAndWait) thay vì giữ thêm RAM. 0 = không giới hạn.
         size_t poolBudgetMB = 192;
+        // TGLMT_COMPUTE_SYNC=1: mỗi glDispatchCompute commit+wait ngay (hành vi
+        // cũ — an toàn tuyệt đối, dùng để chẩn đoán). Mặc định 0: deferred.
+        bool computeSync = false;
         bool diag = false;
     };
     Options opt;
