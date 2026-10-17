@@ -105,6 +105,16 @@ static std::string MSLType(const std::string& t, bool& ok) {
     ok = false;
     return t;
 }
+// Zero literal đúng kiểu MSL (fragment out khởi tạo trước khi body ghi).
+static std::string MSLZero(const std::string& t) {
+    if (t == "float") return "0.0";
+    if (t == "int") return "0";
+    if (t == "uint") return "0u";
+    if (t.rfind("float", 0) == 0) return t + "(0.0)";
+    if (t.rfind("uint", 0) == 0) return t + "(0u)";
+    if (t.rfind("int", 0) == 0) return t + "(0)";
+    return t + "(0.0)";
+}
 // Layout `constant` buffer theo quy tắc MSL tự nhiên (không phải std140,
 // không phải 16-hết): scalar 4, vec2 8, vec3/vec4 16, mat cột-nào-align-nấy
 // (float3x3 = 3 cột float3 stride 16 = 48). Test pixel-proof kiểm chứng thực tế.
@@ -3573,8 +3583,16 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         } else if (outs.size() > 8) {
             return fail("fragment cần 1..8 out (hiện có " + std::to_string(outs.size()) + ")");
         }
-        for (auto& o : outs)
-            if (o.mslType != "float4") return fail("fragment out phải vec4 (" + o.name + ")");
+        // Fragment out: MRT vec4 thường gặp, nhưng GL cho phép scalar/vecN khớp
+        // attachment 1-3 kênh (Iris centerDepth: `out float` + R32F).
+        for (auto& o : outs) {
+            static const char* kFragOk[] = {"float","float2","float3","float4",
+                                            "int","int2","int3","int4",
+                                            "uint","uint2","uint3","uint4"};
+            bool okT = false;
+            for (auto* t : kFragOk) if (o.mslType == t) { okT = true; break; }
+            if (!okT) return fail("fragment out kiểu không hỗ trợ (" + o.name + ": " + o.mslType + ")");
+        }
         // location trùng → link lỗi (đúng GL)
         for (size_t i = 0; i < outs.size(); ++i)
             for (size_t j = i + 1; j < outs.size(); ++j)
@@ -5151,11 +5169,13 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     } else if (isMRT || useFragDepth || useSampleMask) {
         // Fragment trả STRUCT khi: MRT, hoặc có output builtin depth/sample_mask.
         // (gl_FragDepth → _out.depth; gl_SampleMask[0] → _out.smask.)
+        // Single out: kiểu theo khai báo (float cho R32F, ...); legacy = float4.
+        std::string fragT = (!isMRT && !legacyFrag && !outs.empty()) ? outs[0].mslType : "float4";
         msl_out << "struct TGLMT_FOut {\n";
         if (isMRT) {
-            for (auto& o : outs) msl_out << "  float4 mrt" << o.location << " [[color(" << o.location << ")]];\n";
+            for (auto& o : outs) msl_out << "  " << o.mslType << " mrt" << o.location << " [[color(" << o.location << ")]];\n";
         } else {
-            msl_out << "  float4 c [[color(0)]];\n";
+            msl_out << "  " << fragT << " c [[color(0)]];\n";
         }
         if (useFragDepth) msl_out << "  float depth [[depth(any)]];\n";
         if (useSampleMask) msl_out << "  uint smask [[sample_mask]];\n";
@@ -5171,12 +5191,14 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (useSamplePos) msl_out << ",\n    float2 tglmt_samplePosition [[sample_position]]";
         msl_out << texParams << ") {\n  TGLMT_FOut _out = {};\n";
         // Single-out: body vẫn ghi vào tglmt_fragColor → ghi vào _out.c ở cuối.
-        if (!isMRT) msl_out << "  float4 tglmt_fragColor = float4(0.0);\n";
+        if (!isMRT) msl_out << "  " << fragT << " tglmt_fragColor = " << MSLZero(fragT) << ";\n";
         msl_out << body << "\n";
         if (!isMRT) msl_out << "  _out.c = tglmt_fragColor;\n";
         msl_out << "  return _out;\n}\n";
     } else {
-        msl_out << "fragment float4 TGLMT_fs(TGLMT_FIn _in [[stage_in]],\n"
+        std::string fragT = (!legacyFrag && !outs.empty()) ? outs[0].mslType : "float4";
+        std::string fragZero = MSLZero(fragT);
+        msl_out << "fragment " << fragT << " TGLMT_fs(TGLMT_FIn _in [[stage_in]],\n"
                    "    constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
         msl_out << blockParams;
         if (R.usesPointCoord) msl_out << ",\n    float2 tglmt_pointCoord [[point_coord]]";
@@ -5185,7 +5207,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (useStencilRef) msl_out << ",\n    uint tglmt_stencilRef [[stencil_ref]]";
         if (useSampleID) msl_out << ",\n    uint tglmt_sampleID [[sample_id]]";
         if (useSamplePos) msl_out << ",\n    float2 tglmt_samplePosition [[sample_position]]";
-        msl_out << texParams << ") {\n  float4 tglmt_fragColor = float4(0.0);\n" << body
+        msl_out << texParams << ") {\n  " << fragT << " tglmt_fragColor = " << fragZero << ";\n" << body
                 << "\n  return tglmt_fragColor;\n}\n";
     }
     R.msl = msl_out.str();
