@@ -1168,8 +1168,8 @@ void glPixelStorei(GLenum pname, GLint param) {
         case 0x0CF3: ps.unpackSkipRows = param; break;    // UNPACK_SKIP_ROWS
         case 0x0CF4: ps.unpackSkipPixels = param; break;  // UNPACK_SKIP_PIXELS
         case 0x0CF5: ps.unpackAlignment = param; break;   // UNPACK_ALIGNMENT
-        case 0x0CF6: ps.unpackImageHeight = param; break; // UNPACK_IMAGE_HEIGHT
-        case 0x0CF7: ps.unpackSkipImages = param; break;  // UNPACK_SKIP_IMAGES
+        case 0x806E: ps.unpackImageHeight = param; break; // UNPACK_IMAGE_HEIGHT (0x0CF6 là SWAP_BYTES)
+        case 0x806D: ps.unpackSkipImages = param; break;  // UNPACK_SKIP_IMAGES (0x0CF7 không phải skip images)
         case 0x0D02: ps.packRowLength = param; break;     // PACK_ROW_LENGTH
         case 0x0D03: ps.packSkipRows = param; break;      // PACK_SKIP_ROWS
         case 0x0D04: ps.packSkipPixels = param; break;    // PACK_SKIP_PIXELS
@@ -1672,7 +1672,7 @@ static bool WriteClearTexel(GLenum format, GLenum type, const void* data,
             memcpy(dst, data, srcBpp); return true;
         case 0x1405: // UNSIGNED_INT — copy trực tiếp
             memcpy(dst, data, srcBpp); return true;
-        case 0x140A: // FLOAT (đã trên) — fallthrough an toàn
+        case 0x140A: // GL_DOUBLE — copy trực tiếp (dst cùng cỡ; FLOAT đã xử ở 0x1406)
             memcpy(dst, data, srcBpp); return true;
         default:
             return false; // không đoán — trung thực INVALID_ENUM

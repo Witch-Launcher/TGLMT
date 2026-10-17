@@ -108,7 +108,7 @@ int main() {
     CHECK(tglmt::StateTracker::TexSlotOf(0x8C2A) == 2);
     CHECK(tglmt::StateTracker::TexSlotOf(0x8C1A) == 3);
     CHECK(tglmt::StateTracker::TexSlotOf(0x806F) == 4);
-    CHECK(tglmt::StateTracker::TexSlotOf(0x8078) == 5);
+    CHECK(tglmt::StateTracker::TexSlotOf(0x84F5) == 5);
 
     if (gFails) {
         printf("test_texture_per_target_bind FAIL (%d)\n", gFails);

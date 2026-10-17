@@ -10,7 +10,7 @@ static metal::PrimitiveType ToPrim(GLenum m, Context& c) {
         case 0x0000: return metal::PrimitiveType::Point;
         case 0x0001: return metal::PrimitiveType::Line;
         case 0x0002: return metal::PrimitiveType::LineStrip;
-        case 0x0003: return metal::PrimitiveType::LineStrip; // LINE_LOOP → strip khép kín (M5b khép đỉnh cuối)
+        case 0x0003: return metal::PrimitiveType::LineStrip; // LINE_STRIP
         case 0x0004: return metal::PrimitiveType::Triangle;
         case 0x0005: return metal::PrimitiveType::TriangleStrip;
         case 0x0006: return metal::PrimitiveType::Fan;
@@ -79,10 +79,13 @@ static uint64_t PrimCount(GLenum mode, GLsizei count) {
         case 0x0005:                                                     // TRIANGLE_STRIP
         case 0x0006: return count >= 3 ? (uint64_t)count - 2 : 0;        // TRIANGLE_FAN
         case 0x000A: return (uint64_t)count / 4;                         // LINES_ADJACENCY
-        case 0x000B: return count >= 2 ? (uint64_t)count - 2 : 0;        // LINE_STRIP_ADJACENCY
-        case 0x000D: return (uint64_t)count / 6;                         // TRIANGLES_ADJACENCY
-        case 0x000E: return count >= 3 ? (uint64_t)count - 2 : 0;        // TRI_STRIP_ADJACENCY
-        case 0x8E42: return (uint64_t)count;                             // PATCHES
+        case 0x000B: return count >= 4 ? (uint64_t)count - 3 : 0;        // LINE_STRIP_ADJACENCY (spec: n≥4 → n−3)
+        case 0x000C: return (uint64_t)count / 6;                         // TRIANGLES_ADJACENCY
+        case 0x000D: return count >= 6 ? (uint64_t)(count - 4) / 2 : 0;  // TRIANGLE_STRIP_ADJACENCY (spec)
+        case 0x000E: {                                                   // PATCHES: count / patchVertices
+            GLint pv = Context::Current().state.PatchVertices();
+            return (uint64_t)count / (uint64_t)(pv > 0 ? pv : 1);
+        }
         default: return (uint64_t)count / 3;
     }
 }

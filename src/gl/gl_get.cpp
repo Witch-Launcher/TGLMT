@@ -20,6 +20,7 @@ static void OutI(Context& c, GLenum p, GLint* v, GLuint idx = 0) {
             *v = (idx == 0) ? 1024 : (idx == 1) ? 1024 : 64; break;
         // P4: indexed buffer binding queries — đọc thẳng map bind point thật
         // (glBindBufferBase/Range ghi vào đây), không nói dối sau khi advertise SSBO.
+        case 0x8919: *v = (GLint)c.state.BoundSampler(idx); break; // SAMPLER_BINDING (glGetIntegeri_v)
         case 0x90D3: { auto it = c.storageBindPoints.find(idx); // SHADER_STORAGE_BUFFER_BINDING
             *v = (it == c.storageBindPoints.end()) ? 0 : (GLint)it->second.buffer; break; }
         case 0x90D4: { auto it = c.storageBindPoints.find(idx); // SHADER_STORAGE_BUFFER_START
@@ -82,7 +83,7 @@ static bool StaticLimit(GLenum p, GLint* v) {
         case 0x84E8: *v = 8192; break;   // MAX_RENDERBUFFER_SIZE
         case 0x84F8: *v = 8192; break;   // MAX_RECTANGLE_TEXTURE_SIZE
         case 0x8CDF: *v = 8; break;      // MAX_COLOR_ATTACHMENTS
-        case 0x8078: *v = 8; break;      // MAX_DRAW_BUFFERS
+        case 0x8824: *v = 8; break;      // MAX_DRAW_BUFFERS (Iris GlFramebuffer check!)
         case 0x8869: *v = 16; break;     // MAX_VERTEX_ATTRIBS
         case 0x8872: *v = 32; break;     // MAX_TEXTURE_IMAGE_UNITS
         case 0x8B4C: *v = 16; break;     // MAX_VERTEX_TEXTURE_IMAGE_UNITS
@@ -148,9 +149,9 @@ void glGetIntegerv(GLenum p, GLint* v) {
     Context& c = Context::Current();
     // một số pname đặc biệt trả trực tiếp từ object/state
     switch (p) {
-        case 0x0BA2: *v = (GLint)c.state.BoundVAO(); return;      // VERTEX_ARRAY_BINDING
+        case 0x85B5: *v = (GLint)c.state.BoundVAO(); return;      // VERTEX_ARRAY_BINDING
         case 0x8B8D: *v = (GLint)c.state.BoundProgram(); return;  // CURRENT_PROGRAM
-        case 0x0C10: *v = 0; return;                               // SCISSOR_TEST off default
+        case 0x0C11: *v = c.state.IsEnabled(0x0C11) ? 1 : 0; return; // SCISSOR_TEST
         case 0x0B71: *v = c.state.IsEnabled(0x0B71) ? 1 : 0; return; // DEPTH_TEST
         case 0x0BE2: *v = c.state.IsEnabled(0x0BE2) ? 1 : 0; return; // BLEND
         case 0x0B44: *v = c.state.IsEnabled(0x0B44) ? 1 : 0; return; // CULL_FACE
@@ -175,7 +176,7 @@ void glGetIntegerv(GLenum p, GLint* v) {
         case 0x8CA3: *v = c.state.StencilBack().ref; return;                // STENCIL_BACK_REF
         // GL_ARB_get_program_binary: TGLMT có 1 format duy nhất (GLSL gốc).
         case 0x87FE: *v = 1; return;                               // NUM_PROGRAM_BINARY_FORMATS
-        case 0x87FD: *v = (GLint)0x54474D54; return;               // PROGRAM_BINARY_FORMATS[0] = 'TGMT'
+        case 0x87FF: *v = (GLint)0x54474D54; return;               // PROGRAM_BINARY_FORMATS[0] = 'TGMT'
         // GL_ARB_map_buffer_alignment: base map至少 16-aligned (std::vector/malloc;
         // MTLBuffer contents page-aligned). App đảm bảo offset chia hết → pointer aligned.
         case 0x90BC: *v = 16; return;                              // MIN_MAP_BUFFER_ALIGNMENT
@@ -184,8 +185,19 @@ void glGetIntegerv(GLenum p, GLint* v) {
         case 0x826E: *v = 1024; return;                            // MAX_UNIFORM_LOCATIONS
         // GL_ARB_clip_control: glClipControl lưu + áp (viewport Y-flip, clear
         // depth, shader depth map) → round-trip query được.
-        case 0x8216: *v = (GLint)c.state.ClipOrigin(); return;     // CLIP_ORIGIN
-        case 0x8217: *v = (GLint)c.state.ClipDepth(); return;      // CLIP_DEPTH
+        case 0x935C: *v = (GLint)c.state.ClipOrigin(); return;     // CLIP_ORIGIN
+        case 0x935D: *v = (GLint)c.state.ClipDepth(); return;      // CLIP_DEPTH
+        // Bindings thật — Iris PBR (TextureManipulationUtil/TextureInfoCache) query
+        // rồi restore; trả 0 sẽ rebind nhầm khiến texture/FBO lệch cache của MC.
+        case 0x8CA6: *v = (GLint)c.state.BoundDrawFBO(); return;   // FRAMEBUFFER_BINDING (= DRAW_FRAMEBUFFER_BINDING)
+        case 0x8CAA: *v = (GLint)c.state.BoundReadFBO(); return;   // READ_FRAMEBUFFER_BINDING
+        case 0x84E0: *v = (GLint)c.state.ActiveTexture(); return;  // ACTIVE_TEXTURE
+        case 0x8069: *v = (GLint)c.state.BoundTexture(c.state.ActiveTexture(), 0x0DE1); return; // TEXTURE_BINDING_2D
+        case 0x8516: *v = (GLint)c.state.BoundTexture(c.state.ActiveTexture(), 0x8513); return; // TEXTURE_BINDING_CUBE_MAP
+        case 0x8C2C: *v = (GLint)c.state.BoundTexture(c.state.ActiveTexture(), 0x8C2A); return; // TEXTURE_BINDING_BUFFER
+        case 0x8C1D: *v = (GLint)c.state.BoundTexture(c.state.ActiveTexture(), 0x8C1A); return; // TEXTURE_BINDING_2D_ARRAY
+        case 0x806A: *v = (GLint)c.state.BoundTexture(c.state.ActiveTexture(), 0x806F); return; // TEXTURE_BINDING_3D
+        case 0x84F6: *v = (GLint)c.state.BoundTexture(c.state.ActiveTexture(), 0x84F5); return; // TEXTURE_BINDING_RECTANGLE
         case 0x1F02: break;
         default: break;
     }

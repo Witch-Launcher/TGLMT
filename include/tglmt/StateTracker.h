@@ -158,7 +158,7 @@ public:
             case 0x8C2A: return 2; // TEXTURE_BUFFER
             case 0x8C1A: return 3; // TEXTURE_2D_ARRAY
             case 0x806F: return 4; // TEXTURE_3D
-            case 0x8078: return 5; // TEXTURE_RECTANGLE
+            case 0x84F5: return 5; // TEXTURE_RECTANGLE
             default: return 0;     // TEXTURE_2D / 1D / unknown
         }
     }

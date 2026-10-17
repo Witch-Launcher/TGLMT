@@ -11,7 +11,7 @@ using namespace tglmt;
 // Unpack 1 uint32 packed thành 4 float theo type. Trả số component ghi vào out[4].
 static int Unpack(GLenum type, uint32_t v, float out[4]) {
     switch (type) {
-        case 0x8DC6: { // INT_2_10_10_10_REV: x,y,z 10-bit signed, w 2-bit signed
+        case 0x8D9F: { // INT_2_10_10_10_REV: x,y,z 10-bit signed, w 2-bit signed
             auto sx = [](uint32_t x, int b) -> float {
                 int32_t s = (int32_t)(x << (32 - b)) >> (32 - b);
                 return (float)s / (float)((1 << (b - 1)) - 1);

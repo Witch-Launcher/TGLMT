@@ -586,7 +586,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             case 0x1402: case 0x1403: case 0x140B: return 2; // SHORT/USHORT/HALF
             case 0x1404: case 0x1405: case 0x1406: return 4; // INT/UINT/FLOAT
             case 0x140A: case 0x140C: return 8; // DOUBLE (không render được, pipeline sẽ nil)
-            case 0x8368: case 0x8DC6: case 0x8C3B: return 4; // packed 10_10_10 / 11_11_10
+            case 0x8368: case 0x8D9F: case 0x8C3B: return 4; // packed 10_10_10 / 11_11_10
             default: return 4;
         }
     };

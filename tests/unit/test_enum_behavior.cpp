@@ -207,8 +207,13 @@ int main() {
     GLint nf = -1, fmtQ = 0;
     glGetIntegerv(0x87FE /*NUM_PROGRAM_BINARY_FORMATS*/, &nf);
     Check(nf == 1, "NUM_PROGRAM_BINARY_FORMATS = 1");
-    glGetIntegerv(0x87FD /*PROGRAM_BINARY_FORMATS*/, &fmtQ);
+    glGetIntegerv(0x87FF /*PROGRAM_BINARY_FORMATS*/, &fmtQ);
     Check(fmtQ == (GLint)0x54474D54, "PROGRAM_BINARY_FORMATS[0] = TGMT");
+    // Iris GlFramebuffer.drawBuffers lấy MAX_DRAW_BUFFERS (0x8824) — từng trả 0
+    // do bảng limit map nhầm 0x8078 → shader bật lên là chết "0 draw buffers".
+    GLint mdb = 0;
+    glGetIntegerv(0x8824 /*MAX_DRAW_BUFFERS*/, &mdb);
+    Check(mdb == 8, "MAX_DRAW_BUFFERS = 8 (Iris drawBuffers check)");
     {
         const char* vs = "#version 460 core\nvoid main(){ gl_Position = vec4(0.25); }";
         const char* fs = "#version 460 core\nout vec4 c;\nvoid main(){ c = vec4(0.5); }";
@@ -568,13 +573,13 @@ int main() {
             glClipControl(0x8CA2 /*UPPER_LEFT*/, 0x935F /*ZERO_TO_ONE*/);
             Check(glGetError() == 0, "glClipControl không lỗi");
             GLint co = 0, cd = 0;
-            glGetIntegerv(0x8216 /*CLIP_ORIGIN*/, &co);
-            glGetIntegerv(0x8217 /*CLIP_DEPTH*/, &cd);
+            glGetIntegerv(0x935C /*CLIP_ORIGIN*/, &co);
+            glGetIntegerv(0x935D /*CLIP_DEPTH*/, &cd);
             Check(co == 0x8CA2, "CLIP_ORIGIN round-trip UPPER_LEFT");
             Check(cd == 0x935F, "CLIP_DEPTH round-trip ZERO_TO_ONE");
             glClipControl(0x8CA1 /*LOWER_LEFT*/, 0x935E /*NEGATIVE_ONE_TO_ONE*/);
-            glGetIntegerv(0x8216, &co);
-            glGetIntegerv(0x8217, &cd);
+            glGetIntegerv(0x935C, &co);
+            glGetIntegerv(0x935D, &cd);
             Check(co == 0x8CA1 && cd == 0x935E, "clip_control round-trip về default");
         }
     }
