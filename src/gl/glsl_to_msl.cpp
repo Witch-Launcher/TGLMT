@@ -843,6 +843,208 @@ static void CoerceIntInitToFloat(std::string& text, const std::set<std::string>&
     }
     text.swap(out);
 }
+// ============ ctor floatN: arg int-family (implicit GLSL) → floatM(arg) ========
+// GLSL cho phép implicit int→float TỪNG COMPONENT trong vector ctor:
+// `vec4(iris_UV2, 0.0, 1.0)` với `in ivec2 iris_UV2;` — ĐÚNG dạng Iris sinh ra
+// (VanillaTransformer.java:101 / VanillaCoreTransformer.java:115 — patch
+// gl_MultiTexCoord1 → vec4(iris_UV2, 0.0, 1.0), attr ivec2). MSL KHÔNG:
+// float4(int2, float, float) → "no matching constructor" (thật: CR+DH
+// TERRAIN_SOLID `float4(iris_UV2, 0.0f, 1.0f)`). Bọc arg bằng `floatM(...)`
+// (M = dim của arg) khi arg int-family đã biết từ chính text: param helper /
+// local khai báo (`int2 x =`, `int i =`), call `intN(`/`uintN(`/`int(`/`uint(`
+// trọn arg, swizzle của base đã biết (`.x` → float, `.xy` → float2). Không suy
+// được kiểu → giữ nguyên (tránh bọc oan). Chạy cho cả body lẫn helper — line
+// lỗi thật nằm trong helper (GetLightMapCoordinates).
+static std::map<std::string, int> CollectIntFamNames(const std::string& text) {
+    std::map<std::string, int> m;
+    for (size_t i = 0; i + 4 < text.size(); ++i) {
+        bool isU = text.compare(i, 4, "uint") == 0;
+        if (!isU && text.compare(i, 3, "int") != 0) continue;
+        if (i > 0 && IsIdentChar(text[i - 1], false)) continue;
+        size_t p = i + (isU ? 4 : 3);
+        int dim = 1;
+        if (p < text.size() && (text[p] == '2' || text[p] == '3' || text[p] == '4')) {
+            dim = text[p] - '0';
+            ++p;
+        } else if (p < text.size() && IsIdentChar(text[p], false)) {
+            continue; // `integer`, `intFoo`…
+        }
+        // Cần separator space: `int foo` / `int2 foo` — loại call `int(...)`.
+        if (p >= text.size() || !isspace((unsigned char)text[p])) continue;
+        while (p < text.size() && isspace((unsigned char)text[p])) ++p;
+        if (p >= text.size() || !(isalpha((unsigned char)text[p]) || text[p] == '_')) continue;
+        size_t e = p;
+        while (e < text.size() && IsIdentChar(text[e], e == p)) ++e;
+        size_t q = e;
+        while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+        if (q < text.size() &&
+            (text[q] == '=' || text[q] == ';' || text[q] == ',' || text[q] == ')')) {
+            std::string name = text.substr(p, e - p);
+            if (!m.count(name)) m[name] = dim;
+        }
+        i = e - 1;
+    }
+    return m;
+}
+
+static void CoerceIntArgsInFloatCtorsImpl(std::string& text,
+                                          const std::map<std::string, int>& intDim);
+
+static int IntFamArgDim(const std::string& arg, const std::map<std::string, int>& intDim) {
+    std::string t = Trim(arg);
+    if (t.empty()) return 0;
+    // call ctor int-family TRỌN arg: intN(...)/uintN(...)/int(...)/uint(...)
+    {
+        int dim = 0;
+        size_t u = 0;
+        if (t.compare(0, 4, "uint") == 0) {
+            dim = 1;
+            u = 4;
+        } else if (t.compare(0, 3, "int") == 0) {
+            dim = 1;
+            u = 3;
+        }
+        if (dim == 1) {
+            if (u < t.size() && (t[u] == '2' || t[u] == '3' || t[u] == '4')) {
+                dim = t[u] - '0';
+                ++u;
+            }
+            if (u < t.size() && t[u] == '(' && t.back() == ')') {
+                int d = 0;
+                bool whole = false;
+                for (size_t e = u; e < t.size(); ++e) {
+                    if (t[e] == '(') ++d;
+                    else if (t[e] == ')') {
+                        if (--d == 0) {
+                            whole = (e + 1 == t.size());
+                            break;
+                        }
+                    }
+                }
+                if (whole) return dim;
+            }
+        }
+    }
+    auto look = [&](const std::string& n) -> int {
+        auto it = intDim.find(n);
+        return it == intDim.end() ? 0 : it->second;
+    };
+    size_t dot = t.find('.');
+    if (dot == std::string::npos) {
+        bool bare = isalpha((unsigned char)t[0]) || t[0] == '_';
+        for (size_t k = 1; k < t.size() && bare; ++k)
+            if (!IsIdentChar(t[k], false)) bare = false;
+        return bare ? look(t) : 0;
+    }
+    std::string base = t.substr(0, dot), sw = t.substr(dot + 1);
+    if (base == "_in") { // `_in.NAME` / `_in.NAME.swizzle`
+        size_t d2 = sw.find('.');
+        std::string nm = d2 == std::string::npos ? sw : sw.substr(0, d2);
+        std::string sw2 = d2 == std::string::npos ? "" : sw.substr(d2 + 1);
+        int bd = look(nm);
+        if (!bd) return 0;
+        if (sw2.empty()) return bd;
+        for (char c : sw2)
+            if (!strchr("xyzw", c)) return 0;
+        return (int)sw2.size();
+    }
+    if (base == "tglmt_u") return 0; // dim uniform chưa có ở đây — bỏ qua an toàn
+    int bd = look(base);
+    if (!bd) return 0;
+    if (sw.empty() || sw.size() > 4) return bd;
+    for (char c : sw)
+        if (!strchr("xyzw", c)) return 0;
+    return (int)sw.size();
+}
+
+static void CoerceIntArgsInFloatCtorsImpl(std::string& text,
+                                          const std::map<std::string, int>& intDim) {
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        bool hit = false;
+        for (char d = '2'; d <= '4' && !hit; ++d) {
+            std::string ctor = std::string("float") + d + "(";
+            if (text.compare(i, ctor.size(), ctor) == 0 &&
+                (i == 0 || !IsIdentChar(text[i - 1], false)))
+                hit = true;
+        }
+        if (!hit) {
+            out += text[i];
+            ++i;
+            continue;
+        }
+        size_t lp = i + 6; // "floatN(" → '('
+        int dd = 0;
+        size_t close = lp;
+        for (; close < text.size(); ++close) {
+            if (text[close] == '(') ++dd;
+            else if (text[close] == ')') {
+                if (--dd == 0) break;
+            }
+        }
+        if (close >= text.size()) {
+            out += text[i];
+            ++i;
+            continue;
+        }
+        std::string core = text.substr(lp + 1, close - lp - 1);
+        CoerceIntArgsInFloatCtorsImpl(core, intDim); // ctor lồng nhau trước
+        // split top-level args
+        std::vector<std::string> args;
+        int d2 = 0;
+        size_t from = 0;
+        for (size_t e = 0; e < core.size(); ++e) {
+            if (core[e] == '(') ++d2;
+            else if (core[e] == ')') --d2;
+            else if (core[e] == ',' && d2 == 0) {
+                args.push_back(core.substr(from, e - from));
+                from = e + 1;
+            }
+        }
+        args.push_back(core.substr(from));
+        std::string joined;
+        for (size_t k = 0; k < args.size(); ++k) {
+            std::string t = Trim(args[k]);
+            int ad = IntFamArgDim(t, intDim);
+            if (ad == 1) t = "float(" + t + ")";
+            else if (ad >= 2) t = "float" + std::to_string(ad) + "(" + t + ")";
+            if (k) joined += ", ";
+            joined += t;
+        }
+        out += text.substr(i, 7);
+        out += joined;
+        out += ")";
+        i = close + 1;
+    }
+    text.swap(out);
+}
+
+// Dim int-family của attribute/varying (body dùng tên TRẦN lúc rule chạy —
+// tiền tố `_in.` chỉ thêm sau — nên quét text không thấy, phải lấy từ mslType).
+static void AddMslIntFamDims(const std::vector<GLSLVar>& vars,
+                             std::map<std::string, int>& m) {
+    for (auto& v : vars) {
+        int dim = 0;
+        if (v.mslType.compare(0, 4, "uint") == 0) dim = 1;
+        else if (v.mslType.compare(0, 3, "int") == 0) dim = 1;
+        if (!dim) continue;
+        if (v.mslType.size() > 3 && v.mslType[3] >= '2' && v.mslType[3] <= '4')
+            dim = v.mslType[3] - '0';
+        if (!m.count(v.name)) m[v.name] = dim;
+    }
+}
+
+static void CoerceIntArgsInFloatCtors(std::string& text, const std::vector<GLSLVar>& vars) {
+    if (text.find("float2(") == std::string::npos &&
+        text.find("float3(") == std::string::npos &&
+        text.find("float4(") == std::string::npos)
+        return;
+    std::map<std::string, int> intDim = CollectIntFamNames(text);
+    AddMslIntFamDims(vars, intDim);
+    if (intDim.empty()) return;
+    CoerceIntArgsInFloatCtorsImpl(text, intDim);
+}
 // ============ `if (v != v)` với v vector → `any(...)` (block vsh) ====
 // GLSL driver leniency `if (bvec)`; MSL cần bool tường minh. Fire CHỈ khi:
 // hai vế giống hệt nhau VÀ resolve được kiểu vector (bảng vecVars + knownVec).
@@ -6266,6 +6468,13 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         // mix(x,y,lessThan(a,b)) → 3rd arg `(a < b)` chỉ có SAU relational expand.
         PromoteBoolVecMix(body);
         CoerceIntInitToFloat(body, intUniforms);
+        // Arg int-family trong ctor floatN (Iris: vec4(iris_UV2, 0.0, 1.0));
+        // ins/outs cấp dim cho tên TRẦN trong body (chưa có tiền tố _in.).
+        {
+            std::vector<GLSLVar> iv = ins;
+            iv.insert(iv.end(), outs.begin(), outs.end());
+            CoerceIntArgsInFloatCtors(body, iv);
+        }
         {
             std::set<std::string> knownVec;
             if (R.isVertex)
@@ -6366,6 +6575,14 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         // mix(x,y,lessThan(a,b)) → 3rd arg `(a < b)` chỉ có SAU relational expand.
         PromoteBoolVecMix(helpersMSL);
         CoerceIntInitToFloat(helpersMSL, intUniforms);
+        // Arg int-family trong ctor floatN (line lỗi thật TERRAIN_SOLID nằm
+        // trong helper GetLightMapCoordinates — param `int2 iris_UV2` quét từ
+        // chính text helper; ins/outs phòng helper tham chiếu tên trần).
+        {
+            std::vector<GLSLVar> iv = ins;
+            iv.insert(iv.end(), outs.begin(), outs.end());
+            CoerceIntArgsInFloatCtors(helpersMSL, iv);
+        }
         {
             std::set<std::string> knownVec;
             if (R.isVertex)

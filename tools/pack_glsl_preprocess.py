@@ -610,9 +610,12 @@ def patch_iris(text, stage, kind="composite"):
         if stage == "vsh":
             text = re.sub(r"\bgl_Vertex\b", "vec4(iris_Position, 1.0)", text)
             text = re.sub(r"\bgl_MultiTexCoord0\b", "vec4(iris_UV0, 0.0, 1.0)", text)
-            # Iris ghi `vec4(iris_UV2, 0.0, 1.0)` (ivec2) — GLSL ctor cho implicit
-            # int→float, MSL KHÔNG → cast tường minh (cùng kết quả).
-            text = re.sub(r"\bgl_MultiTexCoord[12]\b", "vec4(vec2(iris_UV2), 0.0, 1.0)", text)
+            # ĐÚNG dạng Iris (VanillaTransformer.java:101): `vec4(iris_UV2, 0.0, 1.0)`
+            # với `in ivec2 iris_UV2;` (implicit int→float của GLSL). Từng bị
+            # `vec2(iris_UV2)` ở đây = workaround che lỗi converter → game thật
+            # fail "no matching constructor" (TERRAIN_SOLID). Converter phải tự
+            # bọc float2 — giữ nguyên dạng Iris để sweep bắt được hồi quy.
+            text = re.sub(r"\bgl_MultiTexCoord[12]\b", "vec4(iris_UV2, 0.0, 1.0)", text)
             text = re.sub(r"\bgl_MultiTexCoord[3-7]\b", "vec4(0.0, 0.0, 0.0, 1.0)", text)
             if re.search(r"\bgl_Normal\b", text):
                 text = re.sub(r"\bgl_Normal\b", "iris_Normal", text)
@@ -676,8 +679,8 @@ def patch_iris(text, stage, kind="composite"):
             text = re.sub(r"\bgl_Vertex\b", "vec4(iris_Position, 1.0)", text)
             text = re.sub(r"\bgl_Normal\b", "iris_Normal", text)
             text = re.sub(r"\bgl_MultiTexCoord0\b", "vec4(iris_UV0, 0.0, 1.0)", text)
-            text = re.sub(r"\bgl_MultiTexCoord1\b", "vec4(vec2(iris_UV2), 0.0, 1.0)", text)
-            text = re.sub(r"\bgl_MultiTexCoord2\b", "vec4(vec2(iris_UV2), 0.0, 1.0)", text)
+            text = re.sub(r"\bgl_MultiTexCoord1\b", "vec4(iris_UV2, 0.0, 1.0)", text)
+            text = re.sub(r"\bgl_MultiTexCoord2\b", "vec4(iris_UV2, 0.0, 1.0)", text)
             text = re.sub(r"\bgl_MultiTexCoord[3-7]\b", "vec4(0.0, 0.0, 0.0, 1.0)", text)
             text = re.sub(r"\bgl_Color\b",
                           "(iris_Color * iris_transforms.ColorModulator)", text)

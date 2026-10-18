@@ -215,6 +215,38 @@ int main() {
         }
     }
 
+    // 9) Ctor floatN với arg int-family (implicit int→float GLSL) — ĐÚNG dạng
+    // Iris sinh ra: `vec4(iris_UV2, 0.0, 1.0)` với `in ivec2 iris_UV2;`
+    // (VanillaTransformer.java:101 / gl_MultiTexCoord1). MSL không có
+    // float4(int2,float,float) → converter phải bọc float2(...). Gồm cả helper
+    // (param `ivec2 iris_UV2` — ca thật: GetLightMapCoordinates của CR).
+    {
+        const char* s = "#version 460 core\n"
+                        "layout(location = 0) in ivec2 iris_UV2;\n"
+                        "layout(location = 1) in int mc_webId;\n"
+                        "uniform mat4 iris_LightmapTextureMatrix;\n"
+                        "out vec2 vLm;\n"
+                        "vec2 helperLm(ivec2 iris_UV2) {\n"
+                        "    return (iris_LightmapTextureMatrix * vec4(iris_UV2, 0.0, 1.0)).xy;\n"
+                        "}\n"
+                        "void main() {\n"
+                        "    vec2 lm = helperLm(iris_UV2);\n"
+                        "    vec4 big = vec4(mc_webId, iris_UV2.x, 0.0, 1.0);\n"
+                        "    vLm = lm + big.xy;\n"
+                        "    gl_Position = vec4(0.0);\n"
+                        "}\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B31);
+        CHECK(r.ok, "int-arg float-ctor convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(Has(r.msl, "float4(float2(iris_UV2), 0.0, 1.0)"),
+                  "helper: vec4(ivec2,…) → float4(float2(iris_UV2),…)");
+            CHECK(Has(r.msl, "float(_in.iris_UV2.x)"), "arg swizzle int → float(_in.iris_UV2.x)");
+            CHECK(Has(r.msl, "float(_in.mc_webId)"), "arg int scalar → float(_in.mc_webId)");
+            MetalCheck("intargctor", r.msl, "MSL arg int-family trong ctor biên dịch được");
+        }
+    }
+
     // metal -c cho case 4 (toolchain trên máy này không đáng tin — chỉ chạy khi probe pass).
     if (MetalAvail()) {
         const char* s = "#version 130\n"
