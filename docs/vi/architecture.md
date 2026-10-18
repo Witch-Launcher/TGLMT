@@ -262,7 +262,9 @@ trên GPU khi định dạng khớp, và rơi về copy CPU khi không khớp.
 hàng, đúng đặc tả. Mười lỗi đầu tiên được ghi kèm backtrace để định vị người gọi sai.
 
 `glGetString` báo vendor `TGLMT`, renderer `Apple GPU (Metal)`, version
-`4.6 (TGLMT Metal port)` và shading-language version `4.60 (TGLMT MSL)`. Danh sách extension
+`4.6 (TGLMT Metal port, build <N>.<hash>)` — hậu tố số bản dựng sinh từ git lúc
+configure (`cmake/tglmt_buildinfo.h.in`), hiện trên F3 qua `GpuDevice.getVersion` —
+và shading-language version `4.60 (TGLMT MSL)`. Danh sách extension
 cố ý giữ cố định sáu mục; danh sách trả về chính là thứ mà LWJGL dựng tập khả năng của nó.
 
 Logging chẩn đoán được đóng bởi `Context::DiagOn()`: biến môi trường `TGLMT_DIAG=1` cho

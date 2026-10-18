@@ -15,6 +15,31 @@ endif()
 
 include_directories(include)
 
+# Số bản dựng TGLMT — nguồn duy nhất cho glGetString(GL_VERSION) (hiện trên F3
+# qua GpuDevice.getVersion) và dòng diag [TGLMT] build=. Lấy từ git lúc
+# configure; commit mới tự kích hoạt configure lại nhờ CONFIGURE_DEPENDS trên
+# .git/logs/HEAD (mất git → "dev").
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS .git/logs/HEAD)
+execute_process(COMMAND git rev-list --count HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE TGLMT_BUILD_NUM OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE TGLMT_BUILD_HASH OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git status --porcelain --untracked-files=no
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE TGLMT_BUILD_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(TGLMT_BUILD_NUM MATCHES "^[0-9]+$" AND TGLMT_BUILD_HASH)
+  set(TGLMT_BUILD_STRING "${TGLMT_BUILD_NUM}.${TGLMT_BUILD_HASH}")
+  if(TGLMT_BUILD_DIRTY)
+    string(APPEND TGLMT_BUILD_STRING "+dirty")
+  endif()
+else()
+  set(TGLMT_BUILD_STRING "dev")
+endif()
+configure_file(cmake/tglmt_buildinfo.h.in ${CMAKE_BINARY_DIR}/generated/tglmt_buildinfo.h @ONLY)
+include_directories(${CMAKE_BINARY_DIR}/generated)
+
 file(GLOB TGLMT_CORE CONFIGURE_DEPENDS src/core/*.cpp)
 file(GLOB TGLMT_GL CONFIGURE_DEPENDS src/gl/*.cpp)
 list(FILTER TGLMT_GL EXCLUDE REGEX ".*AppleMetalBridge.*")

@@ -266,8 +266,8 @@ Nguồn: `docs/khronos/gl.xml` + `docs/khronos/extensions/*.txt` + `docs/apple/M
 | 260 | `glGetShaderPrecisionFormat` | GL_VERSION_4_1 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
 | 261 | `glGetShaderSource` | GL_VERSION_2_0 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
 | 262 | `glGetShaderiv` | GL_VERSION_2_0 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
-| 263 | `glGetString` | GL_VERSION_1_0 | Trả về chuỗi hằng: renderer 'Apple GPU (Metal)', version '4.6 (TGLMT Metal port)' |
-| 264 | `glGetStringi` | GL_VERSION_3_0 | Trả về chuỗi hằng: renderer 'Apple GPU (Metal)', version '4.6 (TGLMT Metal port)' |
+| 263 | `glGetString` | GL_VERSION_1_0 | Trả về chuỗi hằng: renderer 'Apple GPU (Metal)', version '4.6 (TGLMT Metal port, build <N>.<hash>)' — hậu tố build sinh từ git (F3 hiện qua GpuDevice.getVersion) |
+| 264 | `glGetStringi` | GL_VERSION_3_0 | Trả về chuỗi hằng: renderer 'Apple GPU (Metal)', version '4.6 (TGLMT Metal port, build <N>.<hash>)' — hậu tố build sinh từ git |
 | 265 | `glGetSubroutineIndex` | GL_VERSION_4_0 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
 | 266 | `glGetSubroutineUniformLocation` | GL_VERSION_4_0 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
 | 267 | `glGetSynciv` | GL_VERSION_3_2 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |

@@ -268,7 +268,9 @@ front, matching the specification. The first ten recorded errors are logged with
 backtrace so the offending caller can be located.
 
 `glGetString` reports vendor `TGLMT`, renderer `Apple GPU (Metal)`, version
-`4.6 (TGLMT Metal port)` and shading-language version `4.60 (TGLMT MSL)`. The extension
+`4.6 (TGLMT Metal port, build <N>.<hash>)` — the build-number suffix is generated from
+git at configure time (`cmake/tglmt_buildinfo.h.in`) and shows up on F3 via
+`GpuDevice.getVersion` — and shading-language version `4.60 (TGLMT MSL)`. The extension
 list is deliberately fixed at six entries; the returned list is what LWJGL builds its
 capability set from.
 

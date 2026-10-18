@@ -1,0 +1,5 @@
+// tglmt_buildinfo.h — SINH TỰ ĐỘNG bởi CMake từ cmake/tglmt_buildinfo.h.in.
+// KHÔNG sửa tay. Giá trị lấy từ git lúc configure (commit count + hash ngắn,
+// "+dirty" nếu working tree có thay đổi chưa commit).
+#pragma once
+#define TGLMT_BUILD_STRING "@TGLMT_BUILD_STRING@"

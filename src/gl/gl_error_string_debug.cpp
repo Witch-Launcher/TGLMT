@@ -2,6 +2,7 @@
 // Spec: glspec46.core.pdf §2.3 + KHR_no_error.txt (không hàm mới, chỉ context flag).
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include "tglmt_buildinfo.h"
 #include <cstring>
 using namespace tglmt;
 
@@ -10,7 +11,10 @@ GLenum glGetError() { return Context::Current().errors.GetError(); }
 const GLubyte* glGetString(GLenum n) {
     static const GLubyte kVendor[] = "TGLMT";
     static const GLubyte kRenderer[] = "Apple GPU (Metal)";
-    static const GLubyte kVersion[] = "4.6 (TGLMT Metal port)";
+    // Số bản dựng nhét vào GL_VERSION: F3 (DebugEntrySystemSpecs → GpuDevice.getVersion)
+    // hiện nguyên chuỗi "OpenGL: 4.6 (TGLMT Metal port, build <N>.<hash>)" — đủ để
+    // biết dylib nào đang chạy trên máy. LWJGL chỉ parse tiền tố "4.6" nên an toàn.
+    static const GLubyte kVersion[] = "4.6 (TGLMT Metal port, build " TGLMT_BUILD_STRING ")";
     static const GLubyte kSL[] = "4.60 (TGLMT MSL)";
     static const GLubyte kEmpty[] = "";
     switch (n) {

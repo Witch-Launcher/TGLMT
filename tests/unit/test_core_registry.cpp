@@ -1,6 +1,7 @@
 // test_core_registry.cpp — Unit: registry/gen/is/delete + glGetError rỗng + GetString.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include "tglmt_buildinfo.h"
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -26,9 +27,11 @@ int main() {
     float out[3] = {9, 9, 9};
     glGetBufferSubData(0x8892, 0, sizeof(out), out);
     assert(out[0] == 0.0f && out[1] == 1.0f && out[2] == 0.0f);
-    // GetString chân lý
+    // GetString chân lý + số bản dựng (F3 hiện chuỗi này qua GpuDevice.getVersion)
     const char* ver = (const char*)glGetString(0x1F02);
     assert(strstr(ver, "4.6") != nullptr);
+    assert(strstr(ver, "TGLMT Metal port") != nullptr);
+    assert(strstr(ver, TGLMT_BUILD_STRING) != nullptr);
     const char* ext0 = (const char*)glGetStringi(0x1F03, 0);
     assert(ext0 && strlen(ext0) > 0);
     // Error queue: enum sai phải Record
