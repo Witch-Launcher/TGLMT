@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <string>
 #include <unordered_map>
 using namespace tglmt;
@@ -259,29 +260,66 @@ void glLinkProgram(GLuint p) {
             }
         }
     }
-    // 3. Attribute locations: glBindAttribLocation honoured, explicit giữ, còn lại gán tiếp.
-    // Blaze3D bind attribute theo tên element của VertexFormat cho mọi program
-    // (javap GlProgram.link, 26.1.2) — kể cả attribute shader không đọc. Attribute
-    // inactive đã bị strip ở converter nên còn lại đây đều ACTIVE; nếu 2 tên khác
-    // nhau chung 1 index (aliasing thật) thì Metal không biểu diễn được
-    // (`attribute used more than once`) → fail rõ ở link thay vì Metal error khó đọc.
+    // 3. Attribute locations: glBindAttribLocation/explicit giữ, còn lại gán index
+    // TRỐNG nhỏ nhất (driver desktop cũng vậy — không đụng index đã chiếm bởi
+    // explicit location LẪN bởi giá trị đã bind).
+    // Người bind ở đây là Iris MixinVertexFormat.bindAttributesIris (gọi trong
+    // ShaderCreator.link trước glLinkProgram): bind theo THỨ TỰ element của format
+    // của draw — core names ("iris_" + tên), element mở rộng giữ tên gốc
+    // (mc_Entity/at_tangent...). Hệ quả thực chiến: attribute shader có mà format
+    // của draw KHÔNG có — vd iris_Entity do EntityPatcher inject ("in ivec3
+    // iris_Entity") nhưng draw POSITION_TEX của TEXTURED không có element Entity —
+    // không được bind; gán "next từ 0" như trước sẽ đè iris_Position@0 rồi tự báo
+    // aliasing giả (crash pipeline CR+DH). Index đã chiếm = explicit ∪ bind.
+    // Attribute inactive đã bị strip ở converter nên còn lại đây đều ACTIVE; nếu 2
+    // tên chung 1 index sau tất cả (aliasing thật — app bind 2 tên cùng index) thì
+    // Metal không biểu diễn được → fail rõ ở link thay vì Metal error khó đọc.
     {
+        std::set<int> taken;
+        for (auto& a : vsC.inputs) {
+            if (a.location < kTempLocBase) taken.insert((int)a.location);
+            auto bit = pr.attribBind.find(a.name);
+            if (bit != pr.attribBind.end()) taken.insert((int)bit->second);
+        }
         int next = 0;
-        for (auto& a : vsC.inputs)
-            if (a.location < kTempLocBase) next = std::max(next, a.location + 1);
         for (auto& a : vsC.inputs) {
             auto bit = pr.attribBind.find(a.name);
             int assigned = a.location;
             if (bit != pr.attribBind.end()) {
                 assigned = (int)bit->second; // BindAttribLocation (phải gọi trước link)
             } else if (assigned >= kTempLocBase) {
-                assigned = next++;
+                while (taken.count(next)) next++;
+                assigned = next;
+                taken.insert(next);
             }
             if (assigned != a.location) {
                 pr.vertexMSL = RewriteLocns(pr.vertexMSL, true, a.location, assigned);
                 a.location = assigned;
             }
             pr.attribLoc[a.name] = assigned;
+        }
+        // Kiểu attribute (cho fill-zero ở AppleDrawGL khi GL array tắt): chỉ các
+        // kiểu scalar/vector float/int/uint — mat/bool/double hiếm, không bù.
+        pr.attribFill.clear();
+        auto ClsComps = [](const std::string& t) -> std::pair<int, int> {
+            if (t == "float") return {0, 1};
+            if (t == "vec2") return {0, 2};
+            if (t == "vec3") return {0, 3};
+            if (t == "vec4") return {0, 4};
+            if (t == "int") return {1, 1};
+            if (t == "ivec2") return {1, 2};
+            if (t == "ivec3") return {1, 3};
+            if (t == "ivec4") return {1, 4};
+            if (t == "uint") return {2, 1};
+            if (t == "uvec2") return {2, 2};
+            if (t == "uvec3") return {2, 3};
+            if (t == "uvec4") return {2, 4};
+            return {-1, 0};
+        };
+        for (auto& a : vsC.inputs) {
+            auto cc = ClsComps(a.glslType);
+            if (cc.first < 0) continue;
+            pr.attribFill.push_back({a.location, (uint8_t)cc.second, (uint8_t)cc.first});
         }
         for (size_t i = 0; i < vsC.inputs.size(); ++i)
             for (size_t j = i + 1; j < vsC.inputs.size(); ++j)

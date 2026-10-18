@@ -247,6 +247,14 @@ struct ProgramObject {
     std::vector<AtomicSlot> vsAtomics, fsAtomics;
     std::unordered_map<std::string, GLuint> attribBind; // glBindAttribLocation (trước link)
     std::unordered_map<std::string, GLint> attribLoc;   // location sau link
+    // Kiểu attribute VS sau link — nguồn cho "fill" ở AppleDrawGL: Metal BẮT
+    // vertex descriptor chứa MỌI attribute shader đọc ("Vertex attribute ent(2) is
+    // missing from the vertex descriptor" — probe thật); Iris bind attribute theo
+    // format của DRAW (MixinVertexFormat.bindAttributesIris), attribute shader có
+    // mà format không (vd iris_Entity + POSITION_TEX) không có array enabled →
+    // draw phải bù entry trỏ zero buffer. cls: 0=float, 1=int, 2=uint.
+    struct AttribFill { GLint loc; uint8_t comps; uint8_t cls; };
+    std::vector<AttribFill> attribFill;
     // Sampler mapping (fix unit vs MSL slot): tên sampler theo thứ tự khai báo
     // mỗi stage + unit hiện tại (từ glUniform1i, mặc định 0 đúng GL).
     std::vector<std::string> vsSamplers;

@@ -105,6 +105,22 @@ static std::shared_ptr<metal::IBuffer> FallbackZeroBuf(Context& c) {
     if (b) cache[c.device.get()] = b;
     return b;
 }
+// Zero buffer 4MB cho attribute "fill": Metal BẮT vertex descriptor chứa mọi
+// attribute mà vertex shader đọc (probe: "Vertex attribute ent(2) is missing from
+// the vertex descriptor" → tạo pipeline fail). Attribute shader có mà GL array tắt
+// — Iris bind theo format của draw (MixinVertexFormat.bindAttributesIris: iris_Entity
+// + format POSITION_TEX) — được trỏ vào buffer zero này (đọc ra 0 như desktop khi
+// array tắt). 4MB phủ stride 16B × 262k đỉnh (U16 index trần 65k ⇒ ~1MB; batch
+// non-indexed của MC hiếm khi vượt 262k). Cùng cách MoltenVK (auxiliary zero buffer).
+static std::shared_ptr<metal::IBuffer> VertexFillZeroBuf(Context& c) {
+    static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::IBuffer>> cache;
+    auto it = cache.find(c.device.get());
+    if (it != cache.end() && it->second) return it->second;
+    std::vector<uint8_t> z(4u << 20, 0);
+    auto b = c.device->newBufferWithBytes(z.data(), z.size(), metal::StorageMode::Shared);
+    if (b) cache[c.device.get()] = b;
+    return b;
+}
 
 // Sampler state cho 1 unit: SamplerObject đã bind, else dựng từ TextureObject.params
 // (glTexParameter), else default LINEAR/REPEAT. Cache theo khóa đơn giản.
@@ -639,6 +655,39 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         // stride 0 = tightly packed theo chính attribute (spec §10.3.1), không
         // cộng offset (bug cũ cộng relative vào stride làm đỉnh thưa sai).
         if (ca.stride == 0) ca.stride = ca.size * GLTypeSize(ca.type);
+    }
+    // 2b. Fill attribute: attribute VS đọc mà GL array tắt (Iris bind theo format
+    // của draw — vd iris_Entity khi draw POSITION_TEX: EntityPatcher inject
+    // "in ivec3 iris_Entity", format không có element Entity) → bù entry descriptor
+    // trỏ zero buffer; thiếu là Metal từ chối TẠO pipeline, draw bị bỏ (TEXTURED
+    // mất). id=0 đánh dấu slot zero, bind ở [4] bên dưới.
+    if (!pr.attribFill.empty()) {
+        int fillSlot = -1;
+        for (int s = 15; s >= 0; --s)
+            if (!(bindMask & (1u << s))) { fillSlot = s; break; }
+        if (fillSlot >= 0) {
+            for (const auto& fa : pr.attribFill) {
+                if (casN >= 16 || fa.cls > 2 || fa.comps == 0 || fa.comps > 4) continue;
+                if (fa.loc < 0 || fa.loc > 15) continue;
+                bool have = false;
+                for (uint32_t k = 0; k < casN; ++k)
+                    if (cas[k].loc == (uint32_t)fa.loc) { have = true; break; }
+                if (have) continue;
+                metal::CustomAttrib ca;
+                ca.loc = (uint32_t)fa.loc;
+                ca.size = (uint32_t)fa.comps;
+                ca.type = fa.cls == 0 ? 0x1406 : (fa.cls == 1 ? 0x1404 : 0x1405);
+                ca.normalized = false;
+                ca.offset = 0;
+                ca.bufferIndex = (uint32_t)fillSlot;
+                ca.stride = (uint32_t)fa.comps * 4u;
+                ca.divisor = 0;
+                cas[casN++] = ca;
+                bindMask |= (1u << fillSlot);
+                bindMap[fillSlot].id = 0; // 0 = zero buffer (không phải GL buffer)
+                bindMap[fillSlot].off = 0;
+            }
+        }
     }
     // Validator đọc vượt buffer: rẻ (O(attribs) phép tính, không scan vertices).
     // Giữ luôn-on để test_mc_validate + chẩn đoán A11 fault, không gate DIAG.
@@ -1206,6 +1255,12 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // Giải shared_ptr ĐỘT NÀY (sau mọi flush) để bind đúng buffer vừa ghi.
     for (int bi = 0; bi < 16; ++bi) {
         if (!(bindMask & (1u << bi))) continue;
+        if (bindMap[bi].id == 0) { // slot fill zero (attribute shader đọc, GL array tắt)
+            auto zb = VertexFillZeroBuf(c);
+            if (!zb) { c.appleStats.miscFail++; return false; }
+            enc->setVertexBuffer(zb.get(), 0, (uint32_t)bi);
+            continue;
+        }
         auto bit = c.buffers.find(bindMap[bi].id);
         if (bit == c.buffers.end() || !bit->second.gpu) { c.appleStats.miscFail++; return false; }
         enc->setVertexBuffer(bit->second.gpu.get(), bindMap[bi].off, (uint32_t)bi);
