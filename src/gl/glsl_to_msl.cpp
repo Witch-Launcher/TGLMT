@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
@@ -2718,6 +2719,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     if (t.find("300") == std::string::npos && t.find("460") == std::string::npos &&
                         t.find("450") == std::string::npos && t.find("440") == std::string::npos &&
                         t.find("410") == std::string::npos && t.find("400") == std::string::npos &&
+                        t.find("430") == std::string::npos &&
                         t.find("330") == std::string::npos && t.find("150") == std::string::npos &&
                         t.find("140") == std::string::npos && t.find("130") == std::string::npos &&
                         t.find("120") == std::string::npos && t.find("100") == std::string::npos)
@@ -3025,17 +3027,21 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             std::istringstream iss(s);
             std::vector<std::string> w; std::string tok;
             while (iss >> tok) w.push_back(tok);
-            if (w.empty() || w[0] != "uniform") return false;
-            size_t k = 1;
+            if (w.empty()) return false;
+            // Qualifier có thể đứng TRƯỚC hoặc SAU `uniform`
+            // (GLSL: `writeonly uniform image3D img;` — Complementary shadowcomp).
+            size_t k = 0;
             char access = 'B';
+            bool sawUniform = false;
             while (k < w.size()) {
-                if (w[k] == "readonly") { access = 'R'; ++k; }
+                if (w[k] == "uniform") { sawUniform = true; ++k; }
+                else if (w[k] == "readonly") { access = 'R'; ++k; }
                 else if (w[k] == "writeonly") { access = 'W'; ++k; }
                 else if (w[k] == "coherent" || w[k] == "volatile" || w[k] == "restrict" ||
                          w[k] == "highp" || w[k] == "mediump" || w[k] == "lowp") { ++k; }
                 else break;
             }
-            if (k + 1 >= w.size()) return false;
+            if (!sawUniform || k + 1 >= w.size()) return false;
             std::string itype = w[k], iname = w[k + 1];
             if (!iname.empty() && iname.back() == ';') iname.pop_back();
             if (iname.find('[') != std::string::npos) return false; // image array ngoài subset
@@ -3187,7 +3193,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             // P6g image: `layout(...) uniform image2D img;` (không `{`, không phải UBO).
             {
                 GLSLVar iv;
-                if ((t.rfind("layout", 0) == 0 || t.rfind("uniform", 0) == 0) &&
+                if ((t.rfind("layout", 0) == 0 || t.rfind("uniform", 0) == 0 ||
+                     t.find("uniform") != std::string::npos) &&
                     t.find("image") != std::string::npos && t.find('{') == std::string::npos &&
                     tryParseImage(t, iv)) {
                     R.images.push_back(iv);
@@ -3600,11 +3607,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     p += 11;
                 }
             }
-            if (hasWord("gl_FragColor") || hasWord("gl_FragData")) {
-                legacyFrag = true;
-            } else {
-                return fail("fragment cần 1..8 out (hiện có 0)");
-            }
+            // 0 out hợp lệ: chỉ discard / chỉ ghi depth (Complementary
+            // gbuffers_clouds.fsh: `void main() { discard; }`). Metal cho
+            // `fragment void` hoặc struct chỉ depth.
+            legacyFrag = hasWord("gl_FragColor") || hasWord("gl_FragData");
         } else if (outs.size() > 8) {
             return fail("fragment cần 1..8 out (hiện có " + std::to_string(outs.size()) + ")");
         }
@@ -3864,7 +3870,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 return false;
             };
             for (auto& g : hoisted)
-                if (!isParam(g.name) && hasWordIn(hb, g.name)) directUses[h.name].push_back(g.name);
+                if (!isParam(g.name) && hasWordIn(hb, g.name)) {
+                    auto& v = directUses[h.name];
+                    if (std::find(v.begin(), v.end(), g.name) == v.end()) v.push_back(g.name);
+                }
             for (auto& o : helpers)
                 if (o.name != h.name && hasWordIn(hb, o.name)) {
                     // gọi hàm o (word + `(` sau đó) — kiểm tra `(` để khỏi nhầm biến
@@ -3980,6 +3989,15 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     }
                 }
                 if (c >= text.size()) break;
+                // Header định nghĩa (`f(...) {`), gồm cả overload thứ 2+ cùng tên:
+                // không phải call site — chèn args vào đây sẽ phá params
+                // (Complementary: GetLinearDepth/1 và /3 cùng dùng farMinusNear).
+                size_t nb = c + 1;
+                while (nb < text.size() && isspace((unsigned char)text[nb])) ++nb;
+                if (nb < text.size() && text[nb] == '{') {
+                    p = c + 1;
+                    continue;
+                }
                 // P-Sodium: call rỗng args `f()` + thread-refs → `f(, g...)` lỗi MSL.
                 // Bỏ ", " đầu khi giữa ngoặc chỉ có spaces.
                 {
@@ -3990,9 +4008,13 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 }
             }
         };
+        std::set<std::string> callSiteDone;
         for (auto& h : helpers) {
             auto& gs = req[h.name];
             if (gs.empty()) continue;
+            // overload cùng tên dùng chung req (union) → rewrite 1 lần/tên, tránh
+            // chèn args lặp vào cùng call site (Complementary GetLinearDepth/1+/3).
+            if (!callSiteDone.insert(h.name).second) continue;
             // calls trong body main
             appendCallArgs(body, 0, 0, h.name, gs);
             // calls trong helpers khác (kể cả chính nó — đệ quy truyền tiếp)
@@ -4000,8 +4022,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         }
         // Parse lại spans sau bước 5 rồi rewrite calls trong helpersOnly.
         {
+            std::set<std::string> callSiteDone2;
             // dựng lại danh sách body spans bằng cách tìm lại từng helper
             for (auto& h : helpers) {
+                if (!callSiteDone2.insert(h.name).second) continue;
                 auto& gs = req[h.name];
                 if (gs.empty()) continue;
                 // tìm definition hiện tại của h trong helpersOnly
@@ -4258,7 +4282,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         } else if (legacyFrag) {
             // end_portal compat: gl_FragColor / gl_FragData[0] → out duy nhất
             mpVary.emplace_back("gl_FragColor", "tglmt_fragColor");
-        } else {
+        } else if (!outs.empty()) {
             // out color: tên biến out → tglmt_fragColor (return ở cuối)
             mpVary.emplace_back(outs[0].name, "tglmt_fragColor");
         }
@@ -5199,7 +5223,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         msl_out << "struct TGLMT_FOut {\n";
         if (isMRT) {
             for (auto& o : outs) msl_out << "  " << o.mslType << " mrt" << o.location << " [[color(" << o.location << ")]];\n";
-        } else {
+        } else if (!outs.empty()) {
             msl_out << "  " << fragT << " c [[color(0)]];\n";
         }
         if (useFragDepth) msl_out << "  float depth [[depth(any)]];\n";
@@ -5216,10 +5240,23 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (useSamplePos) msl_out << ",\n    float2 tglmt_samplePosition [[sample_position]]";
         msl_out << texParams << ") {\n  TGLMT_FOut _out = {};\n";
         // Single-out: body vẫn ghi vào tglmt_fragColor → ghi vào _out.c ở cuối.
-        if (!isMRT) msl_out << "  " << fragT << " tglmt_fragColor = " << MSLZero(fragT) << ";\n";
+        if (!isMRT && !outs.empty()) msl_out << "  " << fragT << " tglmt_fragColor = " << MSLZero(fragT) << ";\n";
         msl_out << body << "\n";
-        if (!isMRT) msl_out << "  _out.c = tglmt_fragColor;\n";
+        if (!isMRT && !outs.empty()) msl_out << "  _out.c = tglmt_fragColor;\n";
         msl_out << "  return _out;\n}\n";
+    } else if (outs.empty() && !legacyFrag) {
+        // Fragment không có color output (chỉ discard) → `fragment void` hợp lệ
+        // trong MSL; pipeline backend bỏ qua color attachment ghi.
+        msl_out << "fragment void TGLMT_fs(TGLMT_FIn _in [[stage_in]],\n"
+                   "    constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
+        msl_out << blockParams;
+        if (R.usesPointCoord) msl_out << ",\n    float2 tglmt_pointCoord [[point_coord]]";
+        if (R.usesFragCoord) msl_out << ",\n    float4 tglmt_fragCoord [[position]]";
+        if (R.usesFrontFacing) msl_out << ",\n    bool tglmt_frontFacing [[front_facing]]";
+        if (useStencilRef) msl_out << ",\n    uint tglmt_stencilRef [[stencil_ref]]";
+        if (useSampleID) msl_out << ",\n    uint tglmt_sampleID [[sample_id]]";
+        if (useSamplePos) msl_out << ",\n    float2 tglmt_samplePosition [[sample_position]]";
+        msl_out << texParams << ") {\n" << body << "\n}\n";
     } else {
         std::string fragT = (!legacyFrag && !outs.empty()) ? outs[0].mslType : "float4";
         std::string fragZero = MSLZero(fragT);
