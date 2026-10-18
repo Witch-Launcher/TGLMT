@@ -56,6 +56,15 @@ def iris_standard_defines(repo_root=None):
         "COLOR_SPACE_sRGB_LINEAR": "1",
         "COLOR_SPACE_ACES": "2",
     }
+    # StandardMacros.getRenderStages() — ordinal của WorldRenderingPhase (Iris 26.1).
+    for i, name in enumerate([
+        "NONE", "SKY", "SUNSET", "CUSTOM_SKY", "SUN", "MOON", "STARS", "VOID",
+        "TERRAIN_SOLID", "TERRAIN_CUTOUT_MIPPED", "TERRAIN_CUTOUT", "ENTITIES",
+        "BLOCK_ENTITIES", "DESTROY", "OUTLINE", "DEBUG", "HAND_SOLID",
+        "TERRAIN_TRANSLUCENT", "TRIPWIRE", "PARTICLES", "CLOUDS", "RAIN_SNOW",
+        "WORLD_BORDER", "HAND_TRANSLUCENT",
+    ]):
+        d["MC_RENDER_STAGE_" + name] = str(i)
     for i, name in enumerate(["UNKNOWN", "LEAVES", "STONE", "WOOD", "METAL",
                               "DIRT", "LAVA", "DEEPSLATE", "SNOW", "SAND",
                               "TERRACOTTA", "NETHER_STONE", "WATER", "GRASS",
@@ -93,6 +102,7 @@ class Preprocessor:
             self.macros[k] = Macro(None, v if v is not None else "1")
         self.out = []
         self.depth = 0
+        self.in_block_comment = False
 
     # ---------- include ----------
     def read_include(self, ref, curdir):
@@ -176,11 +186,13 @@ class Preprocessor:
         return s
 
     def eval_cond(self, expr):
-        e = self.expand(expr)
+        # `defined` phải xử lý TRƯỚC khi expand: macro body rỗng ("#define OVERWORLD")
+        # nếu expand trước sẽ biến "defined OVERWORLD" thành "defined " → sai.
         e = re.sub(r"defined\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)",
-                   lambda m: "1" if m.group(1) in self.macros else "0", e)
+                   lambda m: "1" if m.group(1) in self.macros else "0", expr)
         e = re.sub(r"defined\s+([A-Za-z_][A-Za-z0-9_]*)",
                    lambda m: "1" if m.group(1) in self.macros else "0", e)
+        e = self.expand(e)
         # jcpp: identifier còn lại (không macro) = 0
         e = IDENT.sub(lambda m: m.group(0) if m.group(0) in ("and", "or", "not") else "0", e)
         e = e.replace("&&", " and ").replace("||", " or ")
@@ -195,15 +207,60 @@ class Preprocessor:
             return False
 
     # ---------- process ----------
+    def expand_code_line(self, line):
+        """Expand macro trong dòng CODE (jcpp làm vậy), giữ comment nguyên
+        (macro không nở trong comment). Block comment trạng thái qua dòng."""
+        out = []
+        i, n = 0, len(line)
+        while i < n:
+            if self.in_block_comment:
+                j = line.find("*/", i)
+                if j < 0:
+                    out.append(line[i:])
+                    break
+                out.append(line[i:j + 2])
+                self.in_block_comment = False
+                i = j + 2
+                continue
+            j = line.find("/*", i)
+            k = line.find("//", i)
+            if j < 0 and k < 0:
+                out.append(self.expand(line[i:]))
+                break
+            if k >= 0 and (j < 0 or k < j):
+                out.append(self.expand(line[i:k]))
+                out.append(line[k:])
+                break
+            out.append(self.expand(line[i:j]))
+            self.in_block_comment = True
+            i = j
+        return "".join(out)
+
+    @staticmethod
+    def join_continuations(lines):
+        out = []
+        buf = None
+        for ln in lines:
+            if buf is not None:
+                ln = buf + ln
+                buf = None
+            if ln.rstrip().endswith("\\"):
+                buf = ln.rstrip()[:-1]
+                continue
+            out.append(ln)
+        if buf is not None:
+            out.append(buf)
+        return out
+
     def process_text(self, text, curdir):
-        lines = text.splitlines()
+        lines = self.join_continuations(text.splitlines())
         stack = []  # (active_outer, any_taken, active_now, parent_active)
         active = True
         for line in lines:
             stripped = line.lstrip()
             if not stripped.startswith("#"):
                 if active:
-                    self.out.append(line)
+                    self.out.append(self.expand_code_line(line))
                 continue
             d = stripped[1:].strip()
             if not d:
@@ -329,12 +386,97 @@ def list_programs(pack):
     return sorted(progs)
 
 
-def patch_iris(text, stage):
+def _rewrite_call_args(text, name, wrap):
+    """`name(args)` → `wrap(args)` với ngoặc cân bằng (giữ arg nguyên)."""
+    out = []
+    i = 0
+    n = len(name)
+    while True:
+        p = text.find(name, i)
+        if p < 0:
+            out.append(text[i:])
+            break
+        lb = p > 0 and (text[p - 1].isalnum() or text[p - 1] == "_")
+        e = p + n
+        rb = e < len(text) and (text[e].isalnum() or text[e] == "_")
+        if lb or rb:
+            out.append(text[i:e])
+            i = e
+            continue
+        q = e
+        while q < len(text) and text[q] in " \t\n\r":
+            q += 1
+        if q >= len(text) or text[q] != "(":
+            out.append(text[i:e])
+            i = e
+            continue
+        d = 0
+        k = q
+        while k < len(text):
+            if text[k] == "(":
+                d += 1
+            elif text[k] == ")":
+                d -= 1
+                if d == 0:
+                    break
+            k += 1
+        if k >= len(text):
+            out.append(text[i:])
+            break
+        args = text[q + 1:k]
+        out.append(text[i:p])
+        out.append(wrap(args))
+        i = k + 1
+    return "".join(out)
+
+
+IRIS_FOG_COMPOSITE = """
+uniform float iris_FogDensity;
+uniform float iris_FogStart;
+uniform float iris_FogEnd;
+uniform vec4 iris_FogColor;
+struct iris_FogParameters { vec4 color; float density; float start; float end; float scale; };
+iris_FogParameters irisInt_Fog = iris_FogParameters(iris_FogColor, iris_FogDensity, iris_FogStart, iris_FogEnd, 1.0 / (iris_FogEnd - iris_FogStart));
+"""
+
+IRIS_FOG_VANILLA = """
+layout(std140) uniform iris_Fog {
+    vec4 FogColor;
+    float FogEnvironmentalStart;
+    float FogEnvironmentalEnd;
+    float FogRenderDistanceStart;
+    float FogRenderDistanceEnd;
+    float FogSkyEnd;
+    float FogCloudsEnd;
+} iris_fogP;
+struct iris_FogParameters { vec4 color; float density; float start; float end; float scale; };
+iris_FogParameters irisInt_Fog = iris_FogParameters(iris_fogP.FogColor, 0.0, iris_fogP.FogEnvironmentalStart, iris_fogP.FogEnvironmentalEnd, 1.0 / (iris_fogP.FogEnvironmentalEnd - iris_fogP.FogEnvironmentalStart));
+"""
+
+IRIS_UBO_DYNAMIC_TRANSFORMS = """
+layout(std140) uniform iris_DynamicTransforms {
+    mat4 ModelViewMat;
+    vec4 ColorModulator;
+    vec3 ModelOffset;
+    mat4 TextureMat;
+} iris_transforms;
+"""
+
+IRIS_UBO_PROJECTION = """
+layout(std140) uniform iris_Projection {
+    mat4 iris_ProjMat;
+};
+"""
+
+
+def patch_iris(text, stage, kind="composite"):
     """Mô phỏng các patch AST mà Iris áp trước khi compile (mức đủ cho converter).
 
     - gl_FragColor → gl_FragData[0]; gl_FragData[N] → out vec4 iris_FragDataN
       (CommonTransformer).
-    - Hàm legacy texture2D/textureCube → texture (CompatibilityTransformer).
+    - Hàm legacy texture2D/textureCube/... → texture (CompatibilityTransformer).
+    - shadow2D(x, y) → vec4(texture(x, y)) (CommonTransformer.renameAndWrapShadow).
+    - gl_Fog → irisInt_Fog + inject struct/global (CommonTransformer).
     """
     frag = stage == "fsh"
     if frag:
@@ -357,9 +499,211 @@ def patch_iris(text, stage):
     else:
         text = re.sub(r"\bvarying\b", "in", text)
     text = re.sub(r"\btexture2D\b", "texture", text)
+    text = re.sub(r"\btexture3D\b", "texture", text)
     text = re.sub(r"\btextureCube\b", "texture", text)
     text = re.sub(r"\btexture2DLod\b", "textureLod", text)
+    text = re.sub(r"\btexture3DLod\b", "textureLod", text)
+    text = re.sub(r"\btexture2DProj\b", "textureProj", text)
+    text = re.sub(r"\btexture3DProj\b", "textureProj", text)
+    text = re.sub(r"\btexture2DGrad(?:ARB)?\b", "textureGrad", text)
+    text = re.sub(r"\btexture3DGrad(?:ARB)?\b", "textureGrad", text)
+    text = re.sub(r"\btexelFetch2D\b", "texelFetch", text)
+    text = re.sub(r"\btexelFetch3D\b", "texelFetch", text)
+    text = re.sub(r"\btextureSize2D\b", "textureSize", text)
+    # shadow2D(s, c) → vec4(texture(s, c)); shadow2DLod → vec4(textureLod(...)).
+    if "shadow2D" in text:
+        text = _rewrite_call_args(text, "shadow2DLod", lambda a: f"vec4(textureLod({a}))")
+        text = _rewrite_call_args(text, "shadow2D", lambda a: f"vec4(texture({a}))")
+    # CompositeTransformer (deferred/composite/final): screenquad không attribute
+    # GL cũ — thay hằng số. Thứ tự theo CompositeTransformer.java.
+    if kind == "composite":
+        prelude = ""
+        if stage == "vsh" and re.search(r"\bgl_MultiTexCoord0\b", text):
+            prelude += "in vec2 UV0;\n"
+        has_ftransform = stage == "vsh" and re.search(r"\bftransform\s*\(", text)
+        if has_ftransform or (stage == "vsh" and re.search(r"\bgl_Vertex\b", text)):
+            prelude += "in vec3 Position;\n"
+        if has_ftransform:
+            prelude += "vec4 ftransform() { return gl_ModelViewProjectionMatrix * gl_Vertex; }\n"
+        # Chèn prelude TRƯỚC khi replace để các regex phủ luôn thân ftransform
+        # (Iris inject def rồi mới thay gl_Vertex/MVP — cùng kết quả).
+        if prelude:
+            m = re.search(r"^[ \t]*#[ \t]*version[^\n]*\n", text, re.M)
+            if m:
+                text = text[:m.end()] + prelude + text[m.end():]
+            else:
+                text = prelude + text
+        text = re.sub(r"\bgl_TextureMatrix\s*\[\s*[0-7]\s*\]", "mat4(1.0)", text)
+        if stage == "vsh":
+            text = re.sub(r"\bgl_MultiTexCoord0\b", "vec4(UV0, 0.0, 1.0)", text)
+            text = re.sub(r"\bgl_MultiTexCoord[1-7]\b", "vec4(0.0, 0.0, 0.0, 1.0)", text)
+        text = re.sub(r"\bgl_Color\b", "vec4(1.0, 1.0, 1.0, 1.0)", text)
+        text = re.sub(r"\bgl_NormalMatrix\b", "mat3(1.0)", text)
+        if stage == "vsh":
+            text = re.sub(r"\bgl_Normal\b", "vec3(0.0, 0.0, 1.0)", text)
+            text = re.sub(r"\bgl_Vertex\b", "vec4(Position, 1.0)", text)
+            text = re.sub(r"\bgl_ModelViewProjectionMatrix\b",
+                          "(gl_ProjectionMatrix * gl_ModelViewMatrix)", text)
+        text = re.sub(r"\bgl_ModelViewMatrix\b", "mat4(1.0)", text)
+        text = re.sub(r"\bgl_ProjectionMatrix\b",
+                      "mat4(vec4(2.0, 0.0, 0.0, 0.0), vec4(0.0, 2.0, 0.0, 0.0), vec4(0.0), vec4(-1.0, -1.0, 0.0, 1.0))",
+                      text)
+    # VanillaTransformer (nhánh non-core — runtime thật của gbuffers/shadow với pack
+    # `#version 130`). LƯU Ý: khi Sodium có mặt, terrain/water/shadow runtime dùng
+    # SodiumTransformer (attribute sodium `_vert_*`) — harness vẫn mô phỏng bản VANILLA:
+    # thân pack giống nhau, khác plumbing attribute; đủ để bắt lỗi converter/MSL.
+    if kind == "vanilla":
+        prelude = "const float mc_chunkFade = -1.0;\n"  # VanillaTransformer.java:30
+        has_ftransform = stage == "vsh" and re.search(r"\bftransform\s*\(", text)
+        # ftransform/MVP được expand thành gl_ModelViewMatrix/gl_ProjectionMatrix
+        # ở dưới → tính trước như đã dùng (nếu không UBO/helper thiếu).
+        uses_mvp = bool(re.search(r"\bgl_ModelViewProjectionMatrix\b", text)) or has_ftransform
+        uses_mvm = bool(re.search(r"\bgl_ModelViewMatrix\b", text)) or uses_mvp
+        uses_proj = bool(re.search(r"\bgl_ProjectionMatrix\b", text)) or uses_mvp
+        if uses_mvm or re.search(r"\bgl_TextureMatrix\s*\[\s*0\s*\]|\bgl_Color\b", text):
+            prelude += IRIS_UBO_DYNAMIC_TRANSFORMS
+        if uses_proj:
+            prelude += IRIS_UBO_PROJECTION
+        # Helper phải đứng TRƯỚC ftransform/defs dùng nó (MSL cần khai báo trước).
+        if uses_mvm:
+            prelude += ("mat4 _iris_internal_translate(vec3 offset) {"
+                        "return mat4(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,"
+                        "0.0, 0.0, 1.0, 0.0, offset.x, offset.y, offset.z, 1.0); }\n")
+        if stage == "vsh":
+            if re.search(r"\bgl_Color\b", text):
+                prelude += "in vec4 iris_Color;\n"
+            if re.search(r"\bgl_MultiTexCoord0\b", text):
+                prelude += "in vec2 iris_UV0;\n"
+            if re.search(r"\bgl_MultiTexCoord[12]\b", text):
+                prelude += "in ivec2 iris_UV2;\n"
+            if re.search(r"\bgl_Normal\b", text):
+                prelude += "in vec3 iris_Normal;\n"
+            if re.search(r"\bgl_Vertex\b", text) or has_ftransform:
+                prelude += "in vec3 iris_Position;\n"
+            if has_ftransform:
+                prelude += "vec4 ftransform() { return gl_ModelViewProjectionMatrix * gl_Vertex; }\n"
+        if re.search(r"\bgl_NormalMatrix\b", text):
+            prelude += "uniform mat3 iris_NormalMat;\n"
+        if re.search(r"\bgl_TextureMatrix\s*\[\s*1\s*\]", text):
+            prelude += "uniform mat4 iris_LightmapTextureMatrix;\n"
+        if re.search(r"\bgl_ModelViewMatrixInverse\b", text):
+            prelude += "uniform mat4 iris_ModelViewMatInverse;\n"
+        if re.search(r"\bgl_ProjectionMatrixInverse\b", text):
+            prelude += "uniform mat4 iris_ProjMatInverse;\n"
+        if prelude:
+            m = re.search(r"^[ \t]*#[ \t]*version[^\n]*\n", text, re.M)
+            if m:
+                text = text[:m.end()] + prelude + text[m.end():]
+            else:
+                text = prelude + text
+        text = re.sub(r"\bgl_ModelViewMatrixInverse\b", "iris_ModelViewMatInverse", text)
+        text = re.sub(r"\bgl_ProjectionMatrixInverse\b", "iris_ProjMatInverse", text)
+        text = re.sub(r"\bgl_ModelViewProjectionMatrix\b",
+                      "(gl_ProjectionMatrix * gl_ModelViewMatrix)", text)
+        text = re.sub(r"\bgl_ModelViewMatrix\b",
+                      "(iris_transforms.ModelViewMat * _iris_internal_translate(iris_transforms.ModelOffset))",
+                      text)
+        text = re.sub(r"\bgl_ProjectionMatrix\b", "iris_ProjMat", text)
+        text = re.sub(r"\bgl_NormalMatrix\b", "iris_NormalMat", text)
+        text = re.sub(r"\bgl_TextureMatrix\s*\[\s*0\s*\]", "iris_transforms.TextureMat", text)
+        text = re.sub(r"\bgl_TextureMatrix\s*\[\s*1\s*\]", "iris_LightmapTextureMatrix", text)
+        if stage == "vsh":
+            text = re.sub(r"\bgl_Vertex\b", "vec4(iris_Position, 1.0)", text)
+            text = re.sub(r"\bgl_MultiTexCoord0\b", "vec4(iris_UV0, 0.0, 1.0)", text)
+            # Iris ghi `vec4(iris_UV2, 0.0, 1.0)` (ivec2) — GLSL ctor cho implicit
+            # int→float, MSL KHÔNG → cast tường minh (cùng kết quả).
+            text = re.sub(r"\bgl_MultiTexCoord[12]\b", "vec4(vec2(iris_UV2), 0.0, 1.0)", text)
+            text = re.sub(r"\bgl_MultiTexCoord[3-7]\b", "vec4(0.0, 0.0, 0.0, 1.0)", text)
+            if re.search(r"\bgl_Normal\b", text):
+                text = re.sub(r"\bgl_Normal\b", "iris_Normal", text)
+            if re.search(r"\bgl_Color\b", text):
+                text = re.sub(r"\bgl_Color\b",
+                              "(iris_Color * iris_transforms.ColorModulator)", text)
+        else:
+            text = re.sub(r"\bgl_Color\b", "iris_transforms.ColorModulator", text)
+    # VanillaCoreTransformer (isLines + VANILLA → Iris bump #version 330 core).
+    # TransformPatcher: LINES → core branch. Rename theo VanillaCoreTransformer.java.
+    if kind == "vanilla_core":
+        prelude = "const float mc_chunkFade = -1.0;\n"                 # :29
+        # addIfNotExists(...) — Iris inject cả 6 attr bất kể dùng hay không (:128-134)
+        if stage == "vsh":
+            prelude += ("in vec3 iris_Position;\nin vec3 iris_Normal;\nin vec2 iris_UV0;\n"
+                        "in vec2 iris_UV1;\nin vec2 iris_UV2;\nin vec4 iris_Color;\n")
+        for re_use, block in ((r"\bmodelViewMatrix\b|\bgl_ModelViewMatrix\b", IRIS_UBO_DYNAMIC_TRANSFORMS),
+                              (r"\bprojectionMatrix\b|\bgl_ProjectionMatrix\b", IRIS_UBO_PROJECTION)):
+            if re.search(re_use, text):
+                prelude += block
+        if re.search(r"\bnormalMatrix\b|\bgl_NormalMatrix\b", text):
+            prelude += "uniform mat3 iris_NormalMat;\n"
+        if re.search(r"\balphaTestRef\b", text):
+            prelude += "uniform float iris_currentAlphaTest;\n"      # :75 (CommonTransformer)
+        has_ftransform = stage == "vsh" and re.search(r"\bftransform\s*\(", text)
+        if has_ftransform:
+            prelude += ("vec4 iris_ftransform() { return iris_ProjMat * iris_transforms."
+                        "ModelViewMat * vec4(iris_Position, 1.0); }\n")
+        if prelude:
+            m = re.search(r"^[ \t]*#[ \t]*version[^\n]*\n", text, re.M)
+            if m:
+                text = text[:m.end()] + prelude + text[m.end():]
+            else:
+                text = prelude + text
+        if has_ftransform:
+            text = re.sub(r"\bftransform\b", "iris_ftransform", text)
+        text = re.sub(r"\bvaPosition\b", "iris_Position", text)          # :102
+        text = re.sub(r"\bvaColor\b", "(iris_Color * iris_transforms.ColorModulator)", text)
+        text = re.sub(r"\bvaNormal\b", "iris_Normal", text)              # :107
+        text = re.sub(r"\bvaUV0\b", "iris_UV0", text)                    # :109
+        text = re.sub(r"\bvaUV1\b", "iris_UV1", text)                    # :125
+        text = re.sub(r"\bvaUV2\b", "iris_UV2", text)                    # :114/:123
+        text = re.sub(r"\balphaTestRef\b", "iris_currentAlphaTest", text)  # :75
+        text = re.sub(r"\bmodelViewMatrix\b", "iris_transforms.ModelViewMat", text)  # :76
+        text = re.sub(r"\bgl_ModelViewMatrix\b", "iris_transforms.ModelViewMat", text)
+        text = re.sub(r"\bprojectionMatrix\b", "iris_ProjMat", text)     # :80
+        text = re.sub(r"\bgl_ProjectionMatrix\b", "iris_ProjMat", text)
+        text = re.sub(r"\btextureMatrix\b", "iris_transforms.TextureMat", text)  # :83
+        text = re.sub(r"\bgl_TextureMatrix\s*\[\s*0\s*\]",
+                      "iris_transforms.TextureMat", text)                # :85
+        _lm_mat = ("mat4(vec4(0.00390625, 0.0, 0.0, 0.0), vec4(0.0, 0.00390625, 0.0, 0.0), "
+                   "vec4(0.0, 0.0, 0.00390625, 0.0), vec4(0.03125, 0.03125, 0.03125, 1.0))")
+        text = re.sub(r"\bgl_TextureMatrix\s*\[\s*1\s*\]", _lm_mat, text)  # :86-89
+        text = re.sub(r"\bgl_TextureMatrix\s*\[\s*2\s*\]", _lm_mat, text)
+        text = re.sub(r"\bgl_ModelViewMatrixInverse\b", "iris_ModelViewMatInverse", text)
+        text = re.sub(r"\bgl_ProjectionMatrixInverse\b", "iris_ProjMatInverse", text)
+        text = re.sub(r"\bnormalMatrix\b", "iris_NormalMat", text)       # :92
+        text = re.sub(r"\bgl_NormalMatrix\b", "iris_NormalMat", text)
+        text = re.sub(r"\bchunkOffset\b", "iris_transforms.ModelOffset", text)  # :94
+        if stage == "vsh":
+            text = re.sub(r"\bgl_Vertex\b", "vec4(iris_Position, 1.0)", text)
+            text = re.sub(r"\bgl_Normal\b", "iris_Normal", text)
+            text = re.sub(r"\bgl_MultiTexCoord0\b", "vec4(iris_UV0, 0.0, 1.0)", text)
+            text = re.sub(r"\bgl_MultiTexCoord1\b", "vec4(vec2(iris_UV2), 0.0, 1.0)", text)
+            text = re.sub(r"\bgl_MultiTexCoord2\b", "vec4(vec2(iris_UV2), 0.0, 1.0)", text)
+            text = re.sub(r"\bgl_MultiTexCoord[3-7]\b", "vec4(0.0, 0.0, 0.0, 1.0)", text)
+            text = re.sub(r"\bgl_Color\b",
+                          "(iris_Color * iris_transforms.ColorModulator)", text)
+        else:
+            text = re.sub(r"\bgl_Color\b", "iris_transforms.ColorModulator", text)
+    # CommonTransformer fog: `gl_Fog` → `irisInt_Fog` + inject (chỉ khi dùng).
+    if re.search(r"\bgl_Fog\b", text):
+        text = re.sub(r"\bgl_Fog\b", "irisInt_Fog", text)
+        inj = IRIS_FOG_VANILLA if kind == "vanilla" else IRIS_FOG_COMPOSITE
+        m = re.search(r"^[ \t]*#[ \t]*version[^\n]*\n", text, re.M)
+        if m:
+            text = text[:m.end()] + inj + text[m.end():]
+        else:
+            text = inj + text
     return text
+
+
+def patch_kind(program):
+    """Program nào Iris compile qua VanillaParameters vs composite (Parameters)."""
+    program = program.rsplit("/", 1)[-1]  # bỏ prefix world dir (`world0/gbuffers_water`)
+    # isLines + VANILLA → TransformPatcher bump core (VanillaCoreTransformer).
+    if program.startswith("gbuffers_line"):
+        return "vanilla_core"
+    if program.startswith(("gbuffers", "shadow", "clrwl", "dh_")):
+        return "vanilla"
+    return "composite"
 
 
 def preprocess(pack, program, stage, defines, iris_patch=True):
@@ -382,7 +726,7 @@ def preprocess(pack, program, stage, defines, iris_patch=True):
     with open(path, encoding="utf-8", errors="replace") as f:
         src = p.process_text(f.read(), os.path.dirname(path))
     if iris_patch:
-        src = patch_iris(src, stage)
+        src = patch_iris(src, stage, patch_kind(program))
     return src, path
 
 
