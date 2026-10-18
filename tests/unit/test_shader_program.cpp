@@ -8,7 +8,7 @@ int main() {
     tglmt::Context::MakeCurrent(&ctx);
     using namespace tglmt::gl;
     const char* vs = "#version 460 core\nvoid main(){ gl_Position = vec4(0.0); }";
-    const char* fs = "#version 460 core\nout vec4 c;\nvoid main(){ c = vec4(1.0,0.0,0.0,1.0); }";
+    const char* fs = "#version 460 core\nout vec4 c;\nuniform vec4 uColor;\nvoid main(){ c = uColor; }";
     tglmt::GLuint v = glCreateShader(0x8B31), f = glCreateShader(0x8B30);
     glShaderSource(v, 1, &vs, nullptr);
     glShaderSource(f, 1, &fs, nullptr);

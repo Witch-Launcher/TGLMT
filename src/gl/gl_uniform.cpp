@@ -2,6 +2,7 @@
 // Metal không có glUniform: TGLMT giữ shadow CPU + upload vào MTLBuffer khi draw.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <type_traits>
@@ -38,20 +39,57 @@ static void TrackSamplerUnit(ProgramObject& pr, GLint loc, GLint unit) {
 }
 
 namespace tglmt::gl {
+// Tên có tồn tại trong reflection của program? (link đã điền đầy đủ các list).
+// Gồm: sampler vs/fs/compute, uniform thường (uniformLayout), image, atomic
+// counter — tất cả đều nhận location hợp lệ trong GL.
+static bool ProgramHasUniformName(const ProgramObject& pr, const std::string& nm) {
+    auto isIn = [&](const std::vector<std::string>& lst) {
+        for (auto& s : lst) if (s == nm) return true;
+        return false;
+    };
+    if (isIn(pr.vsSamplers) || isIn(pr.fsSamplers) || isIn(pr.computeSamplers)) return true;
+    for (auto& e : pr.uniformLayout) if (e.name == nm) return true;
+    auto inImg = [&](const std::vector<ProgramObject::ImageSlot>& v) {
+        for (auto& im : v) if (im.name == nm) return true;
+        return false;
+    };
+    if (inImg(pr.vsImages) || inImg(pr.fsImages) || inImg(pr.computeImages)) return true;
+    auto inAtom = [&](const std::vector<ProgramObject::AtomicSlot>& v) {
+        for (auto& a : v) if (a.name == nm) return true;
+        return false;
+    };
+    if (inAtom(pr.vsAtomics) || inAtom(pr.fsAtomics) || inAtom(pr.computeAtomics)) return true;
+    return false;
+}
 GLint glGetUniformLocation(GLuint p, const GLchar* n) {
     Context& c = Context::Current();
     auto it = c.programs.find(p);
     if (it == c.programs.end()) { c.errors.Record(0x0502); return -1; }
+    auto& pr = it->second;
     std::string nm = n ? n : "";
-    auto f = it->second.uniformLoc.find(nm);
-    if (f != it->second.uniformLoc.end()) return f->second;
-    // Uniform không tồn tại trong program đã link → -1 (đúng GL). Chưa link → cho
-    // loc tạm (GL cho query trước link? spec: GetUniformLocation trước link trả -1;
-    // TGLMT nới lỏng có chủ đích để app cache loc sớm — ghi rõ, loc vẫn đúng sau link
-    // vì entry tra theo tên).
-    GLint loc = (GLint)it->second.uniformLoc.size();
-    it->second.uniformLoc[nm] = loc;
-    for (auto& e : it->second.uniformLayout)
+    // GL cho query "foo" hoặc "foo[0]" (phần tử mảng) — strip hậu tố "[số]"
+    // (converter lưu tên mảng đã strip → tra theo base name).
+    if (!nm.empty() && nm.back() == ']') {
+        size_t lb = nm.rfind('[');
+        if (lb != std::string::npos && lb + 1 < nm.size()) {
+            bool digits = true;
+            for (size_t i = lb + 1; i + 1 < nm.size(); ++i)
+                if (!isdigit((unsigned char)nm[i])) { digits = false; break; }
+            if (digits) nm = nm.substr(0, lb);
+        }
+    }
+    // Program ĐÃ link + reflection đầy đủ → trung thực theo GL: tên không có
+    // trong program (chưa khai báo, hoặc bị converter prune vì không dùng) → -1.
+    // Bắt buộc cho Iris: nó dùng location != -1 để đếm texture unit; nếu mọi
+    // tên đều trả loc thì composite hết unit khi tới dhDepthTex → pipeline fail.
+    // Chưa link (hoặc reflection chưa điền) → giữ nới lỏng có chủ đích để app
+    // cache loc sớm — loc vẫn đúng sau link vì tra theo tên.
+    if (pr.linked && pr.reflectionComplete && !ProgramHasUniformName(pr, nm)) return -1;
+    auto f = pr.uniformLoc.find(nm);
+    if (f != pr.uniformLoc.end()) return f->second;
+    GLint loc = (GLint)pr.uniformLoc.size();
+    pr.uniformLoc[nm] = loc;
+    for (auto& e : pr.uniformLayout)
         if (e.name == nm) {
             e.loc = loc;
             break;

@@ -93,6 +93,7 @@ void glLinkProgram(GLuint p) {
     if (itp == c.programs.end()) { c.errors.Record(0x0502); return; }
     auto& pr = itp->second;
     pr.linked = false; pr.infoLog.clear();
+    pr.reflectionComplete = false;
     pr.uniformLayout.clear();
     pr.attribLoc.clear(); pr.appleVS.reset(); pr.appleFS.reset();
     pr.appleCS.reset(); pr.appleCSPipeline.reset(); pr.computeMSL.clear();
@@ -194,6 +195,7 @@ void glLinkProgram(GLuint p) {
             }
         }
         pr.linked = true;
+        pr.reflectionComplete = true;
         return;
     }
     if (!hasV) { pr.infoLog = "error: graphics program needs vertex shader"; return; }
@@ -208,6 +210,8 @@ void glLinkProgram(GLuint p) {
     if (vs && !fs) {
         // Vertex-only: hợp lệ trong GL khi không cần màu (rasterizer discard/XFB).
         // TGLMT M5b cần fragment fn → link OK nhưng AppleDraw trả về trace-only.
+        // reflectionComplete giữ false: reflection rỗng (không điền) nên
+        // glGetUniformLocation vẫn nới lỏng — không có draw thật để dùng loc.
         pr.linked = true;
         return;
     }
@@ -499,6 +503,7 @@ void glLinkProgram(GLuint p) {
                     vsC.blocks.size());
     }
     pr.linked = true;
+    pr.reflectionComplete = true;
     (void)hasF;
     // 5. Apple backend: biên dịch MTLLibrary ngay tại link (lỗi biên dịch → link fail thật).
     // Kèm excerpt MSL để log MC hiện đủ nguyên nhân từ xa (không cần DumpProgramMSL).

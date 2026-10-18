@@ -28,7 +28,7 @@ int main() {
     // --- TexCoordP1 (từng thiếu trong mapping) ---
     glTexCoordP1ui(0x8368, 0x3FF);
     // --- GetnUniform ---
-    const char* vs = "#version 460 core\nvoid main(){ gl_Position = vec4(0.0); }";
+    const char* vs = "#version 460 core\nuniform float u;\nvoid main(){ gl_Position = vec4(u); }";
     tglmt::GLuint s = glCreateShader(0x8B31);
     glShaderSource(s, 1, &vs, nullptr);
     glCompileShader(s);

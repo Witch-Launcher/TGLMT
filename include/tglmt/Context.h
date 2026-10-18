@@ -199,6 +199,10 @@ struct ProgramObject {
     GLuint id = 0;
     std::vector<GLuint> shaders;
     bool linked = false;
+    // true khi mọi list reflection (uniformLayout/vsSamplers/fsSamplers/
+    // computeSamplers/images/atomics) đã điền đầy đủ bởi link — điều kiện để
+    // glGetUniformLocation trả -1 trung thực cho tên không có trong program.
+    bool reflectionComplete = false;
     std::string infoLog;
     std::string vertexMSL, fragmentMSL, computeMSL;
     std::unordered_map<std::string, GLint> uniformLoc;   // name -> loc
