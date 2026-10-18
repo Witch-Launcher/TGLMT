@@ -16,6 +16,10 @@
 //  7. mix(x,y,lessThan(a,b)) → select (ExpandRelationalBuiltins chạy SAU
 //     PromoteBoolVecMix — phải chạy lại); min(1, v.z) int-lit → float(1)
 //     (MSL ambiguous); if (v == helper_vec(...)) → all() (HelperVecReturns).
+//  8. NormalizeSwizzles (stpq→xyzw) không được đụng FIELD ACCESS: attribute
+//     tên `p` (`vec4(p, 1)` → `_in.z` từng sai — test_shader_builtins basic_vs
+//     MSL-FAIL), field struct tên `st`; swizzle thật (.st trên vec member)
+//     vẫn phải đổi xyzw.
 // CPU-only: convert + assert MSL; metal -c probe nếu toolchain sẵn.
 #include "tglmt/GLSLConverter.h"
 #include <cstdio>
@@ -184,6 +188,30 @@ int main() {
             CHECK(Has(r.msl, "min(float(1), color.z)"), "int-lit min → float(1)");
             CHECK(Has(r.msl, "all(color == lift(color))"), "vec == helper-vec → all()");
             MetalCheck("selectmincmp", r.msl, "MSL select/min/vec-cmp biên dịch được (metal -c)");
+        }
+    }
+
+    // 8) Swizzle stpq→xyzw chỉ áp cho swizzle thật — field access giữ nguyên.
+    {
+        const char* s = "#version 460 core\n"
+                        "struct S { vec2 st; };\n"
+                        "uniform vec2 camPos;\n"
+                        "layout(location = 0) in vec3 p;\n"
+                        "void main() {\n"
+                        "    S sv = S(camPos.st);\n"
+                        "    vec2 uv = sv.st;\n"
+                        "    gl_Position = vec4(p, 1) + vec4(uv.st, 0.0, 0.0);\n"
+                        "}\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B31);
+        CHECK(r.ok, "swizzle/field convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(Has(r.msl, "float4(_in.p, 1)"), "attribute `p` giữ nguyên (không thành swizzle)");
+            CHECK(!Has(r.msl, "_in.z") && !Has(r.msl, "_in.xy"), "attribute p không bị NormalizeSwizzles");
+            CHECK(Has(r.msl, "sv.st"), "field struct tên `st` giữ nguyên");
+            CHECK(Has(r.msl, "camPos.xy"), "swizzle .st trên uniform member → xy");
+            CHECK(Has(r.msl, "uv.xy"), "swizzle .st trên local vec2 → xy");
+            MetalCheck("swizzlefield", r.msl, "MSL swizzle/field biên dịch được (metal -c)");
         }
     }
 

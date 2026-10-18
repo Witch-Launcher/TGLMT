@@ -629,10 +629,38 @@ static void PromoteVanillaIntMixing(std::string& text) {
 }
 // ============ Swizzle stpq → xyzw ====================================
 // GLSL có 3 bộ swizzle rời nhau (xyzw / rgba / stpq); MSL chỉ nhận xyzw/rgba.
-// Heuristic per-pack: `.` + 1..4 ký tự [stpq] sau identifier/')'/']' và kết thúc
-// bằng non-word → đổi sang xyzw. (Field struct tên `st` sẽ bị đổi; pack đã kiểm
-// không có trường hợp đó — GLSL compiler thật cũng ưu tiên swizzle khi cả hai khả năng.)
-static void NormalizeSwizzles(std::string& text) {
+// Heuristic: `.` + 1..4 ký tự [stpq] sau identifier/')'/']' và kết thúc
+// bằng non-word → đổi sang xyzw. Phân biệt swizzle vs FIELD ACCESS: identifier
+// ngay trước dấu chấm là struct instance (`_in`, `_out`, `tglmt_u`, `ubo_*`,
+// `ssbo_*`, biến local/param kiểu struct) → là truy cập field, GIỮ NGUYÊN
+// (field tên `p`/`st` phải giữ — regression basic_vs `vec4(p, 1)`).
+// Swizzle thật trên member vector (`_in.texCoord.st`, `tglmt_u.camPos.q`) vẫn
+// đổi vì identifier trước chấm là tên member, không phải struct instance.
+static void CollectStructVarsInText(const std::string& text,
+                                    const std::vector<std::string>& structNames,
+                                    std::set<std::string>& roots) {
+    for (auto& sn : structNames) {
+        size_t p = 0;
+        while ((p = text.find(sn, p)) != std::string::npos) {
+            size_t e = p + sn.size();
+            bool l = p > 0 && IsIdentChar(text[p - 1], false);
+            bool r = e < text.size() && IsIdentChar(text[e], false);
+            if (l || r) { p = e; continue; }
+            // khai báo `StructName [&] var` (cho phép whitespace, một `&`).
+            size_t q = e;
+            while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+            if (q < text.size() && text[q] == '&') {
+                ++q;
+                while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+            }
+            size_t vs = q;
+            while (q < text.size() && IsIdentChar(text[q], false)) ++q;
+            if (q > vs) roots.insert(text.substr(vs, q - vs));
+            p = e;
+        }
+    }
+}
+static void NormalizeSwizzles(std::string& text, const std::set<std::string>& structRoots) {
     static const char* kFrom = "stpq";
     static const char* kTo = "xyzw";
     std::string out;
@@ -643,6 +671,12 @@ static void NormalizeSwizzles(std::string& text) {
         bool baseOk = prev == '_' || prev == ')' || prev == ']' ||
                       (std::isalpha((unsigned char)prev) != 0);
         if (!baseOk) { out += text[i]; continue; }
+        if (std::isalpha((unsigned char)prev) || prev == '_') {
+            // identifier ngay trước chấm → struct instance? giữ nguyên field.
+            size_t ls = i - 1;
+            while (ls > 0 && IsIdentChar(text[ls - 1], false)) --ls;
+            if (structRoots.count(text.substr(ls, i - ls))) { out += text[i]; continue; }
+        }
         size_t j = i + 1;
         while (j < text.size() && strchr(kFrom, text[j]) && j - i <= 4) ++j;
         size_t len = j - i - 1;
@@ -6221,7 +6255,13 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         ExpandMat4FromMat2(body);
         ExpandMat3FromMat4(body, mat4Names);
         ExpandStructCtors(body, structNames);
-        NormalizeSwizzles(body);
+        {
+            // Struct instance trong MSL: `_in`/`_out`/`tglmt_u` + UBO/SSBO + local struct.
+            std::set<std::string> swRoots = {"_in", "_out", "tglmt_u"};
+            for (auto& b : blocks) swRoots.insert((b.isStorage ? "ssbo_" : "ubo_") + b.name);
+            CollectStructVarsInText(body, structNames, swRoots);
+            NormalizeSwizzles(body, swRoots);
+        }
         ExpandRelationalBuiltins(body);
         // mix(x,y,lessThan(a,b)) → 3rd arg `(a < b)` chỉ có SAU relational expand.
         PromoteBoolVecMix(body);
@@ -6316,7 +6356,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         ExpandMat4FromMat2(helpersMSL);
         ExpandMat3FromMat4(helpersMSL, mat4Names);
         ExpandStructCtors(helpersMSL, structNames);
-        NormalizeSwizzles(helpersMSL);
+        {
+            std::set<std::string> swRoots = {"_in", "_out", "tglmt_u"};
+            for (auto& b : blocks) swRoots.insert((b.isStorage ? "ssbo_" : "ubo_") + b.name);
+            CollectStructVarsInText(helpersMSL, structNames, swRoots);
+            NormalizeSwizzles(helpersMSL, swRoots);
+        }
         ExpandRelationalBuiltins(helpersMSL);
         // mix(x,y,lessThan(a,b)) → 3rd arg `(a < b)` chỉ có SAU relational expand.
         PromoteBoolVecMix(helpersMSL);
