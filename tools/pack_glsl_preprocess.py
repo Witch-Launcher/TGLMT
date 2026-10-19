@@ -469,7 +469,7 @@ layout(std140) uniform iris_Projection {
 """
 
 
-def patch_iris(text, stage, kind="composite"):
+def patch_iris(text, stage, kind="composite", ie=False):
     """Mô phỏng các patch AST mà Iris áp trước khi compile (mức đủ cho converter).
 
     - gl_FragColor → gl_FragData[0]; gl_FragData[N] → out vec4 iris_FragDataN
@@ -477,6 +477,10 @@ def patch_iris(text, stage, kind="composite"):
     - Hàm legacy texture2D/textureCube/... → texture (CompatibilityTransformer).
     - shadow2D(x, y) → vec4(texture(x, y)) (CommonTransformer.renameAndWrapShadow).
     - gl_Fog → irisInt_Fog + inject struct/global (CommonTransformer).
+    - ie=True: nhánh `parameters.inputs.isIE()` (IE_COMPAT/IE_COMPAT_SHADOW —
+      Iris load mọi ShaderKey.values()): `gl_MultiTexCoord1` →
+      `vec4(iris_LightUV, 0.0, 1.0)` + `uniform ivec2 iris_LightUV;`
+      (VanillaTransformer.java:92-96) thay vì attribute `iris_UV2`.
     """
     frag = stage == "fsh"
     if frag:
@@ -575,7 +579,8 @@ def patch_iris(text, stage, kind="composite"):
             if re.search(r"\bgl_MultiTexCoord0\b", text):
                 prelude += "in vec2 iris_UV0;\n"
             if re.search(r"\bgl_MultiTexCoord[12]\b", text):
-                prelude += "in ivec2 iris_UV2;\n"
+                prelude += ("uniform ivec2 iris_LightUV;\n" if ie
+                            else "in ivec2 iris_UV2;\n")
             if re.search(r"\bgl_Normal\b", text):
                 prelude += "in vec3 iris_Normal;\n"
             if re.search(r"\bgl_Vertex\b", text) or has_ftransform:
@@ -615,7 +620,10 @@ def patch_iris(text, stage, kind="composite"):
             # `vec2(iris_UV2)` ở đây = workaround che lỗi converter → game thật
             # fail "no matching constructor" (TERRAIN_SOLID). Converter phải tự
             # bọc float2 — giữ nguyên dạng Iris để sweep bắt được hồi quy.
-            text = re.sub(r"\bgl_MultiTexCoord[12]\b", "vec4(iris_UV2, 0.0, 1.0)", text)
+            # Nhánh IE (:92-96): `vec4(iris_LightUV, 0.0, 1.0)` + uniform ivec2.
+            text = re.sub(r"\bgl_MultiTexCoord[12]\b",
+                          "vec4(iris_LightUV, 0.0, 1.0)" if ie
+                          else "vec4(iris_UV2, 0.0, 1.0)", text)
             text = re.sub(r"\bgl_MultiTexCoord[3-7]\b", "vec4(0.0, 0.0, 0.0, 1.0)", text)
             if re.search(r"\bgl_Normal\b", text):
                 text = re.sub(r"\bgl_Normal\b", "iris_Normal", text)
@@ -709,11 +717,12 @@ def patch_kind(program):
     return "composite"
 
 
-def preprocess(pack, program, stage, defines, iris_patch=True):
+def preprocess(pack, program, stage, defines, iris_patch=True, ie=False):
     """Iris resolution: <program>.<stage> (vsh/fsh) rồi fallback <program>.glsl.
 
     Trả (source, path) đã resolve; hoặc (None, None) nếu pack không có.
     World folders: pack/world0 override (caller tự chọn root).
+    ie=True: biến thể IE_COMPAT (iris_LightUV) — xem patch_iris.
     """
     ext = {"vsh": "vsh", "fsh": "fsh", "gsh": "gsh", "tcs": "tcs", "tes": "tes", "csh": "csh"}[stage]
     cands = [os.path.join(pack, program + "." + ext),
@@ -729,7 +738,7 @@ def preprocess(pack, program, stage, defines, iris_patch=True):
     with open(path, encoding="utf-8", errors="replace") as f:
         src = p.process_text(f.read(), os.path.dirname(path))
     if iris_patch:
-        src = patch_iris(src, stage, patch_kind(program))
+        src = patch_iris(src, stage, patch_kind(program), ie=ie)
     return src, path
 
 

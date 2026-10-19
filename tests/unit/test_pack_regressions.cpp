@@ -247,6 +247,40 @@ int main() {
         }
     }
 
+    // 10) Ctor floatN với arg là UNIFORM/UBO-member int-family — dạng Iris
+    // IE_COMPAT: `uniform ivec2 iris_LightUV;` + `vec4(iris_LightUV, 0.0, 1.0)`
+    // (VanillaTransformer.java:92-96, nhánh parameters.inputs.isIE(); Iris load
+    // mọi ShaderKey.values() nên pack nào cũng compile). Lúc rule chạy text đã
+    // là `tglmt_u.iris_LightUV` / `ubo_<block>.<member>` → dim phải lấy từ
+    // uniforms/blocks (trước đây `tglmt_u.` bị bỏ qua → game fail "no matching
+    // constructor for 'float4'" @ IE_COMPAT/IE_COMPAT_SHADOW của CR).
+    {
+        const char* s = "#version 460 core\n"
+                        "layout(std140) uniform TestBlock { ivec2 blkUV; };\n"
+                        "uniform ivec2 iris_LightUV;\n"
+                        "uniform mat4 iris_LightmapTextureMatrix;\n"
+                        "layout(location = 0) in vec3 pos;\n"
+                        "out vec2 vLm;\n"
+                        "void main() {\n"
+                        "    vLm = (iris_LightmapTextureMatrix * vec4(iris_LightUV, 0.0, 1.0)).xy;\n"
+                        "    vLm += vec4(iris_LightUV.xy, 0.0, 1.0).xy;\n"
+                        "    vLm += vec4(blkUV, 0.0, 1.0).xy;\n"
+                        "    gl_Position = vec4(pos, 1.0);\n"
+                        "}\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B31);
+        CHECK(r.ok, "int uniform/UBO arg trong float-ctor convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(Has(r.msl, "float4(float2(tglmt_u.iris_LightUV), 0.0, 1.0)"),
+                  "uniform ivec2 → float4(float2(tglmt_u.iris_LightUV),…)");
+            CHECK(Has(r.msl, "float4(float2(tglmt_u.iris_LightUV.xy), 0.0, 1.0)"),
+                  "uniform ivec2 swizzle → float4(float2(tglmt_u.iris_LightUV.xy),…)");
+            CHECK(Has(r.msl, "float4(float2(ubo_TestBlock.blkUV), 0.0, 1.0)"),
+                  "UBO member ivec2 → float4(float2(ubo_TestBlock.blkUV),…)");
+            MetalCheck("uniformargctor", r.msl, "MSL uniform/UBO arg int trong ctor biên dịch được");
+        }
+    }
+
     // metal -c cho case 4 (toolchain trên máy này không đáng tin — chỉ chạy khi probe pass).
     if (MetalAvail()) {
         const char* s = "#version 130\n"

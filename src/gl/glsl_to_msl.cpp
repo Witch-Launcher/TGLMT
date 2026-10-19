@@ -929,6 +929,9 @@ static int IntFamArgDim(const std::string& arg, const std::map<std::string, int>
         auto it = intDim.find(n);
         return it == intDim.end() ? 0 : it->second;
     };
+    // Exact-match TRƯỚC khi tách dấu chấm: khóa có chấm (`tglmt_u.<uniform>`,
+    // `ubo_/ssbo_<block>.<member>` — IE_COMPAT `tglmt_u.iris_LightUV`).
+    if (int exact = look(t); exact) return exact;
     size_t dot = t.find('.');
     if (dot == std::string::npos) {
         bool bare = isalpha((unsigned char)t[0]) || t[0] == '_';
@@ -948,7 +951,29 @@ static int IntFamArgDim(const std::string& arg, const std::map<std::string, int>
             if (!strchr("xyzw", c)) return 0;
         return (int)sw2.size();
     }
-    if (base == "tglmt_u") return 0; // dim uniform chưa có ở đây — bỏ qua an toàn
+    if (base == "tglmt_u") { // `tglmt_u.NAME` / `tglmt_u.NAME.swizzle` (uniform)
+        size_t d2 = sw.find('.');
+        std::string nm = d2 == std::string::npos ? sw : sw.substr(0, d2);
+        std::string sw2 = d2 == std::string::npos ? "" : sw.substr(d2 + 1);
+        int bd = look("tglmt_u." + nm);
+        if (!bd) return 0;
+        if (sw2.empty()) return bd;
+        for (char c : sw2)
+            if (!strchr("xyzw", c)) return 0;
+        return (int)sw2.size();
+    }
+    if (base.compare(0, 4, "ubo_") == 0 || base.compare(0, 5, "ssbo_") == 0) {
+        // `ubo_<block>.<member>[.swizzle]` — member là segment đầu của `sw`.
+        size_t d2 = sw.find('.');
+        std::string nm = d2 == std::string::npos ? sw : sw.substr(0, d2);
+        std::string sw2 = d2 == std::string::npos ? "" : sw.substr(d2 + 1);
+        int bd = look(base + "." + nm);
+        if (!bd) return 0;
+        if (sw2.empty()) return bd;
+        for (char c : sw2)
+            if (!strchr("xyzw", c)) return 0;
+        return (int)sw2.size();
+    }
     int bd = look(base);
     if (!bd) return 0;
     if (sw.empty() || sw.size() > 4) return bd;
@@ -1020,28 +1045,45 @@ static void CoerceIntArgsInFloatCtorsImpl(std::string& text,
     text.swap(out);
 }
 
+// Dim int-family từ mslType: "int"/"uint" → 1, "intN"/"uintN" → N, còn lại 0.
+static int IntFamDimOfMslType(const std::string& mslType) {
+    int dim = 0;
+    if (mslType.compare(0, 4, "uint") == 0) dim = 1;
+    else if (mslType.compare(0, 3, "int") == 0) dim = 1;
+    if (!dim) return 0;
+    if (mslType.size() > 3 && mslType[3] >= '2' && mslType[3] <= '4')
+        dim = mslType[3] - '0';
+    return dim;
+}
+
 // Dim int-family của attribute/varying (body dùng tên TRẦN lúc rule chạy —
 // tiền tố `_in.` chỉ thêm sau — nên quét text không thấy, phải lấy từ mslType).
+// prefix: khóa lưu map — uniform `tglmt_u.<name>`; member `ubo_/ssbo_<block>.<name>`.
 static void AddMslIntFamDims(const std::vector<GLSLVar>& vars,
-                             std::map<std::string, int>& m) {
+                             std::map<std::string, int>& m,
+                             const std::string& prefix = "") {
     for (auto& v : vars) {
-        int dim = 0;
-        if (v.mslType.compare(0, 4, "uint") == 0) dim = 1;
-        else if (v.mslType.compare(0, 3, "int") == 0) dim = 1;
+        int dim = IntFamDimOfMslType(v.mslType);
         if (!dim) continue;
-        if (v.mslType.size() > 3 && v.mslType[3] >= '2' && v.mslType[3] <= '4')
-            dim = v.mslType[3] - '0';
-        if (!m.count(v.name)) m[v.name] = dim;
+        if (!m.count(prefix + v.name)) m[prefix + v.name] = dim;
     }
 }
 
-static void CoerceIntArgsInFloatCtors(std::string& text, const std::vector<GLSLVar>& vars) {
+static void CoerceIntArgsInFloatCtors(std::string& text, const std::vector<GLSLVar>& vars,
+                                      const std::vector<GLSLVar>& uniforms,
+                                      const std::vector<GLSLBlock>& blocks) {
     if (text.find("float2(") == std::string::npos &&
         text.find("float3(") == std::string::npos &&
         text.find("float4(") == std::string::npos)
         return;
     std::map<std::string, int> intDim = CollectIntFamNames(text);
     AddMslIntFamDims(vars, intDim);
+    // Loose uniform (Iris IE_COMPAT `uniform ivec2 iris_LightUV;` →
+    // `float4(tglmt_u.iris_LightUV, 0.0f, 1.0f)`).
+    AddMslIntFamDims(uniforms, intDim, "tglmt_u.");
+    // Member UBO/SSBO (text dùng `ubo_<block>.<member>`).
+    for (auto& b : blocks)
+        AddMslIntFamDims(b.members, intDim, (b.isStorage ? "ssbo_" : "ubo_") + b.name + ".");
     if (intDim.empty()) return;
     CoerceIntArgsInFloatCtorsImpl(text, intDim);
 }
@@ -6473,7 +6515,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         {
             std::vector<GLSLVar> iv = ins;
             iv.insert(iv.end(), outs.begin(), outs.end());
-            CoerceIntArgsInFloatCtors(body, iv);
+            CoerceIntArgsInFloatCtors(body, iv, uniforms, blocks);
         }
         {
             std::set<std::string> knownVec;
@@ -6581,7 +6623,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         {
             std::vector<GLSLVar> iv = ins;
             iv.insert(iv.end(), outs.begin(), outs.end());
-            CoerceIntArgsInFloatCtors(helpersMSL, iv);
+            CoerceIntArgsInFloatCtors(helpersMSL, iv, uniforms, blocks);
         }
         {
             std::set<std::string> knownVec;
