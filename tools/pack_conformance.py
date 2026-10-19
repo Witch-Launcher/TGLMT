@@ -89,6 +89,8 @@ def main():
     ap.add_argument("--with-dh", action="store_true", help="compile cả dh_* (Distant Horizons)")
     ap.add_argument("--no-ie", action="store_true",
                     help="bỏ biến thể IE_COMPAT (mặc định có: gbuffers_block + shadow)")
+    ap.add_argument("--no-newlines", action="store_true",
+                    help="bỏ biến thể SHADOW_LINES (mặc định có: shadow vsh)")
     ap.add_argument("--keep", default=None, help="thư mục lưu source đã preprocess")
     ap.add_argument("--no-metal", action="store_true", help="bỏ bước metal compile")
     args = ap.parse_args()
@@ -130,20 +132,25 @@ def main():
         if name.startswith("dh_") and not args.with_dh:
             results.append(("SKIP", fn, "dh: Distant Horizons không cài"))
             continue
-        # IE_COMPAT / IE_COMPAT_SHADOW: Iris load mọi ShaderKey.values() nên pack
-        # nào cũng compile thêm bản `uniform ivec2 iris_LightUV;` cho gbuffers_block
-        # (+ shadow entities) — VanillaTransformer.java:92-96. Từng lọt bug
-        # `float4(tglmt_u.iris_LightUV, 0.0f, 1.0f)` ra tới game vì harness không
-        # mô phỏng nhánh isIE.
-        variants = [False]
+        # Biến thể Iris sinh thêm cho cùng nguồn pack (harness phải mô phỏng nếu
+        # không bug lọt khỏi sweep tới tận game):
+        # - IE_COMPAT/IE_COMPAT_SHADOW: Iris load mọi ShaderKey.values() → pack nào
+        #   cũng compile bản `uniform ivec2 iris_LightUV;` cho gbuffers_block/shadow
+        #   (VanillaTransformer.java:92-96) — từng lọt bug float4(tglmt_u.iris_LightUV).
+        # - SHADOW_LINES: shadow.vsh với isNewLines → Iris rename main→irisMain +
+        #   iris_widen_lines dùng gl_Position trong HELPER (VanillaTransformer.java:
+        #   196-224) — từng lọt bug MSL "undeclared identifier 'gl_Position'".
+        variants = [("", {})]
         if not args.no_ie and ext == ".vsh" and name in ("gbuffers_block", "shadow"):
-            variants.append(True)
-        for ie in variants:
+            variants.append(("_ie", {"ie": True}))
+        if not args.no_newlines and ext == ".vsh" and name == "shadow":
+            variants.append(("_nl", {"newlines": True}))
+        for suffix, kw in variants:
             src, _ = preprocess(pack, f"{args.world}/{name}", stages[ext], defines,
-                                iris_patch=True, ie=ie)
+                                iris_patch=True, **kw)
             if src is None:
                 continue
-            tag = f"{name}{'_ie' if ie else ''}.{stages[ext]}"
+            tag = f"{name}{suffix}.{stages[ext]}"
             st, msg = compile_case(tag, src, tmpd, args.cli, metal)
             results.append((st, tag, msg))
             if st == "PASS":

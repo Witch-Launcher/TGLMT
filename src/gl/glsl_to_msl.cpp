@@ -3466,6 +3466,45 @@ static bool ThreadHelpersMSL(
     std::map<std::string, std::string> outTypes;
     if (isVertex)
         for (auto& o : outVars) outTypes[o.name] = o.mslType;
+    // VS SHADOW_LINES (Iris isNewLines — VanillaTransformer.java:196-224): Iris
+    // rename main → irisMain rồi sinh wrapper main + helper `iris_widen_lines`,
+    // cả hai đọc/ghi `gl_Position` TRỰC TIẾP trong HELPER. mpVary chỉ rewrite
+    // body → helper giữ `gl_Position` → MSL "undeclared identifier". Rewrite
+    // helper về tên out-var ảo `tglmt_position` để dùng nguyên cơ chế O:
+    // (thread float4& + argFor sinh `_out.tglmt_position`).
+    if (isVertex) {
+        bool found = false;
+        size_t p = 0;
+        while ((p = helpersMSL.find("gl_Position", p)) != std::string::npos) {
+            size_t e = p + 11;
+            bool l = p > 0 && IsIdentChar(helpersMSL[p - 1], false);
+            bool r = e < helpersMSL.size() && IsIdentChar(helpersMSL[e], false);
+            if (!l && !r) {
+                found = true;
+                break;
+            }
+            p = e;
+        }
+        if (found) {
+            std::string out;
+            out.reserve(helpersMSL.size());
+            size_t i = 0;
+            while (i < helpersMSL.size()) {
+                if (helpersMSL.compare(i, 11, "gl_Position") == 0 &&
+                    (i == 0 || !IsIdentChar(helpersMSL[i - 1], false)) &&
+                    (i + 11 >= helpersMSL.size() ||
+                     !IsIdentChar(helpersMSL[i + 11], false))) {
+                    out += "tglmt_position";
+                    i += 11;
+                    continue;
+                }
+                out += helpersMSL[i];
+                ++i;
+            }
+            helpersMSL.swap(out);
+            outTypes["tglmt_position"] = "float4";
+        }
+    }
     // Entry builtins đọc được trong helper (tglmt_fragCoord/...): thread như
     // attribute — param cùng tên, body truyền tên entry, helper truyền param.
     std::map<std::string, std::string> builtinTypes;

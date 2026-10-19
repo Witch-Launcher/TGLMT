@@ -281,6 +281,67 @@ int main() {
         }
     }
 
+    // 11) SHADOW_LINES: Iris isNewLines (VanillaTransformer.java:196-224) rename
+    // main → irisMain + sinh iris_widen_lines/wrapper main; helper ghi
+    // `gl_Position` TRỰC TIẾP (mpVary chỉ áp cho body) → MSL từng fail
+    // "use of undeclared identifier 'gl_Position'" (game, build 105.56ed8c3).
+    // Fix: rewrite gl_Position trong helper → `tglmt_position` + nhét vào
+    // outTypes để tái dùng cơ chế "O:" (thread float4& / _out.).
+    {
+        const char* s = "#version 330 compatibility\n"
+                        "layout(location = 0) in vec3 iris_Position;\n"
+                        "layout(location = 1) in vec3 iris_Normal;\n"
+                        "layout(location = 2) in float iris_LineWidth;\n"
+                        "layout(location = 3) in vec2 iris_UV2;\n"
+                        "layout(std140) uniform iris_Globals {\n"
+                        "    ivec3 CameraBlockPos; vec3 CameraOffset; vec2 ScreenSize;\n"
+                        "    float GlintAlpha; float GameTime; int MenuBlurRadius;\n"
+                        "} iris_globalInfo;\n"
+                        "uniform mat4 iris_ShadowMVP;\n"
+                        "out vec2 lmCoord;\n"
+                        "vec3 iris_vertex_offset = vec3(0.0);\n"
+                        "void irisMain() {\n"
+                        "    lmCoord = vec2(iris_UV2);\n"
+                        "    gl_Position = iris_ShadowMVP * vec4(iris_Position + iris_vertex_offset, 1.0);\n"
+                        "}\n"
+                        "void iris_widen_lines(vec4 linePosStart, vec4 linePosEnd) {\n"
+                        "    vec3 ndc1 = linePosStart.xyz / linePosStart.w;\n"
+                        "    vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;\n"
+                        "    vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * iris_globalInfo.ScreenSize);\n"
+                        "    vec2 lineOffset = vec2(-lineScreenDirection.y, lineScreenDirection.x) * iris_LineWidth / iris_globalInfo.ScreenSize;\n"
+                        "    if (lineOffset.x < 0.0) { lineOffset *= -1.0; }\n"
+                        "    if (gl_VertexID % 2 == 0) {\n"
+                        "        gl_Position = vec4((ndc1 + vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);\n"
+                        "    } else {\n"
+                        "        gl_Position = vec4((ndc1 - vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);\n"
+                        "    }\n"
+                        "}\n"
+                        "void main() {\n"
+                        "    iris_vertex_offset = iris_Normal;\n"
+                        "    irisMain();\n"
+                        "    vec4 linePosEnd = gl_Position;\n"
+                        "    gl_Position = vec4(0.0);\n"
+                        "    iris_vertex_offset = vec3(0.0);\n"
+                        "    irisMain();\n"
+                        "    vec4 linePosStart = gl_Position;\n"
+                        "    iris_widen_lines(linePosStart, linePosEnd);\n"
+                        "}\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B31);
+        CHECK(r.ok, "shadow-lines convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(!Has(r.msl, "gl_Position"), "không còn gl_Position trong MSL");
+            CHECK(Has(r.msl, "thread float4& tglmt_position"),
+                  "helper nhận thread float4& tglmt_position");
+            size_t p1 = r.msl.find("thread float4& tglmt_position");
+            CHECK(p1 != std::string::npos &&
+                      r.msl.find("thread float4& tglmt_position", p1 + 1) != std::string::npos,
+                  "cả irisMain lẫn iris_widen_lines đều nhận thread ref");
+            CHECK(Has(r.msl, "_out.tglmt_position"), "call site body truyền _out.tglmt_position");
+            MetalCheck("shadowlines", r.msl, "MSL gl_Position trong helper biên dịch được");
+        }
+    }
+
     // metal -c cho case 4 (toolchain trên máy này không đáng tin — chỉ chạy khi probe pass).
     if (MetalAvail()) {
         const char* s = "#version 130\n"

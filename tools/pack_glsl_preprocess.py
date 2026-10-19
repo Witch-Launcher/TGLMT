@@ -468,8 +468,19 @@ layout(std140) uniform iris_Projection {
 };
 """
 
+IRIS_UBO_GLOBALS = """
+layout(std140) uniform iris_Globals {
+    ivec3 CameraBlockPos;
+    vec3 CameraOffset;
+    vec2 ScreenSize;
+    float GlintAlpha;
+    float GameTime;
+    int MenuBlurRadius;
+} iris_globalInfo;
+"""
 
-def patch_iris(text, stage, kind="composite", ie=False):
+
+def patch_iris(text, stage, kind="composite", ie=False, newlines=False):
     """Mô phỏng các patch AST mà Iris áp trước khi compile (mức đủ cho converter).
 
     - gl_FragColor → gl_FragData[0]; gl_FragData[N] → out vec4 iris_FragDataN
@@ -481,6 +492,10 @@ def patch_iris(text, stage, kind="composite", ie=False):
       Iris load mọi ShaderKey.values()): `gl_MultiTexCoord1` →
       `vec4(iris_LightUV, 0.0, 1.0)` + `uniform ivec2 iris_LightUV;`
       (VanillaTransformer.java:92-96) thay vì attribute `iris_UV2`.
+    - newlines=True (SHADOW_LINES): VanillaTransformer.java:196-224 — rename
+      main → irisMain + inject `iris_vertex_offset`, `iris_widen_lines` và
+      wrapper main (gl_Vertex → `vec4(iris_Position + iris_vertex_offset, 1.0)`).
+      Helper Iris sinh ra dùng `gl_Position` TRỰC TIẾP (case thật trong game).
     """
     frag = stage == "fsh"
     if frag:
@@ -585,6 +600,17 @@ def patch_iris(text, stage, kind="composite", ie=False):
                 prelude += "in vec3 iris_Normal;\n"
             if re.search(r"\bgl_Vertex\b", text) or has_ftransform:
                 prelude += "in vec3 iris_Position;\n"
+            if newlines:
+                # VanillaTransformer.java:76-78 (mọi VS vanilla) + nhánh isNewLines
+                # (:200 — BEFORE_DECLARATIONS < BEFORE_FUNCTIONS của ftransform,
+                # giữ đúng thứ tự Iris). Wrapper dùng iris_Normal → chắc chắn có
+                # khai báo (format lines có Normal; pack không dùng gl_Normal thì
+                # ở trên chưa thêm).
+                prelude += "in float iris_LineWidth;\n"
+                if not re.search(r"\bgl_Normal\b", text):
+                    prelude += "in vec3 iris_Normal;\n"
+                prelude += "vec3 iris_vertex_offset = vec3(0.0);\n"
+                prelude += IRIS_UBO_GLOBALS
             if has_ftransform:
                 prelude += "vec4 ftransform() { return gl_ModelViewProjectionMatrix * gl_Vertex; }\n"
         if re.search(r"\bgl_NormalMatrix\b", text):
@@ -613,7 +639,11 @@ def patch_iris(text, stage, kind="composite", ie=False):
         text = re.sub(r"\bgl_TextureMatrix\s*\[\s*0\s*\]", "iris_transforms.TextureMat", text)
         text = re.sub(r"\bgl_TextureMatrix\s*\[\s*1\s*\]", "iris_LightmapTextureMatrix", text)
         if stage == "vsh":
-            text = re.sub(r"\bgl_Vertex\b", "vec4(iris_Position, 1.0)", text)
+            # isNewLines: `gl_Vertex → vec4(iris_Position + iris_vertex_offset, 1.0)`
+            # (VanillaTransformer.java:199).
+            text = re.sub(r"\bgl_Vertex\b",
+                          "vec4(iris_Position + iris_vertex_offset, 1.0)" if newlines
+                          else "vec4(iris_Position, 1.0)", text)
             text = re.sub(r"\bgl_MultiTexCoord0\b", "vec4(iris_UV0, 0.0, 1.0)", text)
             # ĐÚNG dạng Iris (VanillaTransformer.java:101): `vec4(iris_UV2, 0.0, 1.0)`
             # với `in ivec2 iris_UV2;` (implicit int→float của GLSL). Từng bị
@@ -632,6 +662,34 @@ def patch_iris(text, stage, kind="composite", ie=False):
                               "(iris_Color * iris_transforms.ColorModulator)", text)
         else:
             text = re.sub(r"\bgl_Color\b", "iris_transforms.ColorModulator", text)
+        if newlines and stage == "vsh":
+            # VanillaTransformer.java:196-224 (isNewLines) — rename main → irisMain
+            # + sinh iris_widen_lines/wrapper main (gl_Position dùng trong HELPER
+            # là case thật trong game: SHADOW_LINES "use of undeclared identifier
+            # 'gl_Position'"; harness cũ không mô phỏng nên lọt khỏi sweep).
+            text = re.sub(r"\bvoid\s+main\s*\(", "void irisMain(", text, count=1)
+            text += (
+                "\nvoid iris_widen_lines(vec4 linePosStart, vec4 linePosEnd) {"
+                "vec3 ndc1 = linePosStart.xyz / linePosStart.w;"
+                "vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;"
+                "vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * iris_globalInfo.ScreenSize);"
+                "vec2 lineOffset = vec2(-lineScreenDirection.y, lineScreenDirection.x) * iris_LineWidth"
+                " / iris_globalInfo.ScreenSize;"
+                "if (lineOffset.x < 0.0) { lineOffset *= -1.0; }"
+                "if (gl_VertexID % 2 == 0) {"
+                "gl_Position = vec4((ndc1 + vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);"
+                "} else {"
+                "gl_Position = vec4((ndc1 - vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);"
+                "}}\n"
+                "void main() {"
+                "iris_vertex_offset = iris_Normal;"
+                "irisMain();"
+                "vec4 linePosEnd = gl_Position;"
+                "gl_Position = vec4(0.0);"
+                "iris_vertex_offset = vec3(0.0);"
+                "irisMain();"
+                "vec4 linePosStart = gl_Position;"
+                "iris_widen_lines(linePosStart, linePosEnd);}\n")
     # VanillaCoreTransformer (isLines + VANILLA → Iris bump #version 330 core).
     # TransformPatcher: LINES → core branch. Rename theo VanillaCoreTransformer.java.
     if kind == "vanilla_core":
@@ -717,12 +775,13 @@ def patch_kind(program):
     return "composite"
 
 
-def preprocess(pack, program, stage, defines, iris_patch=True, ie=False):
+def preprocess(pack, program, stage, defines, iris_patch=True, ie=False, newlines=False):
     """Iris resolution: <program>.<stage> (vsh/fsh) rồi fallback <program>.glsl.
 
     Trả (source, path) đã resolve; hoặc (None, None) nếu pack không có.
     World folders: pack/world0 override (caller tự chọn root).
     ie=True: biến thể IE_COMPAT (iris_LightUV) — xem patch_iris.
+    newlines=True: biến thể SHADOW_LINES (irisMain/iris_widen_lines) — xem patch_iris.
     """
     ext = {"vsh": "vsh", "fsh": "fsh", "gsh": "gsh", "tcs": "tcs", "tes": "tes", "csh": "csh"}[stage]
     cands = [os.path.join(pack, program + "." + ext),
@@ -738,7 +797,7 @@ def preprocess(pack, program, stage, defines, iris_patch=True, ie=False):
     with open(path, encoding="utf-8", errors="replace") as f:
         src = p.process_text(f.read(), os.path.dirname(path))
     if iris_patch:
-        src = patch_iris(src, stage, patch_kind(program), ie=ie)
+        src = patch_iris(src, stage, patch_kind(program), ie=ie, newlines=newlines)
     return src, path
 
 
