@@ -50,7 +50,11 @@ struct SamplerDesc {
     // cho MỌI sampler không mipmap và set BASE/MAX_LEVEL=0 cho mọi texture —
     // bỏ qua thì Metal tự clamp 0..1000 (đọc ngoài atlas, mip sai).
     float lodMin = 0.0f;
-    float lodMax = 1000.0f;};
+    float lodMax = 1000.0f;
+    // GL_TEXTURE_COMPARE_MODE = COMPARE_REF_TO_TEXTURE (0x884E) → set
+    // MTL sampler compareFunction. Cần cho sampler2DShadow (shadowtex*): thiếu
+    // compare thì sample_compare sai/validation fail → mất bóng. 0 = tắt.
+    uint32_t compareFunc = 0;};
 struct ScissorRect {
     uint32_t x = 0;
     uint32_t y = 0;

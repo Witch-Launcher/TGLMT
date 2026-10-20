@@ -2089,6 +2089,11 @@ static char SamplerKindOf(const std::string& glslType) {
 // Kind sampler → MSL texture type (declaration của _tex param).
 static std::string SamplerTexType(char kind, const std::string& elem = "float") {
     switch (kind) {
+        // sampler2DShadow → depth2d + sample_compare: GL shadow sampler so sánh
+        // ref với depth trong hardware (GL_COMPARE_REF_TO_TEXTURE). Trước đây
+        // map texture2d<float> + .sample() làm MẤT compare → pack đọc raw depth
+        // (~0.99) thay vì 0/1 ⇒ MakeUp/CR không còn bóng.
+        case 'S': return "depth2d<float>";
         case 'C': return "texturecube<float>";
         case 'A': return "texture2d_array<float>";
         case 'I': return "texture2d<int>";
@@ -2664,9 +2669,14 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             } else if (sv.kind == '3' || sv.kind == 'x' || sv.kind == 'y') {
                 // P3: sampler3D → texture3d<float/int/uint>.
                 rep = sname + "_tex.sample(" + sname + "_smp, float3(" + args[1] + ")" + bias + ")";
+            } else if (sv.kind == 'S') {
+                // sampler2DShadow: uv = xy, ref = z; MSL so sánh trong hardware
+                // (sampler phải có compareFunction — SamplerForUnit set từ
+                // GL_TEXTURE_COMPARE_MODE).
+                rep = sname + "_tex.sample_compare(" + sname + "_smp, float2((" +
+                      args[1] + ").xy), (" + args[1] + ").z" + bias + ")";
             } else {
-                std::string uv = sv.kind == 'S' ? "float2((" + args[1] + ").xy)" : "float2(" + args[1] + ")";
-                rep = sname + "_tex.sample(" + sname + "_smp, " + uv + bias + ")";
+                rep = sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + ")" + bias + ")";
             }
             out += rep;
             i = k + 1;
@@ -2731,9 +2741,14 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             std::string sname = Trim(args[0]);
             SampEntry sv;
             if (!findSamp(sname, sv)) { err = "textureGrad sampler không khai báo: " + sname; return false; }
-            if (sv.kind != '2') { err = "textureGrad chỉ hỗ trợ sampler2D"; return false; }
-            out += sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + "), gradient2d(float2(" +
-                   args[2] + "), float2(" + args[3] + ")))";
+            if (sv.kind != '2' && sv.kind != 'S') { err = "textureGrad chỉ hỗ trợ sampler2D/Shadow"; return false; }
+            if (sv.kind == 'S')
+                out += sname + "_tex.sample_compare(" + sname + "_smp, float2((" + args[1] +
+                       ").xy), (" + args[1] + ").z, gradient2d(float2(" + args[2] +
+                       "), float2(" + args[3] + ")))";
+            else
+                out += sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + "), gradient2d(float2(" +
+                       args[2] + "), float2(" + args[3] + ")))";
             i = k + 1;
         }
         body = out;
@@ -2760,7 +2775,10 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
                 out += sname + "_tex.sample(" + sname + "_smp, float3(" + args[1] + "), float(" + args[2] + "))";
             else if (sv.kind == '2')
                 out += sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + "), float(" + args[2] + "))";
-            else { err = "textureLod chỉ hỗ trợ sampler2D/1D/3D"; return false; }
+            else if (sv.kind == 'S')
+                out += sname + "_tex.sample_compare(" + sname + "_smp, float2((" + args[1] +
+                       ").xy), (" + args[1] + ").z, level(float(" + args[2] + ")))";
+            else { err = "textureLod chỉ hỗ trợ sampler2D/2DShadow/1D/3D"; return false; }
             i = k + 1;
         }
         body = out;
@@ -2784,7 +2802,7 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             std::string sname = Trim(args[0]);
             SampEntry sv;
             if (!findSamp(sname, sv)) { err = "textureProj sampler không khai báo: " + sname; return false; }
-            if (sv.kind != '2') { err = "textureProj chỉ hỗ trợ sampler2D"; return false; }
+            if (sv.kind != '2' && sv.kind != 'S') { err = "textureProj chỉ hỗ trợ sampler2D/Shadow"; return false; }
             std::string coord = Trim(args[1]);
             std::string bias = args.size() == 3 ? ", float(" + args[2] + ")" : "";
             // vec4 → xy/w (GL spec; vanilla end_portal chỉ dùng vec4, w luôn != 0
@@ -2792,8 +2810,14 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             // vec3 → chia /z, vec4 → /w (GLSL textureProj). Phát hiện qua literal
             // `vec3(`/`vec4(`; biến không rõ → mặc định /w (vec4, đúng end_portal).
             bool isVec3 = coord.rfind("vec3(", 0) == 0;
-            out += sname + "_tex.sample(" + sname + "_smp, float2((" + coord + ").xy / (" +
-                   coord + ")." + (isVec3 ? "z" : "w") + ")" + bias + ")";
+            std::string div = isVec3 ? "z" : "w";
+            if (sv.kind == 'S')
+                out += sname + "_tex.sample_compare(" + sname + "_smp, float2((" + coord +
+                       ").xy / (" + coord + ")." + div + "), (" + coord + ").z / (" +
+                       coord + ")." + div + ")" + bias + ")";
+            else
+                out += sname + "_tex.sample(" + sname + "_smp, float2((" + coord + ").xy / (" +
+                       coord + ")." + div + ")" + bias + ")";
             i = k + 1;
         }
         body = out;
@@ -2905,9 +2929,16 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             if (sv.kind == 'B' || sv.kind == 'I' || sv.kind == 'U') { err = "textureOffset trên buffer: " + sname; return false; }
             std::string tn = sname + "_tex", sn = sname + "_smp";
             std::string uv = sv.kind == 'S' ? "float2((" + args[1] + ").xy)" : "float2(" + args[1] + ")";
-            // MSL: sample(s, coord, bias, offset) — bias đứng TRƯỚC offset.
-            std::string bias = args.size() == 4 ? ", bias(float(" + args[3] + "))" : "";
-            out += tn + ".sample(" + sn + ", " + uv + bias + ", int2(" + args[2] + "))";
+            if (sv.kind == 'S') {
+                // Shadow offset: compare + texel offset (bias đi kèm offset
+                // không có overload MSL → bỏ bias, hiếm và không đổi hành vi).
+                out += tn + ".sample_compare(" + sn + ", " + uv + ", (" + args[1] +
+                       ").z, int2(" + args[2] + "))";
+            } else {
+                // MSL: sample(s, coord, bias, offset) — bias đứng TRƯỚC offset.
+                std::string bias = args.size() == 4 ? ", bias(float(" + args[3] + "))" : "";
+                out += tn + ".sample(" + sn + ", " + uv + bias + ", int2(" + args[2] + "))";
+            }
             i = k + 1;
         }
         body = out;
@@ -2952,8 +2983,12 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             if (!findSamp(sname, sv)) { err = "textureLodOffset sampler không khai báo: " + sname; return false; }
             if (sv.kind != '2' && sv.kind != 'S') { err = "textureLodOffset chỉ hỗ trợ sampler2D/Shadow: " + sname; return false; }
             std::string tn = sname + "_tex", sn = sname + "_smp";
-            out += tn + ".sample(" + sn + ", float2(" + args[1] + "), level(float(" + args[2] +
-                   ")), int2(" + args[3] + "))";
+            if (sv.kind == 'S')
+                out += tn + ".sample_compare(" + sn + ", float2((" + args[1] + ").xy), (" +
+                       args[1] + ").z, level(float(" + args[2] + ")), int2(" + args[3] + "))";
+            else
+                out += tn + ".sample(" + sn + ", float2(" + args[1] + "), level(float(" + args[2] +
+                       ")), int2(" + args[3] + "))";
             i = k + 1;
         }
         body = out;
@@ -7102,7 +7137,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             texParams += ", texture2d<" + s.sampleType + "> " + s.name + "_tex [[texture(" + ks + ")]]";
             continue;
         }
-        std::string ttype = s.isCube ? "texturecube<float>"
+        std::string ttype = s.isShadow ? "depth2d<float>"
+                          : s.isCube ? "texturecube<float>"
                           : s.isArray ? "texture2d_array<float>"
                           : s.is1D ? "texture2d<" + s.sampleType + ">"        // P3: 1D ≈ 2D
                           : s.is3D ? "texture3d<" + s.sampleType + ">"        // P3: 3D thật

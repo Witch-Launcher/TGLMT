@@ -83,6 +83,17 @@ static std::shared_ptr<metal::ITexture> FallbackBlackTex(Context& c) {
     if (t) cache[c.device.get()] = t;
     return t;
 }
+// Depth 1x1 cho sampler2DShadow unbound: MSL param depth2d → Metal BẮT texture
+// depth; bind RGBA8 vào depth2d = validation fail/GPU fault. Nội dung Private
+// chưa init (coi như 0) — GL incomplete shadow tex cũng trả 0.
+static std::shared_ptr<metal::ITexture> FallbackShadowTex(Context& c) {
+    static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::ITexture>> cache;
+    auto it = cache.find(c.device.get());
+    if (it != cache.end() && it->second) return it->second;
+    auto t = c.device->newDepthTexture(1, 1, metal::PixelFormat::Depth32Float);
+    if (t) cache[c.device.get()] = t;
+    return t;
+}
 static std::shared_ptr<metal::ITexture> FallbackBlackCube(Context& c) {
     static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::ITexture>> cache;
     auto it = cache.find(c.device.get());
@@ -125,7 +136,8 @@ static std::shared_ptr<metal::IBuffer> VertexFillZeroBuf(Context& c) {
 // Sampler state cho 1 unit: SamplerObject đã bind, else dựng từ TextureObject.params
 // (glTexParameter), else default LINEAR/REPEAT. Cache theo khóa đơn giản.
 static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint unit,
-                                                             const TextureObject& tex) {
+                                                             const TextureObject& tex,
+                                                             bool shadowSampler = false) {
     // unordered_map (hash) + last-key hit: game bind lặp cùng texture/sampler
     // liên tục; std::map cây cũ tốn pointer-chase mỗi draw (samp ~3.6us).
     static thread_local std::unordered_map<uint64_t, std::shared_ptr<metal::ISamplerState>> cache;
@@ -134,6 +146,8 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
     GLuint sid = c.state.BoundSampler(unit);
     uint32_t minF = 0x2601, magF = 0x2601, sW = 0x2901, tW = 0x2901;
     float aniso = 1.0f, lodMin = 0.0f, lodMax = 1000.0f;
+    bool cmpOn = false;
+    uint32_t cmpFunc = 0x0203; // GL_LEQUAL mặc định của compare sampler
     auto fromParams = [&](const std::unordered_map<GLenum, GLint>& p) {
         auto g = [&](GLenum k, uint32_t d) {
             auto it = p.find(k);
@@ -141,6 +155,14 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
         };
         minF = g(0x2801, minF); magF = g(0x2800, magF);
         sW = g(0x2802, sW); tW = g(0x2803, tW);
+        // sampler2DShadow: GL_COMPARE_REF_TO_TEXTURE (0x884E) → Metal
+        // compareFunction. Thiếu → sample_compare sai (mất bóng shadowtex*).
+        // Chỉ bật compare khi MSL param là depth2d ('S'): cùng GL sampler/texture
+        // còn có thể được khai báo sampler2D (MakeUp final.fsh) → Metal sampler
+        // KHÔNG compare để .sample() vẫn trả raw depth như GL. 'S' LUÔN compare
+        // (MSL emit sample_compare; compare mode GL=NONE trên shadow là undefined).
+        if (shadowSampler) cmpOn = true;
+        cmpFunc = g(0x884D, cmpFunc);
     };
     // LOD clamp: GL_TEXTURE_MIN_LOD/MAX_LOD (sampler) + GL_TEXTURE_BASE_LEVEL/
     // MAX_LEVEL (texture). Minecraft set MAX_LOD=0 cho sampler không mipmap và
@@ -171,6 +193,7 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
             mix(ab);
         }
         { uint32_t lb; memcpy(&lb, &lodMax, 4); mix(lb); }
+        mix(shadowSampler ? 1u : 0u); mix(cmpOn ? 1u : 0u); mix(cmpFunc);
         key = h ^ ((uint64_t)sid * 0x9E3779B97F4A7C15ull); // sid + params
     } else {
         fromParams(tex.params);
@@ -184,13 +207,16 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
         key ^= ((uint64_t)(sW & 0xF) << 56) ^ ((uint64_t)(tW & 0xF) << 60);
         { uint32_t a1, a2; memcpy(&a1, &lodMin, 4); memcpy(&a2, &lodMax, 4);
           key ^= ((uint64_t)a1 << 8) ^ ((uint64_t)a2 << 20); }
+        if (shadowSampler) key ^= 0x5EED000000000000ull;
+        if (cmpOn) key ^= 0xC0FFEE0000000000ull ^ ((uint64_t)cmpFunc << 33);
     }
     // Texture 1 level + minfilter mipmap (logo/widgets/sprite/blur-src UI):
     // tắt lọc mip để A11 không fetch LOD>0 (fault SubmissionsIgnored/đen).
     // Sampler cache phải phân biệt (cùng texture, khác noMip).
     bool singleLevel = !tex.gpu || tex.gpu->levelCount() <= 1;
     bool mipMin = (minF == 0x2700 || minF == 0x2701 || minF == 0x2702 || minF == 0x2703);
-    bool noMip = singleLevel;
+    // Compare sampler: Metal buộc NotMipmapped; compareFunc đặt trong desc.
+    bool noMip = singleLevel || cmpOn;
     if (noMip) key ^= (uint64_t)1 << 62;
     if (noMip && mipMin) {
         ++c.appleStats.mipBase; // đếm để frame log chứng minh fix có chạy trên máy
@@ -213,6 +239,7 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
     d.minFilter = minF; d.magFilter = magF; d.sWrap = sW; d.tWrap = tW; d.maxAniso = aniso;
     d.noMip = noMip;
     d.lodMin = lodMin; d.lodMax = lodMax;
+    d.compareFunc = cmpOn ? cmpFunc : 0;
     auto s = c.device->makeSampler(d);
     if (s) {
         cache[key] = s;
@@ -1672,12 +1699,13 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         std::shared_ptr<metal::ISamplerState> ss;
         std::shared_ptr<metal::ITexture> swzKeep; // view swizzle sống qua set
         if (!gpu) {
-            gpu = (kind == 'C' ? FallbackBlackCube(c) : FallbackBlackTex(c)).get();
+            gpu = (kind == 'C' ? FallbackBlackCube(c)
+                  : kind == 'S' ? FallbackShadowTex(c) : FallbackBlackTex(c)).get();
             if (!gpu) continue; // backend nghẽn, bỏ qua trung thực
             static thread_local TextureObject dummyTex;
-            ss = SamplerForUnit(c, 0, dummyTex);
+            ss = SamplerForUnit(c, 0, dummyTex, kind == 'S');
         } else {
-            ss = SamplerForUnit(c, unit, *txp);
+            ss = SamplerForUnit(c, unit, *txp, kind == 'S');
             if (txp) { // EXT_texture_swizzle
                 auto* s = SwzOrBase(*txp, swzKeep);
                 if (s) gpu = s;
@@ -1849,12 +1877,13 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         std::shared_ptr<metal::ISamplerState> ss;
         std::shared_ptr<metal::ITexture> swzKeep; // view swizzle sống qua set
         if (!gpu) {
-            gpu = (kind == 'C' ? FallbackBlackCube(c) : FallbackBlackTex(c)).get();
+            gpu = (kind == 'C' ? FallbackBlackCube(c)
+                  : kind == 'S' ? FallbackShadowTex(c) : FallbackBlackTex(c)).get();
             if (!gpu) continue; // backend nghẽn, bỏ qua trung thực
             static thread_local TextureObject dummyTex;
-            ss = SamplerForUnit(c, 0, dummyTex);
+            ss = SamplerForUnit(c, 0, dummyTex, kind == 'S');
         } else {
-            ss = SamplerForUnit(c, unit, *txp);
+            ss = SamplerForUnit(c, unit, *txp, kind == 'S');
             if (txp) { // EXT_texture_swizzle
                 auto* s = SwzOrBase(*txp, swzKeep);
                 if (s) gpu = s;

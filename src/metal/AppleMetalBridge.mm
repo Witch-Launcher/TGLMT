@@ -1767,7 +1767,14 @@ public:
         d.tAddressMode = ToMTLWrap(sd.tWrap);
         // Mipmap linear khi đủ levels; texture 1 level thì tắt lọc mip để
         // A11 không fetch LOD>0 (fault/đen với minfilter mipmap).
-        d.mipFilter = sd.noMip ? MTLSamplerMipFilterNotMipmapped : MTLSamplerMipFilterLinear;
+        // Compare sampler (sampler2DShadow): Metal bắt buộc mipFilter=
+        // NotMipmapped + min/mag phải nearest/linear; PCF nằm trong hardware.
+        if (sd.compareFunc) {
+            d.compareFunction = ToMTLCompare(sd.compareFunc);
+            d.mipFilter = MTLSamplerMipFilterNotMipmapped;
+        } else {
+            d.mipFilter = sd.noMip ? MTLSamplerMipFilterNotMipmapped : MTLSamplerMipFilterLinear;
+        }
         d.maxAnisotropy = (NSUInteger)(sd.maxAniso >= 1.0f ? sd.maxAniso : 1);
         // LOD clamp theo GL_TEXTURE_MIN_LOD/MAX_LOD (sampler) + BASE/MAX_LEVEL
         // (texture). Minecraft set MAX_LOD=0 cho sampler không mipmap và
