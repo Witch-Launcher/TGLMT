@@ -342,6 +342,85 @@ int main() {
         }
     }
 
+    // 12) Varying mat4 (MakeUp-UltraFast `out mat4 modeli_times_projectioni;`):
+    // Metal user(locn) chỉ nhận scalar/vector → matrix trong TGLMT_VOut/FIn từng
+    // fail "invalid return type 'TGLMT_VOut'" (game build 106.23d80fc, iPhone 8
+    // Plus). Fix: tách cột name_c0..c3 + local matrix cùng tên trong body (FS
+    // ghép từ _in, VS copy ra _out trước kZConv).
+    {
+        const char* sv = "#version 330 core\n"
+                         "layout(location = 0) in vec3 pos;\n"
+                         "out mat4 modeli_times_projectioni;\n"
+                         "uniform mat4 mvp;\n"
+                         "void main() {\n"
+                         "    modeli_times_projectioni = mvp;\n"
+                         "    gl_Position = vec4(pos, 1.0);\n"
+                         "}\n";
+        const char* sf = "#version 330 core\n"
+                         "in mat4 modeli_times_projectioni;\n"
+                         "out vec4 fragColor;\n"
+                         "void main() {\n"
+                         "    fragColor = modeli_times_projectioni[0] + vec4(1.0);\n"
+                         "}\n";
+        GLSLConvertResult rv = ConvertGLSLtoMSL(sv, 0x8B31);
+        CHECK(rv.ok, "mat4 varying (VS) convert ok");
+        if (!rv.ok) printf("  log: %s\n", rv.log.c_str());
+        if (rv.ok) {
+            CHECK(Has(rv.msl, "float4 modeli_times_projectioni_c0 [[user(locn900)]]"),
+                  "VS out tách cột c0");
+            CHECK(Has(rv.msl, "float4 modeli_times_projectioni_c3 [[user(locn903)]]"),
+                  "VS out tách cột c3");
+            CHECK(!Has(rv.msl, "float4x4 modeli_times_projectioni [[user("),
+                  "không còn matrix trong TGLMT_VOut");
+            CHECK(Has(rv.msl, "_out.modeli_times_projectioni_c0 = modeli_times_projectioni[0];"),
+                  "VS copy cột ra _out");
+            MetalCheck("mat4varyout", rv.msl, "MSL mat4 varying VS biên dịch được");
+        }
+        GLSLConvertResult rf = ConvertGLSLtoMSL(sf, 0x8B30);
+        CHECK(rf.ok, "mat4 varying (FS) convert ok");
+        if (!rf.ok) printf("  log: %s\n", rf.log.c_str());
+        if (rf.ok) {
+            CHECK(Has(rf.msl, "float4 modeli_times_projectioni_c1 [[user(locn901)]]"),
+                  "FS in tách cột c1");
+            CHECK(Has(rf.msl, "float4x4 modeli_times_projectioni = float4x4("
+                              "_in.modeli_times_projectioni_c0, "
+                              "_in.modeli_times_projectioni_c1, "
+                              "_in.modeli_times_projectioni_c2, "
+                              "_in.modeli_times_projectioni_c3);"),
+                  "FS ghép lại matrix từ cột _in");
+            MetalCheck("mat4varyin", rf.msl, "MSL mat4 varying FS biên dịch được");
+        }
+    }
+
+    // 13) Tên vừa int-family (param) vừa float local ở hàm khác — scope-blind:
+    // CR `minOf(ivec3 x)` + Sodium inject `decode_diamond` (`float x`…)
+    // `return vec2(x, y);` từng bị wrap → `float2(float3(x), y)` (game CR
+    // sodium:chunk_shader_for_shadow fail "no matching constructor for 'float2'").
+    {
+        const char* s = "#version 330 core\n"
+                        "layout(location = 0) in vec3 pos;\n"
+                        "out vec2 vT;\n"
+                        "int minOf(ivec3 x) { return min(x.x, min(x.y, x.z)); }\n"
+                        "vec2 decode_diamond(float p) {\n"
+                        "    float x = 1.0f - 4.0f * abs(p - 0.5f);\n"
+                        "    float y = (p >= 0.5f ? 1.0f : -1.0f) * (1.0f - abs(x));\n"
+                        "    return vec2(x, y);\n"
+                        "}\n"
+                        "void main() {\n"
+                        "    vT = decode_diamond(0.3);\n"
+                        "    vT += vec2(float(minOf(ivec3(1, 2, 3))));\n"
+                        "    gl_Position = vec4(pos, 1.0);\n"
+                        "}\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B31);
+        CHECK(r.ok, "int-conflict convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(Has(r.msl, "return float2(x, y)"), "float local cùng tên int param không bị wrap");
+            CHECK(!Has(r.msl, "float2(float3(x), y)"), "không còn float2(float3(x), y)");
+            MetalCheck("intconflict", r.msl, "MSL tên vừa int param vừa float local biên dịch được");
+        }
+    }
+
     // metal -c cho case 4 (toolchain trên máy này không đáng tin — chỉ chạy khi probe pass).
     if (MetalAvail()) {
         const char* s = "#version 130\n"

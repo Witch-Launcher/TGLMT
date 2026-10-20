@@ -890,6 +890,48 @@ static std::map<std::string, int> CollectIntFamNames(const std::string& text) {
 static void CoerceIntArgsInFloatCtorsImpl(std::string& text,
                                           const std::map<std::string, int>& intDim);
 
+// CollectIntFamNames quét theo TÊN, không theo scope. Tên vừa khai báo int-family
+// (vd `int minOf(ivec3 x)` của CR) vừa là float local ở hàm khác (Sodium inject
+// `decode_diamond`: `float x`… `return vec2(x, y);`) → wrap nhầm thành
+// `float2(float3(x), y)` (game CR sodium:chunk_shader_for_shadow fail). Tên nào
+// cũng có khai báo KHÁC int-family (float/floatN/floatNxM/bool/half/struct/…)
+// trong cùng text thì bỏ khỏi map (ambiguous → không wrap — an toàn hơn wrap sai).
+static void EraseNamesAlsoDeclaredNonInt(const std::string& text,
+                                         std::map<std::string, int>& m) {
+    if (m.empty()) return;
+    static const std::set<std::string> kKeywords = {
+        "return", "if", "else", "for", "while", "do", "switch", "case", "break",
+        "continue", "discard", "struct", "const", "in", "out", "inout", "void",
+        "using", "typedef", "true", "false", "thread", "constant", "device",
+        "threadgroup", "kernel", "vertex", "fragment", "static", "inline"};
+    for (size_t i = 0; i + 2 < text.size(); ++i) {
+        if (!(isalpha((unsigned char)text[i]) || text[i] == '_')) continue;
+        if (i > 0 && IsIdentChar(text[i - 1], false)) continue;
+        size_t e = i;
+        while (e < text.size() && IsIdentChar(text[e], e == i)) ++e;
+        std::string ty = text.substr(i, e - i);
+        if (ty == "int" || ty == "uint" || ty == "int2" || ty == "int3" ||
+            ty == "int4" || ty == "uint2" || ty == "uint3" || ty == "uint4")
+            continue; // int-family — không phải conflict
+        if (kKeywords.count(ty)) continue;
+        // `TYPE NAME` + kết thúc khai báo (loại call `TYPE(`).
+        size_t p = e;
+        if (p >= text.size() || !isspace((unsigned char)text[p])) continue;
+        while (p < text.size() && isspace((unsigned char)text[p])) ++p;
+        if (p >= text.size() || !(isalpha((unsigned char)text[p]) || text[p] == '_'))
+            continue;
+        size_t ne = p;
+        while (ne < text.size() && IsIdentChar(text[ne], ne == p)) ++ne;
+        size_t q = ne;
+        while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+        if (q >= text.size() ||
+            (text[q] != '=' && text[q] != ';' && text[q] != ',' && text[q] != ')'))
+            continue;
+        m.erase(text.substr(p, ne - p));
+        i = ne - 1;
+    }
+}
+
 static int IntFamArgDim(const std::string& arg, const std::map<std::string, int>& intDim) {
     std::string t = Trim(arg);
     if (t.empty()) return 0;
@@ -1084,6 +1126,8 @@ static void CoerceIntArgsInFloatCtors(std::string& text, const std::vector<GLSLV
     // Member UBO/SSBO (text dùng `ubo_<block>.<member>`).
     for (auto& b : blocks)
         AddMslIntFamDims(b.members, intDim, (b.isStorage ? "ssbo_" : "ubo_") + b.name + ".");
+    // Scope-blind: tên vừa int-family (param `ivec3 x`) vừa float local hàm khác.
+    EraseNamesAlsoDeclaredNonInt(text, intDim);
     if (intDim.empty()) return;
     CoerceIntArgsInFloatCtorsImpl(text, intDim);
 }
@@ -5113,8 +5157,17 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     for (auto& [cnm, carr] : cds) {
                         std::string init = ExtractDeclaratorInit(crest, cnm);
                         init = RewriteTypeNames(init);
-                        if (cIsArr) {
-                            if (carr != 0) return fail("mảng const 2 chiều ngoài subset: " + t);
+                        // Size trên DECLARATOR `const float a[12] = ...` (MakeUp
+                        // fxaa.glsl) — GLSL hợp lệ; trước đây rơi vào nhánh
+                        // `carr != 0` → fail oan. Gộp về cùng đường với `T[N] a`.
+                        bool dIsArr = cIsArr;
+                        int dArrSize = cArrSize;
+                        if (carr != 0) {
+                            if (dIsArr) return fail("mảng const 2 chiều ngoài subset: " + t);
+                            dIsArr = true;
+                            dArrSize = carr;
+                        }
+                        if (dIsArr) {
                             // init dạng `vec2[](e1, e2, ...)` (đã RewriteTypeNames →
                             // `float2[](...)`) → đếm phần tử, phát `{...}`
                             size_t ob = init.find('(');
@@ -5139,7 +5192,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                             }
                             if (elems.empty()) return fail("mảng const rỗng: " + t);
                             // Size ghi trên type (`float[4]`) phải khớp số phần tử init.
-                            if (cArrSize > 0 && (int)elems.size() != cArrSize)
+                            if (dArrSize > 0 && (int)elems.size() != dArrSize)
                                 return fail("số phần tử init lệch size khai báo: " + t);
                             std::string joined;
                             for (size_t k = 0; k < elems.size(); ++k)
@@ -5147,7 +5200,6 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                             rest += "constant " + cm + " " + cnm + "[" + std::to_string(elems.size()) +
                                     "] = {" + joined + "};\n";
                         } else {
-                            if (carr != 0) return fail("mảng const ngoài subset: " + t);
                             rest += "constant " + cm + " " + cnm + (init.empty() ? "" : " = " + init) + ";\n";
                         }
                     }
@@ -5174,6 +5226,51 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             if (a.mslType.find("float") == 0 && a.mslType.find("x") != std::string::npos)
                 return fail("attribute ma trận không hỗ trợ (Metal attribute ≤ float4): " + a.name);
         }
+    }
+    // Varying matN (VS out / FS in — MakeUp `out mat4 modeli_times_projectioni;`):
+    // Metal user(locn) chỉ nhận scalar/vector, matrix nằm trong TGLMT_VOut/FIn →
+    // "field of illegal type 'float4x4'" / "invalid return type 'TGLMT_VOut'".
+    // Tách thành các cột floatR (name_c0..cN-1); body dùng local CÙNG TÊN (FS
+    // ghép cột _in ở đầu entry; VS copy local → _out cột trước kZConv/return).
+    // Attribute ma trận đã fail sớm ở trên (:5172) — không áp cho ins của VS.
+    std::string matVaryOutDecl, matVaryOutCopy, matVaryInDecl;
+    {
+        bool fragStage = !R.isVertex && !R.isCompute && !R.isTessControl;
+        auto expandMats = [&](std::vector<GLSLVar>& vars, bool isOut) {
+            std::vector<GLSLVar> nv;
+            for (auto& v : vars) {
+                int rows = 0, cols = 0;
+                if (sscanf(v.mslType.c_str(), "float%dx%d", &rows, &cols) == 2 &&
+                    rows >= 2 && rows <= 4 && cols >= 2 && cols <= 4) {
+                    std::string colT = "float" + std::to_string(rows);
+                    for (int i = 0; i < cols; ++i) {
+                        GLSLVar c = v;
+                        c.name = v.name + "_c" + std::to_string(i);
+                        c.mslType = colT;
+                        if (v.location >= 0 && v.location < 900) c.location = v.location + i;
+                        nv.push_back(c);
+                    }
+                    if (isOut) {
+                        matVaryOutDecl += v.mslType + " " + v.name + " = {};\n";
+                        for (int i = 0; i < cols; ++i)
+                            matVaryOutCopy += "_out." + v.name + "_c" + std::to_string(i) +
+                                              " = " + v.name + "[" + std::to_string(i) + "]; ";
+                    } else {
+                        matVaryInDecl += v.mslType + " " + v.name + " = " + v.mslType + "(";
+                        for (int i = 0; i < cols; ++i) {
+                            if (i) matVaryInDecl += ", ";
+                            matVaryInDecl += "_in." + v.name + "_c" + std::to_string(i);
+                        }
+                        matVaryInDecl += ");\n";
+                    }
+                } else {
+                    nv.push_back(v);
+                }
+            }
+            vars.swap(nv);
+        };
+        if (R.isVertex) expandMats(outs, true);
+        else if (fragStage) expandMats(ins, false);
     }
     // Varying/attribute thiếu location: linker gán ở LinkProgram (đúng GL).
     // Tạm đánh số 900+ordinal trong MSL, link viết lại số thật.
@@ -6576,7 +6673,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // `return;` trần trong main → vertex `z-convert + return _out;`, fragment MRT/single.
     {
         std::string out;
-        std::string retV = kZConv + " return _out;";
+        std::string retV = matVaryOutCopy + kZConv + " return _out;";
         std::string retF = isMRT ? "return _out;" : "return tglmt_fragColor;";
         std::string ret = R.isVertex ? retV : ((R.isCompute || R.isTessControl) ? "return;" : retF);
         size_t i = 0;
@@ -7018,6 +7115,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         }
         msl_out << noMain;
     }
+    // Varying matN: local matrix cùng tên (FS ghép từ cột _in; VS khai báo + copy
+    // ra _out cột trước kZConv). Chèn sau MỌI pass rewrite body.
+    if (!matVaryInDecl.empty()) body = matVaryInDecl + body;
+    if (!matVaryOutDecl.empty()) body = matVaryOutDecl + body;
     if (R.isVertex) {
         msl_out << "vertex TGLMT_VOut TGLMT_vs(TGLMT_VIn _in [[stage_in]],\n"
                    "    constant TGLMTUniforms& tglmt_u [[buffer(16)]]";
@@ -7025,7 +7126,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (R.usesVertexID) msl_out << ",\n    uint tglmt_vertexID [[vertex_id]]";
         if (R.usesInstanceID) msl_out << ",\n    uint tglmt_instanceID [[instance_id]]";
         if (useBaseInstance) msl_out << ",\n    uint tglmt_baseInstance [[base_instance]]";
-        msl_out << texParams << ") {\n  TGLMT_VOut _out = {};\n" << body << "\n" << kZConv << "\n  return _out;\n}\n";
+        msl_out << texParams << ") {\n  TGLMT_VOut _out = {};\n" << body << "\n"
+                << matVaryOutCopy << kZConv << "\n  return _out;\n}\n";
     } else if (R.isCompute) {
         // P6f: compute → kernel. Thread-position params emit theo mức body dùng
         // (đã probe Metal thật: thread_position_in_grid/threadgroup/thread_index OK).
