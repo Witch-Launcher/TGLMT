@@ -48,6 +48,11 @@ struct GLSLVar {
     bool isShadow = false; // sampler2DShadow → texture2D approx (bỏ compare ref)
     bool is1D = false;     // P3: sampler1D → texture2d approx (storage w×1, y=0.5)
     bool is3D = false;     // P3: sampler3D → texture3d (GL_TEXTURE_3D thật)
+    // VS attribute khai signed nhưng format GL là unsigned (Iris ENTITY_ID
+    // `iris_Entity` = GL_UNSIGNED_SHORT×4, shader `in ivec3`): Metal GPU Apple từ
+    // chối UShort4→signed int. TGLMT_VIn khai uintN (cùng dấu với format) + convert
+    // intN ở entry; fill-zero dùng format UINT.
+    bool forceUnsignedAttr = false;
     // P6g image: `layout(rgba8[, binding=N]) uniform [readonly|writeonly] image2D img;`
     // → texture2d<T, access::RW> (imageLoad/Store → .read/.write). access: 'R' read,
     // 'W' write, 'B' read_write (mặc định). binding: layout binding, -1 = glUniform1i.

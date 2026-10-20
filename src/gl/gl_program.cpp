@@ -32,7 +32,41 @@ static GLenum GlslTypeToGLEnum(const std::string& t) {
     if (t == "mat2") return 0x8B5A;
     if (t == "mat3") return 0x8B5B;
     if (t == "mat4") return 0x8B5C;
-    return 0; // sampler/unknown (samplers không vào uniformLayout)
+    // Sampler (GL_ACTIVE_UNIFORMS reflection — OpenGL spec xóa phần "Shadow"
+    // khỏi tên type nhưng pack khai đúng GLSL).
+    if (t == "sampler1D") return 0x8B5D;
+    if (t == "sampler2D") return 0x8B5E;
+    if (t == "sampler3D") return 0x8B5F;
+    if (t == "samplerCube") return 0x8B60;
+    if (t == "sampler1DShadow") return 0x8B61;
+    if (t == "sampler2DShadow") return 0x8B62;
+    if (t == "sampler2DRect") return 0x8B63;
+    if (t == "sampler2DRectShadow") return 0x8B64;
+    if (t == "sampler1DArray") return 0x8DC0;
+    if (t == "sampler2DArray") return 0x8DC1;
+    if (t == "samplerBuffer") return 0x8DC2;
+    if (t == "sampler1DArrayShadow") return 0x8DC3;
+    if (t == "sampler2DArrayShadow") return 0x8DC4;
+    if (t == "samplerCubeShadow") return 0x8DC5;
+    if (t == "sampler2DMS") return 0x9108;
+    if (t == "sampler2DMSArray") return 0x9109;
+    if (t == "isampler1D") return 0x8DC9;
+    if (t == "isampler2D") return 0x8DCA;
+    if (t == "isampler3D") return 0x8DCB;
+    if (t == "isamplerCube") return 0x8DCC;
+    if (t == "isampler2DRect") return 0x8DCD;
+    if (t == "isampler1DArray") return 0x8DCE;
+    if (t == "isampler2DArray") return 0x8DCF;
+    if (t == "isamplerBuffer") return 0x8DD0;
+    if (t == "usampler1D") return 0x8DD1;
+    if (t == "usampler2D") return 0x8DD2;
+    if (t == "usampler3D") return 0x8DD3;
+    if (t == "usamplerCube") return 0x8DD4;
+    if (t == "usampler2DRect") return 0x8DD5;
+    if (t == "usampler1DArray") return 0x8DD6;
+    if (t == "usampler2DArray") return 0x8DD7;
+    if (t == "usamplerBuffer") return 0x8DD8;
+    return 0; // unknown
 }
 GLuint glCreateProgram() {
     Context& c = Context::Current();
@@ -319,6 +353,9 @@ void glLinkProgram(GLuint p) {
         for (auto& a : vsC.inputs) {
             auto cc = ClsComps(a.glslType);
             if (cc.first < 0) continue;
+            // iris_Entity: MSL khai uintN (format UShort4 unsigned) → zero-fill
+            // phải dùng format UINT, không phải INT (lệch dấu = Metal từ chối).
+            if (a.forceUnsignedAttr) cc.first = 2;
             pr.attribFill.push_back({a.location, (uint8_t)cc.second, (uint8_t)cc.first});
         }
         for (size_t i = 0; i < vsC.inputs.size(); ++i)
@@ -346,6 +383,27 @@ void glLinkProgram(GLuint p) {
             pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, false, GlslTypeToGLEnum(u.glslType)});
         }
         pr.fsUBSize = fsC.uniformBufferSize;
+    }
+    // 4c. GL_ACTIVE_UNIFORMS reflection — glGetActiveUniform phải trả type/size
+    // thật. Iris ProgramUniforms.buildUniforms so type Iris cấp với type chương
+    // trình đọc: stub cũ luôn FLOAT nên `iris_LightmapTextureMatrix` (mat4, do
+    // Sodium/Vanilla transformer chèn) bị "Disabling that uniform" → lightmap
+    // UV = 0 → terrain/entity đen (CR r5.9.3, iPhone 8 Plus build 107).
+    // Name mảng theo spec GL: "name[0]" + size = số phần tử.
+    pr.activeUniforms.clear();
+    {
+        std::set<std::string> seen;
+        auto add = [&](const GLSLVar& u) {
+            std::string nm = u.name;
+            GLint sz = (u.arraySize > 0) ? (GLint)u.arraySize : 1;
+            if (u.arraySize > 0) nm += "[0]";
+            if (!seen.insert(nm).second) return;
+            GLenum ty = GlslTypeToGLEnum(u.glslType);
+            if (!ty) return; // type lạ (image/atomic...) — không thêm để khỏi sai
+            pr.activeUniforms.push_back({nm, ty, sz});
+        };
+        for (auto& u : vsC.uniforms) add(u);
+        for (auto& u : fsC.uniforms) add(u);
     }
     // 4b. Sampler lists + units mặc định 0 (đúng GL) cho AppleDrawGL slot mapping.
     {

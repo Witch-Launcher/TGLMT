@@ -62,12 +62,14 @@ int main() {
     assert(glGetAttribLocation(p2, "iris_Entity") == 2);
     // attribFill (kiểu attribute cho fill-zero AppleDrawGL): đủ 3, đúng
     // loc/comps/cls — float=0, int=1. Thứ tự = thứ tự khai báo VS.
+    // iris_Entity: cls=2 (UINT) vì MSL shim khai uint4 cho format UShort4
+    // (Metal GPU Apple từ chối UShort4→signed int) — fill phải cùng dấu.
     {
         auto& po = tglmt::Context::Current().programs[p2];
         assert(po.attribFill.size() == 3);
         assert(po.attribFill[0].loc == 0 && po.attribFill[0].comps == 3 && po.attribFill[0].cls == 0);
         assert(po.attribFill[1].loc == 1 && po.attribFill[1].comps == 2 && po.attribFill[1].cls == 0);
-        assert(po.attribFill[2].loc == 2 && po.attribFill[2].comps == 3 && po.attribFill[2].cls == 1);
+        assert(po.attribFill[2].loc == 2 && po.attribFill[2].comps == 3 && po.attribFill[2].cls == 2);
     }
     printf("test_shader_program PASS\n");
     return 0;

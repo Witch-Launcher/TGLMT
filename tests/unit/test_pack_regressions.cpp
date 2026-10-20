@@ -421,6 +421,132 @@ int main() {
         }
     }
 
+    // 14) Const array size trên DECLARATOR (`const float a[12] = float[12](...)`)
+    // — MakeUp fxaa.glsl composite2.fsh từng fail "mảng const ngoài subset".
+    {
+        const char* s = "#version 330 core\n"
+                        "out vec4 fragColor;\n"
+                        "const float quality[3] = float[3](1.0, 2.0, 3.0);\n"
+                        "void main() { fragColor = vec4(quality[0], quality[1], quality[2], 1.0); }\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B30);
+        CHECK(r.ok, "const array declarator convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(Has(r.msl, "constant float quality[3] = {1.0, 2.0, 3.0};"),
+                  "const array declarator phát {…} đúng size");
+            MetalCheck("constarray", r.msl, "MSL const array biên dịch được");
+        }
+    }
+
+    // 15) Matrix varying dùng trong HELPER (không chỉ main): body dùng local
+    // cùng tên, helper nhận thread ref (VS) / value (FS) — trước đây helper giữ
+    // `modeli` trần → MSL "undeclared identifier".
+    {
+        const char* sv = "#version 330 core\n"
+                         "layout(location = 0) in vec3 pos;\n"
+                         "out mat4 modeli;\n"
+                         "uniform mat4 mvp;\n"
+                         "void setModeli() { modeli = mvp; }\n"
+                         "void main() { setModeli(); gl_Position = vec4(pos, 1.0); }\n";
+        const char* sf = "#version 330 core\n"
+                         "in mat4 modeli;\n"
+                         "out vec4 fragColor;\n"
+                         "vec4 readModeli() { return modeli[0]; }\n"
+                         "void main() { fragColor = readModeli() + vec4(1.0); }\n";
+        GLSLConvertResult rv = ConvertGLSLtoMSL(sv, 0x8B31);
+        CHECK(rv.ok, "mat4 varying helper (VS) convert ok");
+        if (!rv.ok) printf("  log: %s\n", rv.log.c_str());
+        if (rv.ok) {
+            CHECK(Has(rv.msl, "void setModeli(thread float4x4& modeli"),
+                  "helper VS nhận thread float4x4&");
+            CHECK(Has(rv.msl, "setModeli(modeli"), "call site VS truyền local modeli");
+            MetalCheck("mat4varyhelpervs", rv.msl, "MSL mat4 varying helper VS biên dịch được");
+        }
+        GLSLConvertResult rf = ConvertGLSLtoMSL(sf, 0x8B30);
+        CHECK(rf.ok, "mat4 varying helper (FS) convert ok");
+        if (!rf.ok) printf("  log: %s\n", rf.log.c_str());
+        if (rf.ok) {
+            CHECK(Has(rf.msl, "float4 readModeli(float4x4 modeli)"),
+                  "helper FS nhận value float4x4");
+            CHECK(Has(rf.msl, "readModeli(modeli)"), "call site FS truyền local modeli");
+            MetalCheck("mat4varyhelperfs", rf.msl, "MSL mat4 varying helper FS biên dịch được");
+        }
+    }
+
+    // 16) Int-uniform trong TERNARY (MakeUp fxaa/composite `vec3 astroLightPos =
+    // worldTime > 12900 ? moon : sun;`): CoerceIntInitToFloat từng wrap thành
+    // `float3(float(tglmt_u.worldTime)) > 12900 ? ...` → điều kiện bool3, MSL
+    // "not contextually convertible to 'bool'" (build 107.e319b1a).
+    {
+        const char* s = "#version 330 core\n"
+                        "uniform int worldTime;\n"
+                        "uniform vec3 moonPosition;\n"
+                        "uniform vec3 sunPosition;\n"
+                        "out vec4 fragColor;\n"
+                        "void main() {\n"
+                        "    vec3 astroLightPos = worldTime > 12900 ? moonPosition : sunPosition;\n"
+                        "    fragColor = vec4(astroLightPos, 1.0);\n"
+                        "}\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B30);
+        CHECK(r.ok, "int-uniform ternary convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(!Has(r.msl, "float3(float(tglmt_u.worldTime)) >"),
+                  "không wrap int-uniform khi nó không phải toàn bộ initializer");
+            CHECK(Has(r.msl, "tglmt_u.worldTime > 12900 ?"), "ternary giữ điều kiện int");
+            MetalCheck("intternary", r.msl, "MSL int-uniform ternary biên dịch được");
+        }
+    }
+
+    // 17) `vec2(uvec2)` phải componentwise: IntFamDimOfMslType đọc dim "uintN" ở
+    // index 4 (trước đọc [3]='t' → dim 1 → `float2(float(u))` splat, sai).
+    {
+        const char* s = "#version 330 core\n"
+                        "uniform uvec2 mc_midTexCoord;\n"
+                        "out vec2 uv;\n"
+                        "void main() {\n"
+                        "    vec2 a = vec2(mc_midTexCoord);\n"
+                        "    uv = a;\n"
+                        "}\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B30);
+        CHECK(r.ok, "uvec2 ctor convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(!Has(r.msl, "float2(float(tglmt_u.mc_midTexCoord))"),
+                  "vec2(uvec2) không còn splat từng thành phần");
+            CHECK(Has(r.msl, "float2(float2(tglmt_u.mc_midTexCoord))"),
+                  "vec2(uvec2) componentwise");
+            MetalCheck("uvec2ctor", r.msl, "MSL vec2(uvec2) biên dịch được");
+        }
+    }
+
+    // 18) Iris ENTITY: attribute `iris_Entity` = UShort4 (IrisVertexFormats
+    // ENTITY_ID_ELEMENT) nhưng shader `in ivec3` → Metal GPU Apple từ chối
+    // ("Cannot convert attribute from MTLAttributeFormatUShort4 to a signed
+    // integer type"). TGLMT_VIn phải khai uint4 + convert int3 ở entry.
+    {
+        const char* s = "#version 330 core\n"
+                        "layout(location = 0) in vec3 Position;\n"
+                        "layout(location = 1) in ivec3 iris_Entity;\n"
+                        "out vec4 vCol;\n"
+                        "void main() {\n"
+                        "    vec3 p = Position + vec3(iris_Entity);\n"
+                        "    vCol = vec4(p, 1.0);\n"
+                        "    gl_Position = vec4(p, 1.0);\n"
+                        "}\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B31);
+        CHECK(r.ok, "iris_Entity convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(Has(r.msl, "uint4 tglmt_attr_iris_Entity [[attribute(1)]]"),
+                  "struct VS khai uint4 (cùng dấu + đủ 4 component như UShort4)");
+            CHECK(Has(r.msl, "int3 iris_Entity = int3(_in.tglmt_attr_iris_Entity.xyz);"),
+                  "convert int3 ở entry");
+            CHECK(!Has(r.msl, "int3 iris_Entity [[attribute"), "không còn field signed ivec3");
+            MetalCheck("irisentity", r.msl, "MSL iris_Entity uint4→int3 biên dịch được");
+        }
+    }
+
     // metal -c cho case 4 (toolchain trên máy này không đáng tin — chỉ chạy khi probe pass).
     if (MetalAvail()) {
         const char* s = "#version 130\n"

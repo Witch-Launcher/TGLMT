@@ -223,6 +223,16 @@ struct ProgramObject {
         GLenum glType = 0; // P10: GL enum type (FLOAT_VEC4...) cho program_interface_query
     };
     std::vector<UniformEntry> uniformLayout;
+    // P10b: reflection glGetActiveUniform (Iris ProgramUniforms.buildUniforms đọc
+    // type/size từng active uniform — stub cũ trả FLOAT cho MỌI tên nên
+    // `iris_LightmapTextureMatrix` (mat4) bị Iris tắt → lightmap UV = 0 → đen).
+    // Gồm cả sampler; name mảng theo spec GL ("name[0]", size = số phần tử).
+    struct ActiveUniform {
+        std::string name;
+        GLenum type = 0;
+        GLint size = 1;
+    };
+    std::vector<ActiveUniform> activeUniforms;
     size_t vsUBSize = 0, fsUBSize = 0;
     std::shared_ptr<metal::ILibrary> appleVS, appleFS;
     // P6f compute: library + pipeline + localSize (từ layout(local_size) converter).

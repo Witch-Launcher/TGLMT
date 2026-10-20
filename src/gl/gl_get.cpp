@@ -310,7 +310,12 @@ void glGetProgramiv(GLuint p, GLenum q, GLint* v) {
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
     if (q == 0x8B82) *v = it->second.linked ? 1 : 0;       // LINK_STATUS
     else if (q == 0x8B84) *v = (GLint)it->second.infoLog.size();
-    else if (q == 0x8B86) *v = (GLint)it->second.shaders.size(); // ATTACHED_SHADERS
+    else if (q == 0x8B85) *v = (GLint)it->second.shaders.size(); // ATTACHED_SHADERS
+    // ACTIVE_UNIFORMS (0x8B86): stub cũ map 0x8B86 → ATTACHED_SHADERS (sai mã;
+    // ATTACHED_SHADERS = 0x8B85) → Iris ProgramUniforms chỉ thấy 2 uniform, và
+    // glGetActiveUniform trả FLOAT cho mọi tên → mat4 (iris_LightmapTextureMatrix)
+    // bị tắt. Trả số active uniform reflect lúc link (kể cả sampler).
+    else if (q == 0x8B86) *v = (GLint)it->second.activeUniforms.size();
     // ACTIVE_UNIFORM_BLOCKS (0x8A36=35382): GlProgram.setupUniforms path#2
     // loop [0,count) gọi glGetActiveUniformBlockName tìm builtin {Projection,
     // Lighting, Fog, Globals} không khai trong pipeline. Stub trả 0 → loop
@@ -357,13 +362,15 @@ void glGetActiveUniform(GLuint p, GLuint i, GLsizei n, GLsizei* l, GLint* s, GLe
     auto it = c.programs.find(p);
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
     if (l) *l = 0; if (s) *s = 1; if (t) *t = 0x1406;
+    auto& aus = it->second.activeUniforms;
+    if (i >= aus.size()) { c.errors.Record(0x0501); return; } // INVALID_VALUE
+    const auto& au = aus[i];
+    if (s) *s = au.size;
+    if (t) *t = au.type;
     if (name && n > 0) {
-        // trả tên uniform thứ i (sắp xếp theo loc để ổn định)
-        GLuint k = 0;
-        for (auto& [nm, loc] : it->second.uniformLoc) {
-            if (k++ == i) { strncpy(name, nm.c_str(), (size_t)n - 1); name[n-1] = 0; if(l)*l=(GLsizei)strlen(name); return; }
-        }
-        name[0] = 0;
+        strncpy(name, au.name.c_str(), (size_t)n - 1);
+        name[n - 1] = 0;
+        if (l) *l = (GLsizei)strlen(name);
     }
 }
 // Tìm block theo index (index space = uniformBlocks[].index dense 0..N-1,

@@ -826,6 +826,21 @@ static void CoerceIntInitToFloat(std::string& text, const std::set<std::string>&
             ++i;
             continue;
         }
+        // RHS phải là TOÀN BỘ initializer (`floatN x = int-family ;`). Nếu sau
+        // expr còn toán tử thì initializer là biểu thức lớn hơn — wrap ở đây đổi
+        // nghĩa: MakeUp `vec3 astroLightPos = worldTime > 12900 ? moon : sun;`
+        // từng thành `float3(float(tglmt_u.worldTime)) > 12900 ? ...` (điều kiện
+        // bool3 → MSL "not contextually convertible to 'bool'", build 107).
+        {
+            size_t t = wrapEnd;
+            while (t < text.size() && isspace((unsigned char)text[t])) ++t;
+            if (t < text.size() && text[t] != ';' && text[t] != ',' &&
+                text[t] != ')' && text[t] != '}') {
+                out += text[i];
+                ++i;
+                continue;
+            }
+        }
         std::string w = lhsType;
         if (wrapDim > 1) {
             // call trả intN → wrap CÙNG dim
@@ -1090,11 +1105,16 @@ static void CoerceIntArgsInFloatCtorsImpl(std::string& text,
 // Dim int-family từ mslType: "int"/"uint" → 1, "intN"/"uintN" → N, còn lại 0.
 static int IntFamDimOfMslType(const std::string& mslType) {
     int dim = 0;
-    if (mslType.compare(0, 4, "uint") == 0) dim = 1;
-    else if (mslType.compare(0, 3, "int") == 0) dim = 1;
+    size_t dpos = 3; // "intN" → dim ở [3]
+    if (mslType.compare(0, 4, "uint") == 0) {
+        dim = 1;
+        dpos = 4; // "uintN" → dim ở [4] ("uint2"[3] == 't' — bug cũ đọc nhầm)
+    } else if (mslType.compare(0, 3, "int") == 0) {
+        dim = 1;
+    }
     if (!dim) return 0;
-    if (mslType.size() > 3 && mslType[3] >= '2' && mslType[3] <= '4')
-        dim = mslType[3] - '0';
+    if (mslType.size() > dpos && mslType[dpos] >= '2' && mslType[dpos] <= '4')
+        dim = mslType[dpos] - '0';
     return dim;
 }
 
@@ -3498,6 +3518,7 @@ static bool ThreadHelpersMSL(
     const std::map<std::string, std::vector<std::pair<std::string, SampEntry>>>& helperSamp,
     const SampTable& globalSamp, const std::vector<std::string>& uboBlocks, bool isVertex,
     const std::vector<GLSLVar>& vertexAttrs, const std::vector<GLSLVar>& outVars,
+    const std::map<std::string, std::string>& matVaryTypes,
     const std::vector<std::pair<std::string, std::string>>& entryBuiltins,
     std::string& err) {
     // P-Sodium: attribute (vs) / varying (fs) map (name → mslType) để thread vào
@@ -3505,11 +3526,17 @@ static bool ThreadHelpersMSL(
     // helper deferred1.fsh). Body dùng `_in.X`, helper nhận param cùng tên.
     std::map<std::string, std::string> attrTypes;
     for (auto& a : vertexAttrs) attrTypes[a.name] = a.mslType;
+    // Varying matN đã tách cột trong struct nhưng BODY/HELPER vẫn dùng tên
+    // matrix (local cùng tên). Helper nhận param value (FS) / thread ref (VS).
     // O: out-varying của VS đọc trong helper (`wave *= clamp(lmCoord.y ...)`):
     // helper nhận `thread T&` cùng tên, body truyền `_out.X` (read+write-through).
     std::map<std::string, std::string> outTypes;
     if (isVertex)
         for (auto& o : outVars) outTypes[o.name] = o.mslType;
+    for (auto& [mn, mt] : matVaryTypes) {
+        if (isVertex) outTypes[mn] = mt;
+        else attrTypes[mn] = mt;
+    }
     // VS SHADOW_LINES (Iris isNewLines — VanillaTransformer.java:196-224): Iris
     // rename main → irisMain rồi sinh wrapper main + helper `iris_widen_lines`,
     // cả hai đọc/ghi `gl_Position` TRỰC TIẾP trong HELPER. mpVary chỉ rewrite
@@ -3737,6 +3764,9 @@ static bool ThreadHelpersMSL(
         // P-Sodium: attribute — main có stage_in (`_in.X`), helper dùng param cùng tên.
         if (item.rfind("A:", 0) == 0) {
             std::string nm = item.substr(2);
+            // Matrix varying: body/helper cùng dùng local `nm` (đã ghép cột ở
+            // đầu entry), KHÔNG phải `_in.nm_c*`.
+            if (matVaryTypes.count(nm)) return nm;
             return isBody ? ("_in." + nm) : nm;
         }
         // Entry builtin (tglmt_fragCoord/...): tên giống nhau ở mọi scope.
@@ -3744,6 +3774,8 @@ static bool ThreadHelpersMSL(
         // O: out-varying — body truyền `_out.X`, helper truyền param cùng tên.
         if (item.rfind("O:", 0) == 0) {
             std::string nm = item.substr(2);
+            // Matrix varying: body truyền local `nm`, helper nhận thread ref.
+            if (matVaryTypes.count(nm)) return nm;
             return isBody ? ("_out." + nm) : nm;
         }
         return "";
@@ -5234,6 +5266,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // ghép cột _in ở đầu entry; VS copy local → _out cột trước kZConv/return).
     // Attribute ma trận đã fail sớm ở trên (:5172) — không áp cho ins của VS.
     std::string matVaryOutDecl, matVaryOutCopy, matVaryInDecl;
+    std::map<std::string, std::string> matVaryTypes;
     {
         bool fragStage = !R.isVertex && !R.isCompute && !R.isTessControl;
         auto expandMats = [&](std::vector<GLSLVar>& vars, bool isOut) {
@@ -5243,6 +5276,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 if (sscanf(v.mslType.c_str(), "float%dx%d", &rows, &cols) == 2 &&
                     rows >= 2 && rows <= 4 && cols >= 2 && cols <= 4) {
                     std::string colT = "float" + std::to_string(rows);
+                    matVaryTypes[v.name] = v.mslType;
                     for (int i = 0; i < cols; ++i) {
                         GLSLVar c = v;
                         c.name = v.name + "_c" + std::to_string(i);
@@ -6606,6 +6640,38 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         ins.swap(active);
         R.inputs = ins; // conv mang đi link dùng bản đã strip (struct MSL dưới cũng dùng ins)
     }
+    // Iris ENTITY format bind `iris_Entity` = GL_UNSIGNED_SHORT×4 (UShort4;
+    // IrisVertexFormats.ENTITY_ID_ELEMENT) nhưng EntityPatcher khai
+    // `in ivec3 iris_Entity` (EntityPatcher.java:160). Desktop GL đổi
+    // unsigned→signed; Metal GPU Apple (A11) từ chối pipeline:
+    // "Cannot convert attribute from MTLAttributeFormatUShort4 to a signed
+    // integer type" (game build 107.e319b1a, iPhone 8 Plus). Khai MSL uint4
+    // (cùng dấu + đúng 4 component như format) rồi convert int3 ở entry —
+    // giữ đúng giá trị dương như GL. Attribute fill-zero (gl_program) dùng
+    // UINT cho khớp.
+    std::string attrShimDecl;
+    if (R.isVertex) {
+        for (auto& a : ins) {
+            if (a.name != "iris_Entity" || a.glslType != "ivec3") continue;
+            a.forceUnsignedAttr = true;
+            // KHÔNG đổi a.mslType (pass int-dim vẫn cần 3 cho local int3);
+            // struct emit dùng uint4 — đúng 4 component như format UShort4.
+            // body đã rewrite thành `_in.iris_Entity` — đổi sang local int3
+            // (pass sau vẫn thấy dim 3 qua ins/AddMslIntFamDims).
+            size_t p = 0;
+            const std::string key = "_in.iris_Entity";
+            while ((p = body.find(key, p)) != std::string::npos) {
+                size_t e = p + key.size();
+                if (e < body.size() && IsIdentChar(body[e], false)) { p = e; continue; }
+                body.replace(p, key.size(), "iris_Entity");
+                p += std::string("iris_Entity").size();
+            }
+            attrShimDecl += "  int3 iris_Entity = int3(_in.tglmt_attr_iris_Entity.xyz);\n";
+        }
+        // R.inputs đã copy TRƯỚC shim — cập nhật lại để attribFill (gl_program)
+        // thấy forceUnsignedAttr và zero-fill bằng UINT (lệch dấu = Metal từ chối).
+        if (!attrShimDecl.empty()) R.inputs = ins;
+    }
     // GLSL implicit int→float (sample_lightmap/terrain) + mat4(mat2) + shadowing:
     // chạy trên MSL (sau RI) vì pattern đã là `float2`/`ubo_`/`float4x4`.
     // mat4 names (post-mp) cho `float3x3(<mat4 var>)`: uniform/UBO/SSBO/hoist.
@@ -6788,7 +6854,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             if (R.usesFrontFacing) entryBuiltins.emplace_back("tglmt_frontFacing", "bool");
         }
         if (!ThreadHelpersMSL(helpersMSL, body, helperSamp, globalSamp, uboNames, R.isVertex, ins,
-                              R.outputs, entryBuiltins, err))
+                              R.outputs, matVaryTypes, entryBuiltins, err))
             return fail(err);
         // inout `thread T&` + actual swizzle → block + temp (sau khi params đã final).
         BindSwizzleInoutCalls(body, helpersMSL);
@@ -6884,7 +6950,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     }
     if (R.isVertex) {
         msl_out << "struct TGLMT_VIn {\n";
-        for (auto& a : ins) msl_out << "  " << a.mslType << " " << a.name << " [[attribute(" << a.location << ")]];\n";
+        for (auto& a : ins) {
+            std::string field = a.forceUnsignedAttr ? ("tglmt_attr_" + a.name) : a.name;
+            const char* sty = a.forceUnsignedAttr ? "uint4" : a.mslType.c_str();
+            msl_out << "  " << sty << " " << field << " [[attribute(" << a.location
+                    << ")]];\n";
+        }
         msl_out << "};\nstruct TGLMT_VOut {\n  float4 tglmt_position [[position]];\n";
         if (R.usesPointSize) msl_out << "  float tglmt_ptSize [[point_size]];\n";
         for (auto& v : outs) msl_out << "  " << v.mslType << " " << v.name << " [[user(locn" << v.location << ")]];\n";
@@ -7126,7 +7197,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (R.usesVertexID) msl_out << ",\n    uint tglmt_vertexID [[vertex_id]]";
         if (R.usesInstanceID) msl_out << ",\n    uint tglmt_instanceID [[instance_id]]";
         if (useBaseInstance) msl_out << ",\n    uint tglmt_baseInstance [[base_instance]]";
-        msl_out << texParams << ") {\n  TGLMT_VOut _out = {};\n" << body << "\n"
+        msl_out << texParams << ") {\n  TGLMT_VOut _out = {};\n" << attrShimDecl << body << "\n"
                 << matVaryOutCopy << kZConv << "\n  return _out;\n}\n";
     } else if (R.isCompute) {
         // P6f: compute → kernel. Thread-position params emit theo mức body dùng
