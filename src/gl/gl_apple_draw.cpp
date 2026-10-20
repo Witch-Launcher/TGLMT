@@ -2269,10 +2269,11 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                         GLuint tx = c.state.BoundTexture(unit, KindTarget(KindOf(pr.samplerKind, nm)));
                         auto tit = c.textures.find(tx);
                         unsigned w = 0, h = 0, wrapS = 0, wrapT = 0, minF = 0, magF = 0;
+                        unsigned ifmt = 0, tgt = 0;
                         double savg = -1.0;
                         if (tit != c.textures.end()) {
                             auto& t = tit->second;
-                            w = t.w; h = t.h;
+                            w = t.w; h = t.h; ifmt = t.internalFormat; tgt = t.target;
                             auto g = [&](GLenum k, unsigned d) {
                                 auto it2 = t.params.find(k);
                                 return it2 == t.params.end() ? d : (unsigned)it2->second;
@@ -2292,8 +2293,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                         }
                         fprintf(stderr,
                                 "[TGLMT] dsamp#%u %s %s unit=%u tex=%u %ux%u "
-                                "wrap=(0x%x,0x%x) min=0x%x mag=0x%x shadowAvg=%.1f\n",
-                                prog, stage, nm.c_str(), unit, tx, w, h,
+                                "ifmt=0x%x tgt=0x%x wrap=(0x%x,0x%x) min=0x%x "
+                                "mag=0x%x shadowAvg=%.1f\n",
+                                prog, stage, nm.c_str(), unit, tx, w, h, ifmt, tgt,
                                 wrapS, wrapT, minF, magF, savg);
                     }
                 };
@@ -2335,6 +2337,54 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     rb(pr.vsSamplers);
                     rb(pr.fsSamplers);
                 }
+                // Depth/shadow sampler: readback GPU 1 lần/program (tối đa 2 tex)
+                // → biết shadow map có depth thật hay toàn 0/rác (CR đen, MakeUp
+                // mất bóng). Chỉ chạy khi diag; getBytes trên Private có thể throw
+                // → readback() bắt exception, log FAIL.
+                {
+                    std::set<GLuint> seen;
+                    int dumped = 0;
+                    auto rbDepth = [&](const std::vector<std::string>& lst) {
+                        for (auto& nm : lst) {
+                            if (dumped >= 2) return;
+                            GLuint unit = pr.samplerUnits.count(nm) ? pr.samplerUnits[nm] : 0;
+                            GLuint tx = c.state.BoundTexture(unit, KindTarget(KindOf(pr.samplerKind, nm)));
+                            if (!tx || !seen.insert(tx).second) continue;
+                            auto tit = c.textures.find(tx);
+                            if (tit == c.textures.end() || !tit->second.gpu) continue;
+                            GLenum f = tit->second.internalFormat;
+                            bool depthFmt = (f == 0x1902 || f == 0x81A5 || f == 0x81A6 ||
+                                             f == 0x81A7 || f == 0x8CAC || f == 0x88F0);
+                            if (!depthFmt) continue;
+                            size_t w = tit->second.w, h = tit->second.h;
+                            if (!w || !h || w > 2048 || h > 2048) continue;
+                            ++dumped;
+                            c.FlushPendingEncoder();
+                            c.CommitAndWait();
+                            std::vector<float> fb(w * h, 0.f); // Depth32Float getBytes
+                            auto wt = c.device->wrapAsTarget(tit->second.gpu.get(), nullptr);
+                            bool ok = wt && wt->readback(fb.data(), w * 4);
+                            if (!ok) {
+                                fprintf(stderr, "[TGLMT] depthrb#%u %s tex=%u %zux%zu ifmt=0x%x FAIL\n",
+                                        prog, nm.c_str(), tx, w, h, (unsigned)f);
+                                continue;
+                            }
+                            double sum = 0, mn = 1e30, mx = -1e30;
+                            for (size_t i = 0; i < w * h; i += 7) {
+                                double v = fb[i];
+                                sum += v; if (v < mn) mn = v; if (v > mx) mx = v;
+                            }
+                            double cnt = (double)((w * h + 6) / 7);
+                            fprintf(stderr,
+                                    "[TGLMT] depthrb#%u %s tex=%u %zux%zu ifmt=0x%x "
+                                    "avg=%.4f min=%.4f max=%.4f mid=%.4f\n",
+                                    prog, nm.c_str(), tx, w, h, (unsigned)f,
+                                    sum / cnt, mn, mx, fb[(h / 2) * w + w / 2]);
+                        }
+                    };
+                    rbDepth(pr.vsSamplers);
+                    rbDepth(pr.fsSamplers);
+                }
                 // Hexdump UBO thật đang bind (phát hiện nội dung 0/sai offset).
                 for (auto& ub : pr.uniformBlocks) {
                     auto bit = c.uniformBindPoints.find(ub.binding);
@@ -2350,17 +2400,40 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     fprintf(stderr, "[TGLMT] dubo#%u %s point=%u buf=%u off=%zu len=%zu: %s\n",
                             prog, ub.name.c_str(), ub.binding, bit->second.buffer,
                             off, len, hexdump(bv.p + off, len).c_str());
+                    // Lighting: decode thẳng Light0/1 — (0,0,0) = hết directional
+                    // (mix_light chỉ còn ambient 0.4 → item/hand tối).
+                    if (ub.name == "Lighting" && len >= 24) {
+                        const float* F = (const float*)(bv.p + off);
+                        fprintf(stderr,
+                                "[TGLMT] duboL#%u L0=(%g,%g,%g) L1=(%g,%g,%g)\n",
+                                prog, F[0], F[1], F[2], F[4], F[5], F[6]);
+                    }
+                    // DynamicTransforms: ColorModulator (offset 64) — GUI tối nếu != 1.
+                    if (ub.name == "DynamicTransforms" && len >= 80) {
+                        const float* F = (const float*)(bv.p + off);
+                        fprintf(stderr,
+                                "[TGLMT] duboCM#%u ColorModulator=(%g,%g,%g,%g)\n",
+                                prog, F[16], F[17], F[18], F[19]);
+                    }
                 }
-                // VAO: layout attrib + 32 byte đầu (Position/Color/UV0/UV2).
+                // VAO: layout attrib + 32 byte đầu. Dump tới 9 vì UV2/Normal
+                // (entity: attr4/5) mới là chỗ lightmap/normals sai.
                 auto vit = c.vaos.find(vao);
                 if (vit != c.vaos.end()) {
-                    for (int a = 0; a < 4; ++a) {
+                    // Reverse attribLoc để biết attrN là Position/Color/UV2/Normal.
+                    auto attrName = [&](int a) -> std::string {
+                        for (auto& kv : pr.attribLoc)
+                            if ((int)kv.second == a) return kv.first;
+                        return "?";
+                    };
+                    for (int a = 0; a < 9; ++a) {
                         auto& at = vit->second.attribs[a];
                         fprintf(stderr,
-                                "[TGLMT] dvao#%u attr%d en=%d buf=%u size=%d "
+                                "[TGLMT] dvao#%u attr%d(%s) en=%d buf=%u size=%d "
                                 "type=0x%x norm=%d stride=%d off=%zu rel=%zu\n",
-                                prog, a, (int)at.enabled, at.buffer, at.size, at.type,
-                                (int)at.normalized, at.stride, at.offset, at.relativeOffset);
+                                prog, a, attrName(a).c_str(), (int)at.enabled, at.buffer,
+                                at.size, at.type, (int)at.normalized, at.stride,
+                                at.offset, at.relativeOffset);
                         if (!at.enabled || !at.buffer) continue;
                         Context::BufferView bv = c.SyncBuffer(at.buffer);
                         if (!bv.p || at.offset >= bv.size) continue;

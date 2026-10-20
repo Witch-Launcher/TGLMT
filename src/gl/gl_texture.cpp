@@ -1221,10 +1221,12 @@ static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
         return;
     }
     if (!dst.gpu) { c.errors.Record(0x0502); return; }
-    c.FlushPendingEncoder(); // IR: commit batch trước khi copy (không stale TBDR)
+    c.FlushPendingEncoder(); // end encoder để draws đi trước blit trong queue
     c.FlushAllBufferStaging();
     c.FlushAllTextureStaging();
-    c.CommitAndWait(); // xả draws NoWait trước khi copy (không stale TBDR)
+    // KHÔNG CommitAndWait: blitCopy/blitFromTarget tự tạo CB trên cùng serial
+    // queue (AppleMetalBridge blitTex) → GPU đảm bảo thứ tự sau draws vừa
+    // commit. Chờ ở đây làm mỗi copy 11-15ms (MakeUp 3387 calls = 39.7s stall).
     bool gpuOk = false;
     if (readFbo == 0) {
         auto def = c.device->defaultRenderTarget();
@@ -1577,17 +1579,40 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
         return;
     }
     if (!src.gpu || !dst.gpu) { c.errors.Record(0x0502); return; }
-    c.FlushPendingEncoder(); // IR: commit batch trước khi blit copy
+    int diagCopyNo = 0;
+    {
+        static int nCopy = 0;
+        if (c.DiagOn() && nCopy < 40) {
+            diagCopyNo = ++nCopy;
+            fprintf(stderr,
+                    "[TGLMT] cimg#%d src=%u(ifmt=0x%x %ux%u) dst=%u(ifmt=0x%x %ux%u) "
+                    "region=%d,%d %dx%d\n",
+                    diagCopyNo, srcName, (unsigned)src.internalFormat, src.w, src.h,
+                    dstName, (unsigned)dst.internalFormat, dst.w, dst.h,
+                    srcX, srcY, w, h);
+            fflush(stderr);
+        }
+    }
+    c.FlushPendingEncoder(); // end encoder để draws đi trước blit trong queue
     c.FlushAllBufferStaging();
     c.FlushAllTextureStaging();
-    c.CommitAndWait();
+    // Không chờ GPU: blitCopy tự commit CB trên cùng serial queue (thứ tự đúng).
+    // CommitAndWait ở đây là stall đồng bộ mỗi lần copy (gltop#1 9.9s/1872 calls).
     if (src.gpu->pixelFormat() == dst.gpu->pixelFormat() &&
         c.device->blitCopy(src.gpu.get(), dst.gpu.get(),
                            (uint32_t)srcX, (uint32_t)srcY,
                            (uint32_t)w, (uint32_t)h,
                            (uint32_t)dstX, (uint32_t)dstY)) {
         // GPU-only, không readback (giữ fps; sampling dùng GPU).
+        if (diagCopyNo) {
+            fprintf(stderr, "[TGLMT] cimg#%d GPU blit OK\n", diagCopyNo);
+            fflush(stderr);
+        }
         return;
+    }
+    if (diagCopyNo) {
+        fprintf(stderr, "[TGLMT] cimg#%d GPU blit FAIL -> CPU fallback\n", diagCopyNo);
+        fflush(stderr);
     }
     c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: khác format/fail, CPU shadow");
     // P1: nguồn đọc từ GPU (shadow base-level có thể rỗng trên Apple); bản ghi
@@ -1596,7 +1621,16 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
     const std::vector<uint8_t>* sPx = nullptr;
     if (c.ReadTextureGPU(src, srcOwn)) sPx = &srcOwn;
     else if (src.pixels.size() >= (size_t)src.w * src.h * 4) sPx = &src.pixels;
-    if (!sPx) return;
+    if (!sPx) {
+        if (diagCopyNo) {
+            // Depth32F không đọc được RGBA → copy shadow no-op = shadow map rỗng
+            // (CR tối, MakeUp mất bóng). In rõ để không "im lặng".
+            fprintf(stderr, "[TGLMT] cimg#%d NO SOURCE PIXELS (ifmt=0x%x) -> copy no-op\n",
+                    diagCopyNo, (unsigned)src.internalFormat);
+            fflush(stderr);
+        }
+        return;
+    }
     std::vector<uint8_t> own;
     std::vector<uint8_t>* dPx = &dst.pixels;
     if (dPx->size() < (size_t)dst.w * dst.h * 4) {
