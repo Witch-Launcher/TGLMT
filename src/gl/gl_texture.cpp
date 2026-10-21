@@ -283,6 +283,26 @@ static metal::PixelFormat ToMetalFormat(GLenum internalFormat) {
         case 0x8C43: return metal::PixelFormat::RGBA8Unorm_sRGB;   // SRGB8_ALPHA8
         case 0x8229: return metal::PixelFormat::R8Unorm;           // R8
         case 0x822B: return metal::PixelFormat::RG8Unorm;          // RG8
+        // Shader pack (CR pipelineSettings): trước đây rơi default RGBA8Unorm
+        // → mất HDR/snorm (deferred lighting bị kẹp [0,1] rồi tối/đen) và log
+        // "internalFormat 0x... lạ". Không map thẳng G11F_B10F: A11 filterable
+        // RG11B10F không đảm bảo renderable → dùng RGBA16F (chuẩn cho HDR).
+        case 0x8C3A: return metal::PixelFormat::RGBA16Float;       // R11F_G11F_B10F
+        case 0x881B: return metal::PixelFormat::RGBA16Float;       // RGB16F
+        case 0x881A: return metal::PixelFormat::RGBA16Float;       // RGBA16F
+        case 0x805B: return metal::PixelFormat::RGBA16Float;       // RGBA16 (unorm→float)
+        case 0x8814: return metal::PixelFormat::RGBA32Float;       // RGBA32F
+        case 0x8815: return metal::PixelFormat::RGBA32Float;       // RGB32F
+        case 0x8051: return metal::PixelFormat::RGBA8Unorm;        // RGB8
+        case 0x8F96: return metal::PixelFormat::RGBA8Snorm;        // RGB8_SNORM
+        case 0x8F97: return metal::PixelFormat::RGBA8Snorm;        // RGBA8_SNORM
+        case 0x822F: return metal::PixelFormat::R8Snorm;           // R8_SNORM
+        case 0x8C41: return metal::PixelFormat::RGBA8Unorm_sRGB;   // SRGB8
+        case 0x8231: return metal::PixelFormat::R8Sint;            // R8I
+        case 0x8232: return metal::PixelFormat::R8Uint;            // R8UI
+        case 0x8233: return metal::PixelFormat::R16Sint;           // R16I
+        case 0x8234: return metal::PixelFormat::R16Uint;           // R16UI
+        case 0x822D: return metal::PixelFormat::R16Float;          // R16F
         case 0x822E: return metal::PixelFormat::R32Float;          // R32F (buffer)
         case 0x8235: return metal::PixelFormat::R32Sint;           // R32I (CloudFaces)
         case 0x8236: return metal::PixelFormat::R32Uint;           // R32UI (buffer)

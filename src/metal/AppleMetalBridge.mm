@@ -50,7 +50,15 @@ static MTLPixelFormat ToMTL(PixelFormat f) {
         case PixelFormat::BGRA8Unorm: return MTLPixelFormatBGRA8Unorm;
         case PixelFormat::BGRA8Unorm_sRGB: return MTLPixelFormatBGRA8Unorm_sRGB;
         case PixelFormat::R8Unorm: return MTLPixelFormatR8Unorm;
+        case PixelFormat::R8Snorm: return MTLPixelFormatR8Snorm;
         case PixelFormat::RG8Unorm: return MTLPixelFormatRG8Unorm;
+        case PixelFormat::RG8Snorm: return MTLPixelFormatRG8Snorm;
+        case PixelFormat::RGBA8Snorm: return MTLPixelFormatRGBA8Snorm;
+        // Shader pack (CR) colortex HDR: R11F_G11F_B10F/RGB16F/RGBA16F/16 → RGBA16F
+        // (renderable + filterable trên A11; RG11B10F rủi ro driver cũ).
+        case PixelFormat::RG11B10Float: return MTLPixelFormatRG11B10Float;
+        case PixelFormat::RGBA16Float: return MTLPixelFormatRGBA16Float;
+        case PixelFormat::RGBA32Float: return MTLPixelFormatRGBA32Float;
         case PixelFormat::R32Float: return MTLPixelFormatR32Float;
         case PixelFormat::R32Sint: return MTLPixelFormatR32Sint;
         case PixelFormat::R32Uint: return MTLPixelFormatR32Uint;

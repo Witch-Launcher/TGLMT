@@ -16,7 +16,9 @@ enum class PixelFormat : uint32_t {
     Invalid = 0, RGBA8Unorm = 70, RGBA8Unorm_sRGB = 71, RGBA8Uint = 73,
     BGRA8Unorm = 80, BGRA8Unorm_sRGB = 81,
     Depth32Float = 252, Depth24Stencil8 = 255, Stencil8 = 53,
-    R8Unorm = 10, RG8Unorm = 30, RGBA16Float = 115, RGBA32Float = 125,
+    R8Unorm = 10, R8Snorm = 12, RG8Unorm = 30, RG8Snorm = 32,
+    RGBA8Snorm = 72, RG11B10Float = 92,
+    RGBA16Float = 115, RGBA32Float = 125,
     // Số = MTLPixelFormat thật (MTLPixelFormat.h). Trước đây R32Sint/Uint ghi
     // 56/57 (sai; thật 54/53) — vô hại vì ToMTL map theo switch, đã sửa đúng.
     R32Float = 55, R32Sint = 54, R32Uint = 53, // buffer textures (CloudFaces)
@@ -24,6 +26,37 @@ enum class PixelFormat : uint32_t {
     R8Sint = 14, R8Uint = 13,
     R16Sint = 24, R16Uint = 23, R16Float = 25,
 };
+
+// Bytes/texel (level 0) — nguồn sự thật cho bpr readback/guard. Stencil8 trùng
+// giá trị R32Uint (53) nên không tách case được → quy ước 4B (xem TexelBytes).
+inline size_t PixelFormatBytes(PixelFormat f) {
+    switch (f) {
+        case PixelFormat::RGBA16Float:
+        case PixelFormat::RG8Unorm:
+        case PixelFormat::RG8Snorm:
+        case PixelFormat::R16Sint:
+        case PixelFormat::R16Uint:
+        case PixelFormat::R16Float: return 2;
+        case PixelFormat::RGBA32Float: return 16;
+        case PixelFormat::R8Unorm:
+        case PixelFormat::R8Snorm:
+        case PixelFormat::R8Sint:
+        case PixelFormat::R8Uint: return 1;
+        case PixelFormat::Depth32Float:
+        case PixelFormat::Depth24Stencil8:
+        case PixelFormat::RGBA8Unorm:
+        case PixelFormat::RGBA8Unorm_sRGB:
+        case PixelFormat::RGBA8Uint:
+        case PixelFormat::RGBA8Snorm:
+        case PixelFormat::BGRA8Unorm:
+        case PixelFormat::BGRA8Unorm_sRGB:
+        case PixelFormat::RG11B10Float:
+        case PixelFormat::R32Float:
+        case PixelFormat::R32Sint:
+        case PixelFormat::R32Uint: return 4;
+        default: return 0;
+    }
+}
 // GL enum thô (giá trị từ gl.xml) cho blend/sampler — bridge ánh xạ sang MTL*.
 // Không include GL header ở đây để giữ IMetal độc lập platform.
 struct AttachmentBlend {

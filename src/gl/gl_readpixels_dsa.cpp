@@ -55,6 +55,19 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
         }
         if (tgt) {
             size_t need = (size_t)w * h * 4;
+            // Guard: tgt HDR (RGBA16F 8B/px từ pack format) → buffer full 4B/px
+            // sẽ bị GPU ghi TRÀN. Chỉ GPU-readback khi đúng 4B/px; còn lại rơi
+            // shadow path (log) — glReadPixels vào colortex HDR không dùng.
+            size_t tgtBpp = 4;
+            if (tex && tex->gpu) {
+                tgtBpp = metal::PixelFormatBytes(tex->gpu->pixelFormat());
+                if (tgtBpp == 0) tgtBpp = 4;
+            }
+            if (tgtBpp != 4) {
+                c.LogDebug(0, 0, 0, 0,
+                           "glReadPixels: target HDR/không 4B/px → dùng shadow");
+                tgt = nullptr;
+            } else {
             std::vector<uint8_t> full((size_t)tgt->width() * tgt->height() * 4, 0);
             if (tgt->readback(full.data(), (size_t)tgt->width() * 4)) {
                 // Đọc vào buffer tạm tight trước, rồi mới ghi ra đích (con trỏ
@@ -82,6 +95,7 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
                 }
                 return;
             }
+            } // tgtBpp == 4
         }
         // GPU readback thất bại → rơi xuống shadow (ghi log, không im lặng)
         c.LogDebug(0, 0, 0, 0, "glReadPixels: GPU readback fail, dùng shadow");

@@ -249,33 +249,10 @@ void Context::ThrottleGpu() {
 // khỏi tài nguyên Metal thật. Quy tắc P1: nơi nào ITexture/IBuffer là Shared
 // (CPU đọc được) thì shadow là dư — đây là bằng chứng đo trước khi cắt.
 static uint64_t TexelBytes(metal::PixelFormat f) {
-    using PF = metal::PixelFormat;
-    // Lưu ý: enum va chạm giá trị (R32Uint == Stencil8 == 53, xem MetalInterface.h)
-    // nên Stencil8 không tách case được — quy ước 53 = 4B (R32Uint). Sai lệch chỉ
-    // 3B/px trên attachment stencil hiếm, vô nghĩa với mục tiêu đo shadow.
-    switch (f) {
-        case PF::RGBA8Unorm:
-        case PF::RGBA8Unorm_sRGB:
-        case PF::RGBA8Uint:
-        case PF::BGRA8Unorm:
-        case PF::BGRA8Unorm_sRGB:
-        case PF::R32Float:
-        case PF::R32Sint:
-        case PF::R32Uint:
-        case PF::Depth24Stencil8:
-        case PF::Depth32Float: return 4;
-        case PF::RGBA16Float:
-        case PF::R16Sint:
-        case PF::R16Uint:
-        case PF::R16Float:
-        case PF::RG8Unorm: return 2;
-        case PF::RGBA32Float: return 16;
-        case PF::R8Unorm:
-        case PF::R8Sint:
-        case PF::R8Uint: return 1;
-        case PF::Invalid:
-        default: return 4; // bao gồm Stencil8 (giá trị trùng R32Uint)
-    }
+    // Bảng duy nhất ở MetalInterface.h (PixelFormatBytes) — tránh 2 bảng lệch
+    // nhau khi thêm format pack (RGBA16F/SNORM...). Invalid/Stencil8 → 4.
+    size_t b = metal::PixelFormatBytes(f);
+    return b ? (uint64_t)b : 4;
 }
 
 // P1: đọc nguyên level-0 từ GPU (bản tạm). Xem chú thích khai báo trong Context.h.
@@ -284,6 +261,16 @@ bool Context::ReadTextureGPU(const TextureObject& tx, std::vector<uint8_t>& out)
     if (!tx.gpu || !tx.w || !tx.h) return false;
     if (!device || device->isNull()) return false;
     if (!TexReadableFromGPU(tx)) return false;
+    // Contract cũ: out = RGBA8 4B/px (caller index i*4). Sau khi map HDR
+    // (RGBA16F/RGBA32F...) một texture render-target có thể 8-16B/px; đọc bằng
+    // bpr 4*w sẽ TRÀN buffer GPU ghi. Từ chối thay vì trả rác → caller fallback
+    // CPU shadow (nullbackend) như trước.
+    if (TexelBytes(tx.gpu->pixelFormat()) != 4) {
+        if (DiagOn())
+            fprintf(stderr, "[TGLMT] ReadTextureGPU: tex=%u bpp!=4 (fmt=%u) → skip\n",
+                    (unsigned)tx.id, (unsigned)tx.gpu->pixelFormat());
+        return false;
+    }
     FlushPendingEncoder(); // IR: commit batch trước khi readback
     FlushAllBufferStaging();
     FlushAllTextureStaging();

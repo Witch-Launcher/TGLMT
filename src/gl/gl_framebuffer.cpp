@@ -313,7 +313,9 @@ static void BlitWithDefault(Context& c, GLuint readFbo, GLuint drawFbo,
         // cuối frame thật sự là sky-blue hay đen. Flush+commit để draw hiện hành
         // đã tới card trước getBytes (giống nhánh CPU fallback dưới). Throttle:
         // lần đầu + đổi nguồn + mỗi 60 blit (~2.5s ở 24fps).
-        if (c.DiagOn() && tit->second.w > 0 && tit->second.h > 0) {
+        if (c.DiagOn() && tit->second.w > 0 && tit->second.h > 0 &&
+            tit->second.gpu &&
+            metal::PixelFormatBytes(tit->second.gpu->pixelFormat()) == 4) {
             static uint64_t nBl = 0;
             static GLuint lastSrc = 0;
             ++nBl;
