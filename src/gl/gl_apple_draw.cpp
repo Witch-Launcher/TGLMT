@@ -10,6 +10,7 @@
 #include "tglmt/GLConvert.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -1712,7 +1713,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
         }
         enc->setVertexTexture(gpu, (uint32_t)k);
-        if (ss) enc->setVertexSamplerState(ss.get(), (uint32_t)k);
+        if (ss) {
+            auto sk = pr.samplerSlots.find(name);
+            enc->setVertexSamplerState(ss.get(), (uint32_t)(sk == pr.samplerSlots.end() ? k : sk->second));
+        }
     }
     for (size_t k = 0; k < pr.fsSamplers.size(); ++k) {
         const std::string& name = pr.fsSamplers[k];
@@ -1890,7 +1894,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             }
         }
         enc->setFragmentTexture(gpu, (uint32_t)k);
-        if (ss) enc->setFragmentSamplerState(ss.get(), (uint32_t)k);
+        if (ss) {
+            auto sk = pr.samplerSlots.find(name);
+            enc->setFragmentSamplerState(ss.get(), (uint32_t)(sk == pr.samplerSlots.end() ? k : sk->second));
+        }
     }
     // P6g image: bind texture từ imageBindPoints[unit] vào texture(slot).
     // Vertex images → setVertexTexture; fragment → setFragmentTexture.
@@ -2216,6 +2223,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     for (auto& kv : c.textures) {
                         auto& t = kv.second;
                         if (!t.wasRT || !t.gpu || t.w < 512 || t.h < 512) continue;
+                        // Chỉ probe RGBA8 4B/px — HDR (RGBA16F...) đọc bpr 4B sẽ
+                        // tràn buffer (format pack giờ được map thật).
+                        if (metal::PixelFormatBytes(t.gpu->pixelFormat()) != 4) continue;
                         if (nProbe++ >= 8) break;
                         size_t w = t.w, h = t.h;
                         std::vector<uint8_t> fb(w * h * 4, 0);
@@ -2342,6 +2352,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                             auto tit = c.textures.find(tx);
                             if (tit == c.textures.end() || !tit->second.gpu) continue;
                             if (tit->second.w != 16 || tit->second.h != 16) continue;
+                            if (metal::PixelFormatBytes(tit->second.gpu->pixelFormat()) != 4)
+                                continue;
                             c.FlushPendingEncoder();
                             c.CommitAndWait();
                             std::vector<uint8_t> fb(16 * 16 * 4, 0);
@@ -2493,7 +2505,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                                                     KindTarget(KindOf(pr.samplerKind, "InSampler")));
                     auto tit = c.textures.find(btex);
                     if (tit != c.textures.end() && tit->second.gpu && tit->second.w > 0 &&
-                        tit->second.h > 0) {
+                        tit->second.h > 0 &&
+                        metal::PixelFormatBytes(tit->second.gpu->pixelFormat()) == 4) {
                         c.FlushPendingEncoder();
                         c.CommitAndWait();
                         size_t w = tit->second.w, h = tit->second.h;
@@ -2542,7 +2555,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     auto tit = c.textures.find(tx);
                     if (tit == c.textures.end() || !tit->second.wasRT) continue;
                     if (tit->second.gpu && tit->second.w >= 512 && tit->second.h >= 512 &&
-                        tit->second.w == tit->second.h) {
+                        tit->second.w == tit->second.h &&
+                        metal::PixelFormatBytes(tit->second.gpu->pixelFormat()) == 4) {
                         icoTex = tx;
                         return;
                     }
@@ -2603,6 +2617,121 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                     } else {
                         fprintf(stderr, "[TGLMT] iconatlas# tex=%u FAIL prog@%u\n", icoTex, prog);
                     }
+                }
+            }
+        }
+        // Chainprobe: đọc lại texture colortex screen-scale mà program đang
+        // SAMPLE, ở draw thứ 20 (sau khi chunk/world đã ổn định — frame đầu
+        // sau reload có thể chưa có terrain → tránh kết luận "đen" oan).
+        // Mục đích: xác định chính xác pass đầu tiên trong chuỗi deferred/
+        // composite ghi ra đen, thay vì đoán từ ảnh chụp.
+        {
+            static std::map<GLuint, int> chainCount;
+            int dc = ++chainCount[prog];
+            static std::set<std::pair<GLuint, GLuint>> chainSeen;
+            if (dc == 20 && chainSeen.size() < 40) {
+                auto half2f = [](uint16_t h) -> float {
+                    uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+                    uint32_t exp = (h >> 10) & 0x1F, man = h & 0x3FF, f;
+                    if (exp == 0) {
+                        if (!man) f = sign;
+                        else {
+                            int e = -1;
+                            do { ++e; man <<= 1; } while (!(man & 0x400));
+                            f = sign | ((uint32_t)(127 - 15 - e) << 23) |
+                                ((man & 0x3FF) << 13);
+                        }
+                    } else if (exp == 31) {
+                        f = sign | 0x7F800000u | (man << 13);
+                    } else {
+                        f = sign | ((exp + 112) << 23) | (man << 13);
+                    }
+                    float o; memcpy(&o, &f, 4);
+                    return o;
+                };
+                auto bppOf = [](metal::PixelFormat f) -> size_t {
+                    // Depth Private readback = rác/0 → bỏ (không probe).
+                    if (f == metal::PixelFormat::Depth32Float ||
+                        f == metal::PixelFormat::Depth24Stencil8)
+                        return 0;
+                    return metal::PixelFormatBytes(f);
+                };
+                for (auto& nm : pr.fsSamplers) {
+                    if (nm.rfind("colortex", 0) != 0) continue;
+                    if (chainSeen.size() >= 40) break;
+                    GLuint unit = pr.samplerUnits.count(nm) ? pr.samplerUnits[nm] : 0;
+                    GLuint tx = c.state.BoundTexture(unit, 0x0DE1);
+                    if (!tx || !chainSeen.insert({prog, tx}).second) continue;
+                    auto tit = c.textures.find(tx);
+                    if (tit == c.textures.end() || !tit->second.gpu) continue;
+                    size_t w = tit->second.w, h = tit->second.h;
+                    if (w < 512 || !h) continue;
+                    size_t bpp = bppOf(tit->second.gpu->pixelFormat());
+                    if (bpp < 1 || bpp > 8) continue;
+                    c.FlushPendingEncoder();
+                    c.CommitAndWait();
+                    std::vector<uint8_t> fb(w * h * bpp, 0);
+                    auto wt = c.device->wrapAsTarget(tit->second.gpu.get(), nullptr);
+                    if (!wt || !wt->readback(fb.data(), w * bpp)) {
+                        fprintf(stderr, "[TGLMT] chainprobe#%u %s tex=%u %zux%zu FAIL\n",
+                                prog, nm.c_str(), tx, w, h);
+                        continue;
+                    }
+                    auto fetch = [&](size_t x, size_t y, float* o) {
+                        const uint8_t* p = fb.data() + (y * w + x) * bpp;
+                        o[0] = o[1] = o[2] = o[3] = 0.f;
+                        if (bpp == 1) {
+                            o[0] = p[0] / 255.f;
+                        } else if (bpp == 2) {
+                            o[0] = p[0] / 255.f; o[1] = p[1] / 255.f;
+                        } else if (bpp == 4) {
+                            if (tit->second.gpu->pixelFormat() ==
+                                    metal::PixelFormat::RGBA8Snorm) {
+                                o[0] = std::max(-1.f, p[0] / 127.5f - 1.f);
+                                o[1] = std::max(-1.f, p[1] / 127.5f - 1.f);
+                                o[2] = std::max(-1.f, p[2] / 127.5f - 1.f);
+                                o[3] = p[3] / 127.5f - 1.f;
+                            } else {
+                                o[0] = p[0] / 255.f; o[1] = p[1] / 255.f;
+                                o[2] = p[2] / 255.f; o[3] = p[3] / 255.f;
+                            }
+                        } else if (bpp == 8) {
+                            uint16_t v[4];
+                            memcpy(v, p, 8);
+                            o[0] = half2f(v[0]); o[1] = half2f(v[1]);
+                            o[2] = half2f(v[2]); o[3] = half2f(v[3]);
+                        } else if (bpp == 16) {
+                            float v[4];
+                            memcpy(v, p, 16);
+                            o[0] = v[0]; o[1] = v[1]; o[2] = v[2]; o[3] = v[3];
+                        }
+                    };
+                    size_t n = 4096, stride = std::max<size_t>(1, (w * h) / n);
+                    double sr = 0, sg = 0, sb = 0, mn = 1e30, mx = -1e30;
+                    size_t nz = 0, tot = 0;
+                    float v[4];
+                    for (size_t i = 0; i < w * h; i += stride) {
+                        fetch(i % w, i / w, v);
+                        sr += v[0]; sg += v[1]; sb += v[2];
+                        double l = std::max(std::fabs(v[0]), std::max(std::fabs(v[1]),
+                                                                    std::fabs(v[2])));
+                        if (l < mn) mn = l;
+                        if (l > mx) mx = l;
+                        if (l > 1e-5) ++nz;
+                        ++tot;
+                    }
+                    float pc[4], pt[4];
+                    fetch(w / 2, h / 2, pc);
+                    fetch(w / 2, h / 8, pt);
+                    fprintf(stderr,
+                            "[TGLMT] chainprobe#%u %s tex=%u %zux%zu ifmt=0x%x "
+                            "avg=(%.3f,%.3f,%.3f) min=%.3f max=%.3f nz=%zu/%zu "
+                            "ctr=(%.3f,%.3f,%.3f) top=(%.3f,%.3f,%.3f)\n",
+                            prog, nm.c_str(), tx, w, h,
+                            (unsigned)tit->second.internalFormat,
+                            sr / tot, sg / tot, sb / tot, mn, mx, nz, tot,
+                            pc[0], pc[1], pc[2], pt[0], pt[1], pt[2]);
+                    fflush(stderr);
                 }
             }
         }

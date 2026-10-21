@@ -41,6 +41,9 @@ struct GLSLVar {
     // chuẩn hoá = tessVertices sau đó. SSBO unsized cũng dùng -1 (quy ước chung).
     bool isPatch = false;  // P-Tess: `patch out/in` (per-patch, khác per-vertex)
     bool isSampler = false;
+    // Metal sampler attribute slot (khác texture slot khi sampler không dùng:
+    // pack khai báo >16 texture nhưng chỉ sample một phần — Photon deferred4).
+    int samplerSlot = -1;
     bool isBuffer = false;       // samplerBuffer/isamplerBuffer/usamplerBuffer
     std::string sampleType = "float"; // float/int/uint (cho buffer + read)
     bool isCube = false;   // samplerCube → texturecube (panorama)

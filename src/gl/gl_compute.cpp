@@ -227,7 +227,10 @@ static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
         }
         if (!gpu && black) gpu = black.get();
         if (gpu) enc->setTexture(gpu, (uint32_t)k);
-        if (ssDef) enc->setSamplerState(ssDef.get(), (uint32_t)k);
+        if (ssDef) {
+            auto sk = pr.samplerSlots.find(name);
+            enc->setSamplerState(ssDef.get(), (uint32_t)(sk == pr.samplerSlots.end() ? k : sk->second));
+        }
     }
     // P6g image: bind texture từ imageBindPoints[unit] vào texture(slot).
     // Image texture KHÔNG cần sampler state (texel access, không sample).
@@ -378,7 +381,10 @@ void glDispatchComputeIndirect(GLintptr ind) {
         }
         if (!gpuTex && black) gpuTex = black.get();
         if (gpuTex) enc->setTexture(gpuTex, (uint32_t)k);
-        if (ssDef) enc->setSamplerState(ssDef.get(), (uint32_t)k);
+        if (ssDef) {
+            auto sk = pr.samplerSlots.find(name);
+            enc->setSamplerState(ssDef.get(), (uint32_t)(sk == pr.samplerSlots.end() ? k : sk->second));
+        }
     }
     for (auto& isl : pr.computeImages) {
         metal::ITexture* gpuTex = nullptr;

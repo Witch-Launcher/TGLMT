@@ -78,6 +78,11 @@ def compile_case(tag, src, tmpd, cli, metal):
     return "PASS", ""
 
 
+IRIS_PROGRAM = re.compile(
+    r"^(shadow|shadow_(solid|cutout|translucent)|"
+    r"shadowcomp\d*|prepare\d*|setup\d*|begin\d*|deferred\d*|composite\d*|final\d*|"
+    r"gbuffers_(?!voxels\b)[a-z_]+)$")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("pack")
@@ -97,9 +102,11 @@ def main():
 
     pack = os.path.abspath(args.pack)
     wdir = os.path.join(pack, args.world)
+    root_fallback = False
     if not os.path.isdir(wdir):
-        print(f"không thấy {wdir}", file=sys.stderr)
-        return 2
+        # Iris: pack không có world0/ → program world0 nằm ngay root shaders/.
+        wdir = pack
+        root_fallback = True
 
     defines = iris_standard_defines()
     for d in args.define:
@@ -119,6 +126,11 @@ def main():
     for fn in files:
         name, ext = os.path.splitext(fn)
         if args.only and not any(o in name for o in args.only):
+            continue
+        # Iris chỉ load ProgramId chuẩn — file lạ (photon `shadow_voxels`) không
+        # bao giờ compile trong game; bỏ để sweep phản ánh đúng runtime.
+        if not IRIS_PROGRAM.match(name):
+            results.append(("SKIP", fn, "không phải program Iris"))
             continue
         if f"{args.world}/{name}" in disabled or name in disabled:
             results.append(("SKIP", fn, "disabled in shaders.properties"))
@@ -146,7 +158,8 @@ def main():
         if not args.no_newlines and ext == ".vsh" and name == "shadow":
             variants.append(("_nl", {"newlines": True}))
         for suffix, kw in variants:
-            src, _ = preprocess(pack, f"{args.world}/{name}", stages[ext], defines,
+            prog = name if root_fallback else f"{args.world}/{name}"
+            src, _ = preprocess(pack, prog, stages[ext], defines,
                                 iris_patch=True, **kw)
             if src is None:
                 continue

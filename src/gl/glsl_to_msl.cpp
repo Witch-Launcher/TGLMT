@@ -95,6 +95,15 @@ static std::string MSLType(const std::string& t, bool& ok) {
     if (t == "mat2") return "float2x2";
     if (t == "mat3") return "float3x3";
     if (t == "mat4") return "float4x4";
+    if (t == "mat2x2") return "float2x2";
+    if (t == "mat2x3") return "float2x3";
+    if (t == "mat2x4") return "float2x4";
+    if (t == "mat3x2") return "float3x2";
+    if (t == "mat3x3") return "float3x3";
+    if (t == "mat3x4") return "float3x4";
+    if (t == "mat4x2") return "float4x2";
+    if (t == "mat4x3") return "float4x3";
+    if (t == "mat4x4") return "float4x4";
     if (t == "int") return "int";
     if (t == "ivec2") return "int2";
     if (t == "ivec3") return "int3";
@@ -361,12 +370,61 @@ static bool ParseDecl(const std::string& stmt, bool isVertex,
     v = vs[0];
     return true;
 }
+// GLSL cho phép `new`/`and`/`or`... làm identifier; MSL là C++14 → đó là
+// keyword/operator (BSL: `bool new = ...`). Đổi tên token đồng nhất toàn source
+// (khai báo + mọi use) trước khi parse. Bỏ qua string literal.
+static void RenameCxxOnlyKeywords(std::string& s) {
+    static const char* kWords[] = {"new", "delete", "and", "or", "not", "xor", "bitand",
+                                   "bitor", "compl", "and_eq", "or_eq", "xor_eq", "not_eq",
+                                   // MSL keyword / metal:: member → `using namespace metal`
+                                   // làm ambiguous (Bliss: hàm `bias()` đụng metal::bias).
+                                   "bias", "thread", "device", "threadgroup", "constant",
+                                   "access", "kernel", "vertex", "fragment", nullptr};
+    std::string out;
+    out.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c == '"') {
+            size_t j = i + 1;
+            while (j < s.size()) {
+                if (s[j] == '\\') { j += 2; continue; }
+                if (s[j] == '"') { ++j; break; }
+                ++j;
+            }
+            out += s.substr(i, j - i);
+            i = j;
+            continue;
+        }
+        if (!(isalpha((unsigned char)c) || c == '_')) {
+            out += c;
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        while (j < s.size() && IsIdentChar(s[j], j == i)) ++j;
+        std::string w = s.substr(i, j - i);
+        bool hit = false;
+        for (const char** kw = kWords; *kw; ++kw)
+            if (w == *kw) { hit = true; break; }
+        if (hit) {
+            // `.new` (member) cũng phải đổi theo — struct member đã đổi cùng.
+            out += "tglmt_kw_";
+        }
+        out += w;
+        i = j;
+    }
+    s.swap(out);
+}
 // Viết lại tên kiểu GLSL trong biểu thức (vec→float...), theo word-boundary.
 static std::string RewriteTypeNames(std::string s) {
     for (auto& rp : std::vector<std::pair<std::string, std::string>>{
              {"vec2", "float2"}, {"vec3", "float3"}, {"vec4", "float4"},
              {"ivec2", "int2"}, {"ivec3", "int3"}, {"ivec4", "int4"},
              {"uvec2", "uint2"}, {"uvec3", "uint3"}, {"uvec4", "uint4"},
+             {"mat2x2", "float2x2"}, {"mat2x3", "float2x3"}, {"mat2x4", "float2x4"},
+             {"mat3x2", "float3x2"}, {"mat3x3", "float3x3"}, {"mat3x4", "float3x4"},
+             {"mat4x2", "float4x2"}, {"mat4x3", "float4x3"}, {"mat4x4", "float4x4"},
              {"mat2", "float2x2"}, {"mat3", "float3x3"}, {"mat4", "float4x4"}}) {
         size_t pp = 0;
         while ((pp = s.find(rp.first, pp)) != std::string::npos) {
@@ -386,10 +444,428 @@ static std::string RewriteTypeNames(std::string s) {
 // `TYPE[](e1, e2, ...)` (array constructor: animate_sprite positions,
 // end_portal COLORS, terrain offsets) → `{e1, e2, ...}` vì MSL không có
 // cú pháp `float2[](...)`. Chạy TRƯỚC RewriteIdents trên body và helpers.
+// `T name[] = { ... }` (declarator-side, Photon final.fsh `uint characters[]`) →
+// `T name[N] = { ... }` để MSL biết size (và `.length()` resolve được).
+static void SizeArrayDeclarators(std::string& text) {
+    for (size_t i = 0; i + 2 < text.size(); ++i) {
+        if (!IsIdentChar(text[i], true)) continue;
+        size_t e = i + 1;
+        while (e < text.size() && IsIdentChar(text[e], false)) ++e;
+        size_t p = e;
+        while (p < text.size() && isspace((unsigned char)text[p])) ++p;
+        if (p >= text.size() || text[p] != '[') { i = e - 1; continue; }
+        size_t q = p + 1;
+        while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+        if (q >= text.size() || text[q] != ']') { i = e - 1; continue; }
+        size_t r = q + 1;
+        while (r < text.size() && isspace((unsigned char)text[r])) ++r;
+        if (r >= text.size() || text[r] != '=') { i = e - 1; continue; }
+        ++r;
+        while (r < text.size() && isspace((unsigned char)text[r])) ++r;
+        if (r >= text.size() || text[r] != '{') { i = e - 1; continue; }
+        int bd = 0, pd = 0, elems = 1;
+        bool empty = true, okB = false;
+        size_t g = r;
+        for (; g < text.size(); ++g) {
+            char ch = text[g];
+            if (ch == '{') { ++bd; empty = false; }
+            else if (ch == '}') { if (--bd == 0) { okB = true; break; } }
+            else if (ch == '(' || ch == '[') ++pd;
+            else if (ch == ')' || ch == ']') --pd;
+            else if (ch == ',' && bd == 1 && pd == 0) ++elems;
+            else if (!isspace((unsigned char)ch)) empty = false;
+        }
+        if (!okB || empty) { i = e - 1; continue; }
+        text.insert(q, std::to_string(elems));
+        i = g;
+    }
+}
+// C++ (MSL) cấm nhảy qua khởi tạo biến trong switch: `case 0: float2x3 x = ...;`
+// rồi `case 1:` → "cannot jump from switch statement to this case label"
+// (Photon composite). Bọc thân mỗi case trong {} (giữ fallthrough rỗng).
+static void WrapSwitchCaseBodies(std::string& text) {
+    size_t p = 0;
+    while ((p = text.find("switch", p)) != std::string::npos) {
+        if (p > 0 && IsIdentChar(text[p - 1], false)) { p += 6; continue; }
+        size_t lb = p + 6;
+        while (lb < text.size() && isspace((unsigned char)text[lb])) ++lb;
+        if (lb >= text.size() || text[lb] != '(') { p += 6; continue; }
+        int pd = 0;
+        size_t rb = lb;
+        for (; rb < text.size(); ++rb) {
+            if (text[rb] == '(') ++pd;
+            else if (text[rb] == ')') { if (--pd == 0) break; }
+        }
+        if (rb >= text.size()) break;
+        size_t ob = rb + 1;
+        while (ob < text.size() && isspace((unsigned char)text[ob])) ++ob;
+        if (ob >= text.size() || text[ob] != '{') { p = rb + 1; continue; }
+        int bd = 0;
+        size_t cbe = ob;
+        for (; cbe < text.size(); ++cbe) {
+            if (text[cbe] == '{') ++bd;
+            else if (text[cbe] == '}') { if (--bd == 0) break; }
+        }
+        if (cbe >= text.size()) break;
+        struct Lab { size_t start; size_t colon; bool wrap; };
+        std::vector<Lab> labs;
+        int dep = 0;
+        for (size_t k = ob + 1; k < cbe; ++k) {
+            char c = text[k];
+            if (c == '{') { ++dep; continue; }
+            if (c == '}') { --dep; continue; }
+            if (dep != 0) continue;
+            if (!(isalpha((unsigned char)c) || c == '_')) continue;
+            if (IsIdentChar(text[k - 1], false)) continue;
+            size_t e = k;
+            while (e < cbe && IsIdentChar(text[e], false)) ++e;
+            std::string w = text.substr(k, e - k);
+            if (w != "case" && w != "default") { k = e - 1; continue; }
+            int dd = 0;
+            size_t cl = e;
+            for (; cl < cbe; ++cl) {
+                if (text[cl] == '(' || text[cl] == '[') ++dd;
+                else if (text[cl] == ')' || text[cl] == ']') --dd;
+                else if (text[cl] == ':' && dd == 0) break;
+            }
+            if (cl >= cbe) break;
+            labs.push_back({k, cl, false});
+            k = cl;
+        }
+        // xác định body cần wrap (không rỗng, không bắt đầu bằng '{')
+        for (size_t li = 0; li < labs.size(); ++li) {
+            size_t e2 = labs[li].colon + 1;
+            while (e2 < text.size() && isspace((unsigned char)text[e2])) ++e2;
+            size_t bodyEnd = (li + 1 < labs.size()) ? labs[li + 1].start : cbe;
+            size_t ce = bodyEnd;
+            while (ce > labs[li].colon + 1 && isspace((unsigned char)text[ce - 1])) --ce;
+            labs[li].wrap = (ce > e2) && (e2 >= text.size() || text[e2] != '{');
+        }
+        std::vector<std::pair<size_t, std::string>> ins;
+        for (size_t li = 0; li < labs.size(); ++li) {
+            if (!labs[li].wrap) continue;
+            ins.push_back({labs[li].colon + 1, " {"});
+            size_t bodyEnd = (li + 1 < labs.size()) ? labs[li + 1].start : cbe;
+            size_t ce = bodyEnd;
+            while (ce > labs[li].colon + 1 && isspace((unsigned char)text[ce - 1])) --ce;
+            ins.push_back({ce, " }"});
+        }
+        std::sort(ins.begin(), ins.end(),
+                  [](const std::pair<size_t, std::string>& a,
+                     const std::pair<size_t, std::string>& b) { return a.first > b.first; });
+        for (auto& in : ins) text.insert(in.first, in.second);
+        p = cbe + 1;
+    }
+}
+// GLSL: `1.0 / textureSize(...).xy` (rcp macro) ngầm int→float; MSL cấm.
+// Bọc `int2(...)[.swizzle]` bằng floatN(...) khi vế kia là literal float
+// (Photon d2_clouds_upscaling texture_min_4x4).
+static char NearestDeclFamily(const std::string& text, size_t at, const std::string& nm,
+                              int* dim);
+
+// `smoothstep(15000, 24000, x<float>)` — int literal cạnh float → MSL ambiguous
+// (float vs half overload). Bọc literal nguyên trong float().
+static void FloatifyNumericLiteralArgsInCall(std::string& text, const char* fname) {
+    std::string needle = std::string(fname) + "(";
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t p = text.find(needle, i);
+        if (p == std::string::npos) { out += text.substr(i); break; }
+        bool l = p > 0 && IsIdentChar(text[p - 1], false);
+        if (l) { out += text.substr(i, p - i + 1); i = p + 1; continue; }
+        size_t lp = p + needle.size() - 1;
+        int d = 0;
+        size_t k = lp;
+        for (; k < text.size(); ++k) {
+            if (text[k] == '(') ++d;
+            else if (text[k] == ')') { if (--d == 0) break; }
+        }
+        if (k >= text.size()) { out += text.substr(i); break; }
+        std::vector<std::string> args = SplitCallArgs(text.substr(lp + 1, k - lp - 1));
+        std::string rep = fname;
+        rep += "(";
+        for (size_t ai = 0; ai < args.size(); ++ai) {
+            std::string t = Trim(args[ai]);
+            bool intLit = !t.empty();
+            for (size_t c = 0; c < t.size() && intLit; ++c)
+                if (!isdigit((unsigned char)t[c]) && !(c == 0 && (t[c] == '-' || t[c] == '+')))
+                    intLit = false;
+            if (ai) rep += ", ";
+            rep += intLit ? ("float(" + t + ")") : t;
+        }
+        rep += ")";
+        out += text.substr(i, p - i);
+        out += rep;
+        i = k + 1;
+    }
+    text.swap(out);
+}
+static void PromoteIntVecCastsInFloatArith(std::string& text,
+                                           const std::vector<GLSLVar>& uniforms = {},
+                                           const std::vector<GLSLVar>& vars = {}) {
+    struct Ins { size_t at; std::string s; };
+    std::vector<Ins> ins;
+    std::map<std::string, int> floatDim;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text.compare(i, 5, "float") != 0 || (i > 0 && IsIdentChar(text[i - 1], false)))
+            continue;
+        int dim = 1;
+        size_t p = i + 5;
+        if (p < text.size() && text[p] >= '2' && text[p] <= '4') { dim = text[p] - '0'; ++p; }
+        if (p < text.size() && !isspace((unsigned char)text[p])) continue;
+        while (p < text.size() && isspace((unsigned char)text[p])) ++p;
+        if (p >= text.size() || !(isalpha((unsigned char)text[p]) || text[p] == '_')) continue;
+        size_t e2 = p;
+        while (e2 < text.size() && IsIdentChar(text[e2], e2 == p)) ++e2;
+        floatDim[text.substr(p, e2 - p)] = dim;
+    }
+    auto isFloatBuiltinName = [](const std::string& n) {
+        static const char* k[] = {"floor", "ceil", "fract", "abs", "sign", "sqrt", "rsqrt",
+            "exp", "exp2", "log", "log2", "pow", "sin", "cos", "tan", "asin", "acos",
+            "atan", "atan2", "min", "max", "clamp", "mix", "step", "smoothstep", "mod",
+            "fma", "dot", "cross", "length", "distance", "normalize", "reflect",
+            "refract", "faceforward", "round", "trunc", "radians", "degrees", "saturate",
+            "transpose", "determinant", "inverse", "select", "any", "all", nullptr};
+        for (const char** q = k; *q; ++q) if (n == *q) return true;
+        return false;
+    };
+    auto floatUniformMember = [&](const std::string& name) -> bool {
+        for (auto& u : uniforms)
+            if (u.name == name && u.mslType.compare(0, 5, "float") == 0) return true;
+        for (auto& u : vars)
+            if (u.name == name && u.mslType.compare(0, 5, "float") == 0) return true;
+        return false;
+    };
+    auto memberRootFloat = [&](const std::string& t) -> int {
+        // 1 = member float, 0 = member int-family, -1 = không rõ
+        size_t dot = t.find('.');
+        if (dot == std::string::npos || dot == 0) return -1;
+        std::string base = t.substr(0, dot);
+        bool root = base == "_out" || base == "_in" || base == "tglmt_u" ||
+                    base.rfind("ubo_", 0) == 0 || base.rfind("ssbo_", 0) == 0;
+        if (!root) return -1;
+        std::string mem = t.substr(dot + 1);
+        size_t sw = mem.rfind('.');
+        if (sw != std::string::npos) mem = mem.substr(0, sw);
+        auto itf = floatDim.find(mem);
+        if (itf != floatDim.end()) return 1;
+        for (auto& u : uniforms)
+            if (u.name == mem)
+                return u.mslType.compare(0, 5, "float") == 0 ? 1 : 0;
+        for (auto& u : vars)
+            if (u.name == mem)
+                return u.mslType.compare(0, 5, "float") == 0 ? 1 : 0;
+        return -1;
+    };
+    // operand kết thúc (exclusive) tại `end` có phải float?
+    auto floatEnd = [&](size_t end) -> bool {
+        size_t e = end;
+        while (e > 0 && isspace((unsigned char)text[e - 1])) --e;
+        if (e == 0) return false;
+        char last = text[e - 1];
+        if (isdigit((unsigned char)last)) {
+            size_t b = e;
+            bool dot = false;
+            while (b > 0 && (isdigit((unsigned char)text[b - 1]) || text[b - 1] == '.' ||
+                             text[b - 1] == 'e' || text[b - 1] == 'E')) {
+                if (text[b - 1] == '.') dot = true;
+                --b;
+            }
+            if (dot) return true;
+            e = b;
+            if (e == 0) return false;
+            last = text[e - 1];
+        }
+        if (last == ')') {
+            size_t b = e;
+            int d = 0;
+            while (b > 0) {
+                char c = text[b - 1];
+                if (c == ')') { ++d; --b; continue; }
+                if (c == '(') { --d; --b; if (d == 0) break; continue; }
+                --b;
+            }
+            size_t te = b;
+            while (te > 0 && IsIdentChar(text[te - 1], false)) --te;
+            std::string nm = text.substr(te, b - te);
+            if (nm.empty()) {
+                // Nhóm `(a + float3(...) * 2)` — coi là float nếu bên trong có
+                // phần tử float (ctor floatN / tglmt_u member).
+                std::string inner = text.substr(b, e > b ? e - 1 - b : 0);
+                if (inner.find("tglmt_u.") != std::string::npos) return true;
+                for (const char* fc : {"float(", "float2(", "float3(", "float4("}) {
+                    if (inner.find(fc) != std::string::npos) return true;
+                }
+                for (auto& u : uniforms)
+                    if (u.mslType.compare(0, 5, "float") == 0 &&
+                        inner.find(u.name) != std::string::npos)
+                        return true;
+                for (auto& u : vars)
+                    if (u.mslType.compare(0, 5, "float") == 0 &&
+                        inner.find(u.name) != std::string::npos)
+                        return true;
+                return false;
+            }
+            size_t dot = nm.rfind('.');
+            if (dot != std::string::npos) nm = nm.substr(dot + 1);
+            if (isFloatBuiltinName(nm)) return true;
+            if (nm == "float" || nm == "float2" || nm == "float3" || nm == "float4") return true;
+            if (floatDim.count(nm)) return true;
+            return false;
+        }
+        if (isalpha((unsigned char)last) || last == '_' || last == '.') {
+            size_t b = e;
+            while (b > 0 && (IsIdentChar(text[b - 1], false) || text[b - 1] == '.')) --b;
+            std::string t = text.substr(b, e - b);
+            size_t dot = t.rfind('.');
+            std::string name = (dot == std::string::npos) ? t : t.substr(dot + 1);
+            bool swz = name.size() >= 2 && name.size() <= 4;
+            for (char c : name) if (!strchr("xyzwrgba", c)) swz = false;
+            if (swz && dot != std::string::npos) {
+                std::string base = t.substr(0, dot);
+                size_t d2 = base.rfind('.');
+                name = (d2 == std::string::npos) ? base : base.substr(d2 + 1);
+            }
+            {
+                int mr = memberRootFloat(t);
+                if (mr >= 0) return mr == 1;
+            }
+            // Khai báo gần nhất (BSL: `pos` int3 ở hàm này, float3 ở hàm khác).
+            if (t.find('.') == std::string::npos) {
+                int nd = 0;
+                char nf = NearestDeclFamily(text, b, name, &nd);
+                if (nf == 'f') return true;
+                if (nf == 'i') return false;
+            }
+            if (floatDim.count(name)) return true;
+            if (t.find("tglmt_u.") != std::string::npos && floatUniformMember(name)) return true;
+            return false;
+        }
+        return false;
+    };
+    // operand bắt đầu tại `at` (đã có operator trước) có phải float?
+    auto floatStart = [&](size_t at) -> bool {
+        size_t b = at;
+        while (b < text.size() && isspace((unsigned char)text[b])) ++b;
+        while (b < text.size() && (text[b] == '-' || text[b] == '+')) ++b;
+        if (b >= text.size()) return false;
+        if (isdigit((unsigned char)text[b])) {
+            bool dot = false;
+            while (b < text.size() && (isdigit((unsigned char)text[b]) || text[b] == '.' ||
+                                       text[b] == 'e' || text[b] == 'E')) {
+                if (text[b] == '.') dot = true;
+                ++b;
+            }
+            return dot;
+        }
+        if (!(isalpha((unsigned char)text[b]) || text[b] == '_')) return false;
+        size_t s0 = b;
+        while (b < text.size() && (IsIdentChar(text[b], b == s0) || text[b] == '.')) ++b;
+        std::string t = text.substr(s0, b - s0);
+        size_t q = b;
+        while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+        size_t dot = t.rfind('.');
+        std::string name = (dot == std::string::npos) ? t : t.substr(dot + 1);
+        if (q < text.size() && text[q] == '(') {
+            if (isFloatBuiltinName(name)) return true;
+            if (name == "float" || name == "float2" || name == "float3" || name == "float4")
+                return true;
+            if (floatDim.count(name)) return true;
+            return false;
+        }
+        bool swz = name.size() >= 2 && name.size() <= 4;
+        for (char c : name) if (!strchr("xyzwrgba", c)) swz = false;
+        if (swz && dot != std::string::npos) {
+            std::string base = t.substr(0, dot);
+            size_t d2 = base.rfind('.');
+            name = (d2 == std::string::npos) ? base : base.substr(d2 + 1);
+        }
+        {
+            int mr = memberRootFloat(t);
+            if (mr >= 0) return mr == 1;
+        }
+        if (t.find('.') == std::string::npos) {
+            int nd = 0;
+            char nf = NearestDeclFamily(text, s0, name, &nd);
+            if (nf == 'f') return true;
+            if (nf == 'i') return false;
+        }
+        if (floatDim.count(name)) return true;
+        if (t.find("tglmt_u.") != std::string::npos && floatUniformMember(name)) return true;
+        return false;
+    };
+    for (size_t i = 0; i + 5 < text.size(); ++i) {
+        if (text.compare(i, 3, "int") != 0) continue;
+        if (i > 0 && IsIdentChar(text[i - 1], false)) continue;
+        char d = text[i + 3];
+        if (d < '2' || d > '4') continue;
+        if (text[i + 4] != '(') continue;
+        int pd = 0, dim = d - '0';
+        size_t e = i + 4;
+        for (; e < text.size(); ++e) {
+            if (text[e] == '(') ++pd;
+            else if (text[e] == ')') { if (--pd == 0) break; }
+        }
+        if (e >= text.size()) continue;
+        size_t end = e + 1;
+        if (end < text.size() && text[end] == '.') {
+            size_t q = end + 1;
+            while (q < text.size() && isalpha((unsigned char)text[q])) ++q;
+            size_t len = q - (end + 1);
+            if (len >= 2 && len <= 4) { dim = (int)len; end = q; }
+        }
+        auto isFloatLitEnd = [&](size_t at) {
+            size_t q = at;
+            while (q > 0 && isdigit((unsigned char)text[q - 1])) --q;
+            if (q > 0 && text[q - 1] == '.') return true;
+            return false;
+        };
+        bool lf = false, rf = false;
+        size_t a = i;
+        while (a > 0 && isspace((unsigned char)text[a - 1])) --a;
+        size_t o = a;
+        while (o > 0 && (text[o - 1] == '(' || isspace((unsigned char)text[o - 1]))) --o;
+        if (o > 0 && (text[o - 1] == '/' || text[o - 1] == '*' ||
+                      text[o - 1] == '+' || text[o - 1] == '-')) {
+            size_t b = o - 1;
+            while (b > 0 && isspace((unsigned char)text[b - 1])) --b;
+            lf = isFloatLitEnd(b);
+            if (!lf) lf = floatEnd(b);
+        }
+        size_t c = end;
+        while (c < text.size() && isspace((unsigned char)text[c])) ++c;
+        size_t o2 = c;
+        while (o2 < text.size() && (text[o2] == '(' || isspace((unsigned char)text[o2]))) ++o2;
+        if (o2 < text.size() && (text[o2] == '/' || text[o2] == '*' ||
+                                 text[o2] == '+' || text[o2] == '-')) {
+            size_t b = o2 + 1;
+            while (b < text.size() && isspace((unsigned char)text[b])) ++b;
+            size_t q = b;
+            while (q < text.size() && isdigit((unsigned char)text[q])) ++q;
+            rf = (q > b && q < text.size() && text[q] == '.');
+            if (!rf) rf = floatStart(o2 + 1);
+        }
+        if (!lf && !rf) continue;
+        std::string cast = "float" + std::to_string(dim);
+        ins.push_back({i, cast + "("});
+        ins.push_back({end, ")"});
+    }
+    std::sort(ins.begin(), ins.end(), [](const Ins& a, const Ins& b) {
+        return a.at > b.at;
+    });
+    for (auto& in : ins) text.insert(in.at, in.s);
+}
 static std::string RewriteArrayCtors(const std::string& src) {
     static const char* kTypes[] = {"vec2", "vec3", "vec4", "ivec2", "ivec3", "ivec4",
                                    "uvec2", "uvec3", "uvec4", "mat2", "mat3", "mat4",
-                                   "float", "int", "uint", nullptr};
+                                   "mat2x2", "mat2x3", "mat2x4", "mat3x2", "mat3x3",
+                                   "mat3x4", "mat4x2", "mat4x3", "mat4x4",
+                                   "float", "int", "uint",
+                                   // sau RewriteIdents (photon aurora `mat2x3[]`)
+                                   "float2x2", "float2x3", "float2x4", "float3x2",
+                                   "float3x3", "float3x4", "float4x2", "float4x3",
+                                   "float4x4", nullptr};
     std::string out;
     size_t i = 0;
     auto skipSp = [&](size_t p) {
@@ -431,17 +907,81 @@ static std::string RewriteArrayCtors(const std::string& src) {
                         // `type[N] ident` (GLSL 4.x style — endPortalEffect) →
                         // `type ident[N]` (MSL bắt buộc ngoặc SAU tên).
                         std::string sz = Trim(src.substr(k, ks - k));
-                        bool szOk = !sz.empty();
+                        bool szOk = true;
                         for (char c : sz)
                             if (!isdigit((unsigned char)c)) szOk = false;
+                        // `T[] name` (unsized, khởi tạo bằng {..}) cũng hợp lệ C++/MSL.
                         if (szOk && m < src.size() &&
                             (isalpha((unsigned char)src[m]) || src[m] == '_')) {
                             size_t e2 = m;
                             while (e2 < src.size() && IsIdentChar(src[e2], e2 == m)) ++e2;
-                            out += tn + " " + src.substr(m, e2 - m) + "[" + sz + "]";
+                            std::string dim = sz;
+                            if (dim.empty()) {
+                                // `T[] name = { e0, e1, ... }` → suy size (cần cho
+                                // `.length()`; MSL local array khởi tạo phải rõ size).
+                                size_t f = e2;
+                                while (f < src.size() && isspace((unsigned char)src[f])) ++f;
+                                if (f < src.size() && src[f] == '=') {
+                                    ++f;
+                                    while (f < src.size() && isspace((unsigned char)src[f])) ++f;
+                                    if (f < src.size() && src[f] == '{') {
+                                        int bd = 0, pd = 0;
+                                        size_t g = f;
+                                        int elems = 1;
+                                        bool empty = true, okB = false;
+                                        for (; g < src.size(); ++g) {
+                                            char ch = src[g];
+                                            if (ch == '{') { ++bd; empty = false; }
+                                            else if (ch == '}') {
+                                                if (--bd == 0) { okB = true; break; }
+                                            } else if (ch == '(' || ch == '[') ++pd;
+                                            else if (ch == ')' || ch == ']') --pd;
+                                            else if (ch == ',' && bd == 1 && pd == 0) ++elems;
+                                            else if (!isspace((unsigned char)ch)) empty = false;
+                                        }
+                                        if (okB && !empty) dim = std::to_string(elems);
+                                    }
+                                }
+                            }
+                            out += tn + " " + src.substr(m, e2 - m) + "[" + dim + "]";
                             i = e2;
                             hit = true;
                             break;
+                        }
+                    }
+                }
+            }
+        }
+        // Struct tự định nghĩa: `BloomTile[5](a, b, ...)` (initializer) → `{...}`
+        if (!hit && (isupper((unsigned char)src[i]) || src[i] == '_')) {
+            size_t e = i;
+            while (e < src.size() && IsIdentChar(src[e], false)) ++e;
+            size_t j = skipSp(e);
+            if (j < src.size() && src[j] == '[') {
+                size_t k = skipSp(j + 1);
+                size_t ds = k;
+                while (k < src.size() && isdigit((unsigned char)src[k])) ++k;
+                size_t k2 = skipSp(k);
+                if (k > ds && k2 < src.size() && src[k2] == ']') {
+                    size_t m = skipSp(k2 + 1);
+                    if (m < src.size() && src[m] == '(') {
+                        size_t pb = i;
+                        while (pb > 0 && isspace((unsigned char)src[pb - 1])) --pb;
+                        if (pb > 0 && (src[pb - 1] == '=' || src[pb - 1] == '{' ||
+                                       src[pb - 1] == ',' || src[pb - 1] == '(')) {
+                            int d = 0;
+                            size_t q = m;
+                            for (; q < src.size(); ++q) {
+                                if (src[q] == '(') ++d;
+                                else if (src[q] == ')') { if (--d == 0) break; }
+                            }
+                            if (q < src.size()) {
+                                out += "{";
+                                out += src.substr(m + 1, q - m - 1);
+                                out += "}";
+                                i = q + 1;
+                                hit = true;
+                            }
                         }
                     }
                 }
@@ -733,6 +1273,33 @@ static void ExpandRelationalBuiltins(std::string& text) {
     }
     text.swap(out);
 }
+// GLSL atan(y, x) (2 tham số) → MSL atan2(y, x): Metal chỉ có atan(x).
+// Bliss dùng atan 2-arg rất nhiều (`no matching function for call to 'atan'`).
+static void RewriteAtan2(std::string& text) {
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        bool head = text.compare(i, 5, "atan(") == 0 &&
+                    (i == 0 || !IsIdentChar(text[i - 1], false));
+        if (!head) { out += text[i]; ++i; continue; }
+        int d = 0;
+        size_t k = i + 4;
+        for (; k < text.size(); ++k) {
+            if (text[k] == '(') ++d;
+            else if (text[k] == ')') {
+                if (--d == 0) break;
+            }
+        }
+        if (k >= text.size()) { out += text[i]; ++i; continue; }
+        std::vector<std::string> args = SplitCallArgs(text.substr(i + 5, k - (i + 5)));
+        if (args.size() == 2)
+            out += "atan2(" + Trim(args[0]) + ", " + Trim(args[1]) + ")";
+        else
+            out += text.substr(i, k - i + 1);
+        i = k + 1;
+    }
+    text.swap(out);
+}
 // ============ int-family → float trong khởi tạo (`float2 x = int2(...)`) ====
 // GLSL implicit int→float (hand/skytextured/textured: `vec2 tSize = textureSize`
 // → converter emit `int2(...)`; terrain: `vec2 atlasSizeM = atlasSize` với
@@ -947,6 +1514,42 @@ static void EraseNamesAlsoDeclaredNonInt(const std::string& text,
     }
 }
 
+// Khai báo GẦN NHẤT trước vị trí `at` cho tên `nm` (scope-blind xấp xỉ):
+// fam 'f' = float/vec, 'i' = int/uint, dim tương ứng. 0 = không thấy.
+static char NearestDeclFamily(const std::string& text, size_t at, const std::string& nm,
+                              int* dim) {
+    char fam = 0;
+    *dim = 0;
+    size_t p = 0;
+    while ((p = text.find(nm, p)) != std::string::npos && p < at) {
+        size_t e = p + nm.size();
+        bool l = p > 0 && IsIdentChar(text[p - 1], false);
+        bool r = e < text.size() && IsIdentChar(text[e], false);
+        if (l || r) { p = e; continue; }
+        size_t b = p;
+        while (b > 0 && isspace((unsigned char)text[b - 1])) --b;
+        size_t te = b;
+        while (te > 0 && IsIdentChar(text[te - 1], false)) --te;
+        std::string ty = text.substr(te, b - te);
+        int d = 0;
+        char f = 0;
+        if (ty == "int" || ty == "uint") { f = 'i'; d = 1; }
+        else if (ty == "int2" || ty == "uint2") { f = 'i'; d = 2; }
+        else if (ty == "int3" || ty == "uint3") { f = 'i'; d = 3; }
+        else if (ty == "int4" || ty == "uint4") { f = 'i'; d = 4; }
+        else if (ty == "ivec2" || ty == "uvec2") { f = 'i'; d = 2; }
+        else if (ty == "ivec3" || ty == "uvec3") { f = 'i'; d = 3; }
+        else if (ty == "ivec4" || ty == "uvec4") { f = 'i'; d = 4; }
+        else if (ty == "ivec2" ) { f = 'i'; d = 2; }
+        else if (ty == "float") { f = 'f'; d = 1; }
+        else if (ty == "float2" || ty == "vec2") { f = 'f'; d = 2; }
+        else if (ty == "float3" || ty == "vec3") { f = 'f'; d = 3; }
+        else if (ty == "float4" || ty == "vec4") { f = 'f'; d = 4; }
+        if (f) { fam = f; *dim = d; }
+        p = e;
+    }
+    return fam;
+}
 static int IntFamArgDim(const std::string& arg, const std::map<std::string, int>& intDim) {
     std::string t = Trim(arg);
     if (t.empty()) return 0;
@@ -1089,6 +1692,23 @@ static void CoerceIntArgsInFloatCtorsImpl(std::string& text,
         for (size_t k = 0; k < args.size(); ++k) {
             std::string t = Trim(args[k]);
             int ad = IntFamArgDim(t, intDim);
+            // Tên trùng ở helper khác (unpack4x8F/unpack2x16F đều `decode`) —
+            // ưu tiên khai báo gần nhất trước ctor.
+            {
+                std::string bare = t;
+                size_t dot = bare.find('.');
+                if (dot != std::string::npos) bare = bare.substr(0, dot);
+                bool isBare = !bare.empty() &&
+                              (isalpha((unsigned char)bare[0]) || bare[0] == '_');
+                for (size_t q = 1; q < bare.size() && isBare; ++q)
+                    if (!IsIdentChar(bare[q], false)) isBare = false;
+                if (isBare && bare != "_in" && bare != "_out" && bare != "tglmt_u") {
+                    int nd = 0;
+                    char nf = NearestDeclFamily(text, i, bare, &nd);
+                    if (nf == 'i') ad = nd;
+                    else if (nf == 'f') ad = 0;
+                }
+            }
             if (ad == 1) t = "float(" + t + ")";
             else if (ad >= 2) t = "float" + std::to_string(ad) + "(" + t + ")";
             if (k) joined += ", ";
@@ -1150,6 +1770,432 @@ static void CoerceIntArgsInFloatCtors(std::string& text, const std::vector<GLSLV
     EraseNamesAlsoDeclaredNonInt(text, intDim);
     if (intDim.empty()) return;
     CoerceIntArgsInFloatCtorsImpl(text, intDim);
+}
+// Khai báo GẦN NHẤT (trước `upto`) của tên: 1 float-family, 0 kiểu khác,
+// -1 không thấy. Dùng để tránh nhầm scope khi cả file có `float3 offset` và
+// `int2 offset` (Bliss composite2).
+static int NearestDeclIsFloat(const std::string& text, const std::string& nm, size_t upto) {
+    size_t pos = upto;
+    while (pos > 0) {
+        pos = text.rfind(nm, pos - 1);
+        if (pos == std::string::npos) break;
+        size_t e = pos + nm.size();
+        if ((pos > 0 && IsIdentChar(text[pos - 1], false)) ||
+            (e < text.size() && IsIdentChar(text[e], false))) continue;
+        size_t q = pos;
+        while (q > 0 && isspace((unsigned char)text[q - 1])) --q;
+        size_t qe = q;
+        while (qe > 0 && IsIdentChar(text[qe - 1], false)) --qe;
+        if (qe == q) continue;
+        std::string prev = text.substr(qe, q - qe);
+        if (prev == "return" || prev == "case" || prev == "else" || prev == "new" ||
+            prev == "delete" || prev == "throw" || prev == "using" || prev == "typedef")
+            continue;
+        size_t a = e;
+        while (a < text.size() && isspace((unsigned char)text[a])) ++a;
+        if (a < text.size() && (text[a] == '=' || text[a] == ';' || text[a] == ',' ||
+                                text[a] == ')' || text[a] == '[' || text[a] == ':')) {
+            if (prev == "float" || prev == "float2" || prev == "float3" || prev == "float4" ||
+                prev == "half" || prev == "half2" || prev == "half3" || prev == "half4")
+                return 1;
+            if (isalpha((unsigned char)prev[0]) || prev[0] == '_') return 0;
+        }
+    }
+    return -1;
+}
+// GLSL ctor int/uint chấp nhận float (convert); MSL `uint4(float2, ...)` không.
+// `uvec4(s, uint(s.x) ^ uint(s.y), ...)` (Bliss hash) → `uint4(uint2(s), ...)`.
+static void CoerceFloatArgsInIntCtors(std::string& text) {
+    std::map<std::string, int> floatDim;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text.compare(i, 5, "float") != 0 || (i > 0 && IsIdentChar(text[i - 1], false)))
+            continue;
+        if (i + 5 >= text.size() || text[i + 5] < '2' || text[i + 5] > '4') continue;
+        int dim = text[i + 5] - '0';
+        size_t p = i + 6;
+        if (p < text.size() && !isspace((unsigned char)text[p])) continue;
+        while (p < text.size() && isspace((unsigned char)text[p])) ++p;
+        if (p >= text.size() || !(isalpha((unsigned char)text[p]) || text[p] == '_')) continue;
+        size_t e = p;
+        while (e < text.size() && IsIdentChar(text[e], e == p)) ++e;
+        if (e < text.size() && text[e] == '[') continue;
+        floatDim[text.substr(p, e - p)] = dim;
+    }
+    if (floatDim.empty()) return;
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        bool hit = false;
+        for (const char* ty : {"uint", "int"}) {
+            size_t tl = strlen(ty);
+            if (text.compare(i, tl, ty) != 0 || (i > 0 && IsIdentChar(text[i - 1], false)))
+                continue;
+            if (i + tl >= text.size() || text[i + tl] < '2' || text[i + tl] > '4') continue;
+            size_t lp = i + tl + 1;
+            if (text[lp] != '(') continue;
+            int d = 0;
+            size_t rp = lp;
+            for (; rp < text.size(); ++rp) {
+                if (text[rp] == '(') ++d;
+                else if (text[rp] == ')') {
+                    if (--d == 0) break;
+                }
+            }
+            if (rp >= text.size()) continue;
+            auto args = SplitCallArgs(text.substr(lp + 1, rp - lp - 1));
+            if (args.empty()) continue;
+            bool changed = false;
+            for (auto& a0 : args) {
+                std::string a = Trim(a0);
+                auto it = floatDim.find(a);
+                if (it != floatDim.end() && NearestDeclIsFloat(text, a, lp) != 0) {
+                    a = std::string(ty) + std::to_string(it->second) + "(" + a + ")";
+                    changed = true;
+                }
+                for (const char* fc : {"float2(", "float3(", "float4("}) {
+                    size_t fl = strlen(fc);
+                    if (a.compare(0, fl, fc) != 0) continue;
+                    // Chỉ đổi khi TOÀN BỘ arg là ctor floatN(...) — nếu chỉ là
+                    // toán hạng đầu (`float3(x) - y`) thì đổi type sẽ sai nghĩa.
+                    int dd = 0;
+                    size_t m = fl - 1;
+                    bool whole = false;
+                    for (; m < a.size(); ++m) {
+                        if (a[m] == '(') ++dd;
+                        else if (a[m] == ')' && --dd == 0) { whole = (m + 1 == a.size()); break; }
+                    }
+                    if (!whole) continue;
+                    a = std::string(ty) + std::string(fc).substr(5) + a.substr(fl);
+                    changed = true;
+                    break;
+                }
+                a0 = a;
+            }
+            if (!changed) continue;
+            out += text.substr(i, lp + 1 - i);
+            for (size_t k = 0; k < args.size(); ++k) {
+                if (k) out += ", ";
+                out += args[k];
+            }
+            out += ")";
+            i = rp + 1;
+            hit = true;
+            break;
+        }
+        if (hit) continue;
+        out += text[i];
+        ++i;
+    }
+    text.swap(out);
+}
+// GLSL `.length()` trên mảng → MSL KHÔNG hỗ trợ (probe metal thật: "member
+// reference base type 'const constant float3[N]' is not a structure or union").
+// Thay bằng số phần tử lấy từ khai báo `T name[N]` (biến toàn cục hoặc local).
+static void ResolveArrayLengths(std::string& text, const std::string& src) {
+    if (text.find(".length()") == std::string::npos) return;
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t p = text.find(".length()", i);
+        if (p == std::string::npos) { out += text.substr(i); break; }
+        size_t b = p;
+        while (b > 0 && IsIdentChar(text[b - 1], false)) --b;
+        std::string nm = text.substr(b, p - b);
+        if (nm.empty() || isdigit((unsigned char)nm[0])) {
+            out += text.substr(i, p + 9 - i);
+            i = p + 9;
+            continue;
+        }
+        int size = -1;
+        int sizeBefore = -1;
+        bool dup = false;
+        size_t q = 0;
+        while ((q = text.find(nm, q)) != std::string::npos) {
+            size_t e2 = q + nm.size();
+            if ((q > 0 && IsIdentChar(text[q - 1], false)) ||
+                (e2 < text.size() && IsIdentChar(text[e2], false))) { q = e2; continue; }
+            size_t k = e2;
+            while (k < text.size() && isspace((unsigned char)text[k])) ++k;
+            if (k >= text.size() || text[k] != '[') { q = e2; continue; }
+            size_t k2 = k + 1;
+            while (k2 < text.size() && isspace((unsigned char)text[k2])) ++k2;
+            size_t ds = k2;
+            while (k2 < text.size() && isdigit((unsigned char)text[k2])) ++k2;
+            if (k2 == ds) { q = e2; continue; }
+            int n = atoi(text.substr(ds, k2 - ds).c_str());
+            size_t k3 = k2;
+            while (k3 < text.size() && isspace((unsigned char)text[k3])) ++k3;
+            if (k3 >= text.size() || text[k3] != ']') { q = e2; continue; }
+            if (q < p) sizeBefore = n;   // khai báo cục bộ gần nhất trước chỗ dùng
+            else { if (size >= 0 && size != n) dup = true; size = n; }
+            q = k3 + 1;
+        }
+        if (sizeBefore >= 0) { size = sizeBefore; dup = false; }
+        if (size < 0) {
+            // Mảng toàn cục bị hoist khỏi text → tìm khai báo trong GLSL gốc.
+            size_t q2 = 0;
+            while ((q2 = src.find(nm, q2)) != std::string::npos) {
+                size_t e3 = q2 + nm.size();
+                if ((q2 > 0 && IsIdentChar(src[q2 - 1], false)) ||
+                    (e3 < src.size() && IsIdentChar(src[e3], false))) { q2 = e3; continue; }
+                size_t k4 = e3;
+                while (k4 < src.size() && isspace((unsigned char)src[k4])) ++k4;
+                if (k4 >= src.size() || src[k4] != '[') { q2 = e3; continue; }
+                size_t k5 = k4 + 1;
+                while (k5 < src.size() && isspace((unsigned char)src[k5])) ++k5;
+                size_t ds2 = k5;
+                while (k5 < src.size() && isdigit((unsigned char)src[k5])) ++k5;
+                if (k5 == ds2) { q2 = e3; continue; }
+                int n2 = atoi(src.substr(ds2, k5 - ds2).c_str());
+                size_t k6 = k5;
+                while (k6 < src.size() && isspace((unsigned char)src[k6])) ++k6;
+                if (k6 >= src.size() || src[k6] != ']') { q2 = e3; continue; }
+                if (size >= 0 && size != n2) dup = true;
+                size = n2;
+                q2 = k6 + 1;
+            }
+        }
+        if (size < 0 || dup) {
+            out += text.substr(i, p + 9 - i);
+            i = p + 9;
+            continue;
+        }
+        out += text.substr(i, b - i);
+        out += std::to_string(size);
+        i = p + 9;
+    }
+    text.swap(out);
+}
+// GLSL ngầm int→float trong `float * ivec2` (Solas `16.0 / atlasSize`,
+// Bliss `offset*texelSize`). MSL cấm → bọc vế int-vector bằng floatN(...) khi
+// vế kia là float (literal/name/ctor).
+static void PromoteIntVecArith(std::string& text, const std::vector<GLSLVar>& vars,
+                               const std::vector<GLSLVar>& uniforms,
+                               const std::vector<GLSLBlock>& blocks) {
+    std::map<std::string, int> intDim = CollectIntFamNames(text);
+    AddMslIntFamDims(vars, intDim);
+    AddMslIntFamDims(uniforms, intDim, "tglmt_u.");
+    for (auto& b : blocks)
+        AddMslIntFamDims(b.members, intDim, (b.isStorage ? "ssbo_" : "ubo_") + b.name + ".");
+    std::map<std::string, int> rawInt = intDim;
+    if (intDim.empty()) return;
+    std::map<std::string, int> floatDim;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text.compare(i, 5, "float") != 0 || (i > 0 && IsIdentChar(text[i - 1], false)))
+            continue;
+        int dim = 1;
+        size_t p = i + 5;
+        if (p < text.size() && text[p] >= '2' && text[p] <= '4') { dim = text[p] - '0'; ++p; }
+        if (p < text.size() && !isspace((unsigned char)text[p])) continue;
+        while (p < text.size() && isspace((unsigned char)text[p])) ++p;
+        if (p >= text.size() || !(isalpha((unsigned char)text[p]) || text[p] == '_')) continue;
+        size_t e = p;
+        while (e < text.size() && IsIdentChar(text[e], e == p)) ++e;
+        floatDim[text.substr(p, e - p)] = dim;
+    }
+    // Loại (theo scope gần nhất TRƯỚC vị trí dùng) của tên: 1 int-family,
+    // 0 non-int, -1 không rõ. Pack hay trùng tên khác scope (`float radius`
+    // ở hàm khác) → phải xét khai báo gần nhất thay vì cả file.
+    auto nearestDeclIsInt = [&](const std::string& nm, size_t upto) -> int {
+        size_t pos = upto;
+        while (pos > 0) {
+            pos = text.rfind(nm, pos - 1);
+            if (pos == std::string::npos) break;
+            size_t e = pos + nm.size();
+            if ((pos > 0 && IsIdentChar(text[pos - 1], false)) ||
+                (e < text.size() && IsIdentChar(text[e], false))) continue;
+            size_t q = pos;
+            while (q > 0 && isspace((unsigned char)text[q - 1])) --q;
+            size_t qe = q;
+            while (qe > 0 && IsIdentChar(text[qe - 1], false)) --qe;
+            if (qe == q) continue;
+            std::string prev = text.substr(qe, q - qe);
+            if (prev == "return" || prev == "case" || prev == "else" || prev == "new" ||
+                prev == "delete" || prev == "throw" || prev == "using" || prev == "typedef")
+                continue;
+            size_t a = e;
+            while (a < text.size() && isspace((unsigned char)text[a])) ++a;
+            if (a < text.size() && (text[a] == '=' || text[a] == ';' || text[a] == ',' ||
+                                    text[a] == ')' || text[a] == '[' || text[a] == ':')) {
+                if (prev == "int" || prev == "int2" || prev == "int3" || prev == "int4" ||
+                    prev == "uint" || prev == "uint2" || prev == "uint3" || prev == "uint4")
+                    return 1;
+                if (isalpha((unsigned char)prev[0]) || prev[0] == '_') return 0;
+            }
+        }
+        return -1;
+    };
+    auto floatish = [&](const std::string& x, size_t usePos) -> bool {
+        std::string t = Trim(x);
+        if (t.empty()) return false;
+        // int-family ctor → kết quả int (đừng nhìn thấy `0.5` bên trong).
+        for (const char* ic : {"int(", "int2(", "int3(", "int4(", "uint(", "uint2(",
+                               "uint3(", "uint4(", "ivec", "uvec"}) {
+            if (t.compare(0, strlen(ic), ic) == 0) return false;
+        }
+        for (const char* fc : {"float(", "float2(", "float3(", "float4("}) {
+            if (t.compare(0, strlen(fc), fc) == 0) return true;
+        }
+        {
+            // Số thực literal (16.0 / 1e-3) — KHÔNG dùng "có dấu chấm" vì biểu
+            // thức như `((x>>8U)^x.yzx)` cũng có '.' (swizzle) → wrap nhầm.
+            bool num = !t.empty(), hasDigit = false, hasDot = false, hasExp = false;
+            for (char c : t) {
+                if (isdigit((unsigned char)c)) { hasDigit = true; continue; }
+                if (c == '.') { hasDot = true; continue; }
+                if (c == 'e' || c == 'E') { hasExp = true; continue; }
+                if (c == 'f' || c == 'F' || c == '+' || c == '-') continue;
+                num = false;
+                break;
+            }
+            // `4` là int literal — KHÔNG phải float (GLSL `%` giữa int).
+            if (num && hasDigit && (hasDot || hasExp)) return true;
+        }
+        {
+            bool bare = !t.empty() && (isalpha((unsigned char)t[0]) || t[0] == '_');
+            for (size_t k = 1; bare && k < t.size(); ++k)
+                if (!IsIdentChar(t[k], false)) bare = false;
+            if (bare) {
+                int d = nearestDeclIsInt(t, usePos);
+                if (d == 1) return false;
+                if (d == 0) return true;
+            }
+        }
+        {
+            // Member access `_out.singleTexSize` / `tglmt_u.a`: tra theo tên
+            // member (swizzle cuối bỏ qua). CHỈ root struct — `v.x` là swizzle.
+            size_t dot = t.find('.');
+            if (dot != std::string::npos && dot > 0) {
+                std::string base = t.substr(0, dot);
+                bool root = base == "_out" || base == "_in" || base == "tglmt_u" ||
+                            base.rfind("ubo_", 0) == 0 || base.rfind("ssbo_", 0) == 0;
+                if (root) {
+                    std::string mem = t.substr(dot + 1);
+                    size_t sw = mem.rfind('.');
+                    if (sw != std::string::npos) mem = mem.substr(0, sw);
+                    auto itf = floatDim.find(mem);
+                    if (itf != floatDim.end() && !rawInt.count(mem)) return true;
+                    for (auto& u : vars)
+                        if (u.name == mem && u.mslType.compare(0, 5, "float") == 0)
+                            return true;
+                    for (auto& u : uniforms)
+                        if (u.name == mem && u.mslType.compare(0, 5, "float") == 0)
+                            return true;
+                }
+            }
+        }
+        auto it = floatDim.find(t);
+        if (it != floatDim.end()) {
+            // Cùng tên vừa có khai báo int-family (khác scope) → ưu tiên int:
+            // tránh wrap nhầm `radius * scaling` khi pack có `float radius`
+            // ở hàm khác (Bliss composite2/4).
+            if (rawInt.count(t)) return false;
+            return true;
+        }
+        if (t.rfind("tglmt_u.", 0) == 0) {
+            std::string nm = t.substr(8);
+            for (auto& u : uniforms) {
+                if (u.name == nm && IntFamDimOfMslType(u.mslType) == 0) return true;
+            }
+            return false;
+        }
+        return false;
+    };
+    // đọc operand ngược từ vị trí `end` (không gồm end)
+    auto operandBack = [&](size_t end) -> std::pair<size_t, std::string> {
+        size_t e = end;
+        while (e > 0 && isspace((unsigned char)text[e - 1])) --e;
+        size_t b = e;
+        int d = 0;
+        while (b > 0) {
+            char c = text[b - 1];
+            if (c == ')' || c == ']') { ++d; --b; continue; }
+            if (c == '(' || c == '[') {
+                if (d == 0) break;
+                --d;
+                --b;
+                continue;
+            }
+            if (d != 0) { --b; continue; }
+            if (isalnum((unsigned char)c) || c == '_' || c == '.') { --b; continue; }
+            break;
+        }
+        return {b, Trim(text.substr(b, e - b))};
+    };
+    struct IR { size_t pos; int dim; std::string nm; };
+    std::vector<IR> reps;
+    for (auto& kv : intDim) {
+        const std::string& nm = kv.first;
+        int dim = kv.second;
+        size_t p = 0;
+        while ((p = text.find(nm, p)) != std::string::npos) {
+            size_t e = p + nm.size();
+            bool l = p > 0 && IsIdentChar(text[p - 1], false);
+            bool r = e < text.size() && IsIdentChar(text[e], false);
+            if (l || r) { p = e; continue; }
+            // Member/swizzle `.y` trong `f.y` — không phải biến (từng thành `f.float(y)`).
+            {
+                size_t dq = p;
+                while (dq > 0 && isspace((unsigned char)text[dq - 1])) --dq;
+                if (dq > 0 && text[dq - 1] == '.') { p = e; continue; }
+            }
+            // đã bọc `floatN(name)`?
+            size_t qb = p;
+            while (qb > 0 && isspace((unsigned char)text[qb - 1])) --qb;
+            std::string pre = dim > 1 ? ("float" + std::to_string(dim) + "(") : std::string("float(");
+            bool wrapped = qb >= pre.size() && text.compare(qb - pre.size(), pre.size(), pre) == 0;
+            if (wrapped) { p = e; continue; }
+            // là phần khai báo (`int2 name = ...`)?
+            {
+                size_t w = p;
+                while (w > 0 && isspace((unsigned char)text[w - 1])) --w;
+                size_t we = w;
+                while (we > 0 && IsIdentChar(text[we - 1], false)) --we;
+                std::string prev = text.substr(we, w - we);
+                if (prev == "int" || prev == "int2" || prev == "int3" || prev == "int4" ||
+                    prev == "uint" || prev == "uint2" || prev == "uint3" || prev == "uint4") {
+                    p = e;
+                    continue;
+                }
+            }
+            // Khai báo gần nhất trước chỗ dùng là non-int → bỏ qua occurrence.
+            if (nearestDeclIsInt(nm, p) == 0) { p = e; continue; }
+            size_t s = e;
+            while (s < text.size() && isspace((unsigned char)text[s])) ++s;
+            bool before = false, after = false;
+            if (s < text.size() && strchr("*/-+", text[s]) && (s + 1 >= text.size() || text[s + 1] != '=')) {
+                size_t oe = s + 1;
+                size_t stop = oe;
+                int d = 0;
+                while (stop < text.size()) {
+                    char c = text[stop];
+                    if (c == '(' || c == '[') ++d;
+                    else if (c == ')' || c == ']') { if (d == 0) break; --d; }
+                    else if (d == 0 && (c == '*' || c == '/' || c == '+' || c == '-' || c == '=' ||
+                                        c == ',' || c == ';' || c == '?' || c == ':'))
+                        break;
+                    ++stop;
+                }
+                after = floatish(text.substr(oe, stop - oe), oe);
+            }
+            if (!after && p > 0) {
+                size_t ob = p;
+                while (ob > 0 && isspace((unsigned char)text[ob - 1])) --ob;
+                if (ob > 0 && strchr("*/-+", text[ob - 1]) &&
+                    (ob < 2 || text[ob - 2] != text[ob - 1])) {
+                    auto pr = operandBack(ob - 1);
+                    before = floatish(pr.second, pr.first);
+                }
+            }
+            if (after || before) reps.push_back({p, dim, nm});
+            p = e;
+        }
+    }
+    std::sort(reps.begin(), reps.end(), [](const IR& a, const IR& b) { return a.pos > b.pos; });
+    for (auto& r : reps) {
+        std::string w = (r.dim > 1 ? "float" + std::to_string(r.dim) : std::string("float"));
+        text = text.substr(0, r.pos) + w + "(" + r.nm + ")" + text.substr(r.pos + r.nm.size());
+    }
 }
 // ============ `if (v != v)` với v vector → `any(...)` (block vsh) ====
 // GLSL driver leniency `if (bvec)`; MSL cần bool tường minh. Fire CHỈ khi:
@@ -1354,6 +2400,406 @@ static void WrapVectorConditions(std::string& text, const std::set<std::string>&
     }
     text.swap(out);
 }
+// GLSL `vec == vec` trả MỘT bool (all-equal); `!=` là phủ định. MSL trả boolN →
+// mọi phép so sánh có vế vector phải bọc all()/any() ở BẤT KỲ ngữ cảnh nào
+// (`float(clamp01(p) == p)` — Photon composite/end fog). Tên vector lấy từ khai
+// báo trong text + varying đã biết; hàm trả vector lấy từ HelperVecReturns.
+static void WrapVectorEquality(std::string& text, const std::set<std::string>& knownVec,
+                               const std::set<std::string>& vecHelpers,
+                               const std::set<std::string>& vecMembers = {}) {
+    if (text.find("==") == std::string::npos && text.find("!=") == std::string::npos) return;
+    std::set<std::string> vecs = knownVec;
+    auto addDecls = [&](const char* pre, int n) {
+        for (size_t i = 0; i + strlen(pre) + 1 < text.size(); ++i) {
+            if (text.compare(i, strlen(pre), pre) != 0) continue;
+            if (i > 0 && IsIdentChar(text[i - 1], false)) continue;
+            size_t p = i + strlen(pre);
+            std::string suf = (n > 1) ? std::to_string(n) : "";
+            if (!suf.empty()) {
+                if (text.compare(p, suf.size(), suf) != 0) continue;
+                p += suf.size();
+            }
+            if (p >= text.size() || !isspace((unsigned char)text[p])) continue;
+            while (p < text.size() && isspace((unsigned char)text[p])) ++p;
+            if (p >= text.size() || !(isalpha((unsigned char)text[p]) || text[p] == '_')) continue;
+            size_t e = p;
+            while (e < text.size() && IsIdentChar(text[e], e == p)) ++e;
+            vecs.insert(text.substr(p, e - p));
+        }
+    };
+    for (int n = 1; n <= 4; ++n) {
+        addDecls("float", n);
+        addDecls("int", n);
+        addDecls("uint", n);
+    }
+    std::function<bool(std::string)> isVec = [&](std::string a) -> bool {
+        a = Trim(a);
+        for (;;) {
+            if (a.size() < 2 || a.front() != '(' || a.back() != ')') break;
+            int d = 0, bd = 0;
+            for (size_t k = 0; k < a.size(); ++k) {
+                if (a[k] == '(') ++d;
+                else if (a[k] == ')') {
+                    if (--d == 0 && k + 1 != a.size()) { bd = 1; break; }
+                }
+            }
+            if (bd || d != 0) break;
+            a = Trim(a.substr(1, a.size() - 2));
+        }
+        if (a.empty()) return false;
+        static const char* kCasts[] = {"float2(", "float3(", "float4(", "int2(", "int3(",
+                                       "int4(", "uint2(", "uint3(", "uint4(", "bool2(",
+                                       "bool3(", "bool4(", nullptr};
+        for (const char** c = kCasts; *c; ++c)
+            if (a.compare(0, strlen(*c), *c) == 0) return true;
+        // swizzle ≥2 ký tự ở cuối
+        size_t dot = a.rfind('.');
+        if (dot != std::string::npos && dot > 0) {
+            std::string sw = a.substr(dot + 1);
+            bool ok = sw.size() >= 2 && sw.size() <= 4;
+            for (char c : sw)
+                if (!strchr("xyzwrgba", c)) ok = false;
+            if (ok) return true;
+        }
+        // builtin giữ shape arg đầu
+        for (const char* bn : {"clamp", "max", "min", "abs", "mix", "sign", "floor", "ceil",
+                               "fract", "normalize", "saturate", "pow", "mod", "step",
+                               "smoothstep", "sqrt", "exp2", "log2", "rsqrt", "fma"}) {
+            std::string b = bn;
+            if (a.compare(0, b.size(), b) != 0) continue;
+            if (a.size() <= b.size() || a[b.size()] != '(') continue;
+            int d2 = 0;
+            size_t e = b.size();
+            for (; e < a.size(); ++e) {
+                if (a[e] == '(') ++d2;
+                else if (a[e] == ')') { if (--d2 == 0) break; }
+            }
+            if (e >= a.size()) continue;
+            std::vector<std::string> args = SplitCallArgs(a.substr(b.size() + 1, e - b.size() - 1));
+            if (args.empty()) continue;
+            if (b == "smoothstep" || b == "step") {
+                if (isVec(args.back())) return true;
+            } else if (isVec(args[0])) {
+                return true;
+            }
+        }
+        size_t lp = a.find('(');
+        if (lp != std::string::npos && lp > 0) {
+            bool bare = isalpha((unsigned char)a[0]) || a[0] == '_';
+            for (size_t k = 1; k < lp && bare; ++k)
+                if (!IsIdentChar(a[k], false)) bare = false;
+            if (bare && vecHelpers.count(a.substr(0, lp))) return true;
+        }
+        if (vecs.count(a)) return true;
+        {
+            // Member access: `tglmt_u.sunPosition`, `ssbo_x.sunlightColor` →
+            // tra tên member trong vecs / vecMembers (struct members).
+            size_t dot = a.find('.');
+            if (dot != std::string::npos && dot > 0) {
+                std::string base = a.substr(0, dot);
+                std::string mem = a.substr(dot + 1);
+                bool root = base == "_out" || base == "_in" || base == "tglmt_u" ||
+                            base.rfind("ubo_", 0) == 0 || base.rfind("ssbo_", 0) == 0;
+                if (root) {
+                    size_t d2 = mem.find('.');
+                    if (d2 != std::string::npos) mem = mem.substr(0, d2);
+                    if (vecs.count(mem) || vecMembers.count(mem)) return true;
+                }
+            }
+        }
+        return false;
+    };
+    std::vector<std::pair<size_t, bool>> ops;
+    for (size_t i = 0; i + 1 < text.size(); ++i) {
+        char c = text[i];
+        if (c != '=' && c != '!') continue;
+        if (text[i + 1] != '=') continue;
+        if (c == '=' && i > 0 && (text[i - 1] == '=' || text[i - 1] == '!' ||
+                                  text[i - 1] == '<' || text[i - 1] == '>'))
+            continue;
+        ops.emplace_back(i, c == '=');
+    }
+    // phải → trái: wrap bên phải không đổi vị trí bên trái.
+    for (size_t oi = ops.size(); oi > 0; --oi) {
+        size_t op = ops[oi - 1].first;
+        bool isEq = ops[oi - 1].second;
+        // đã bọc all()/any( (wrap khác chồng lên) → bỏ
+        {
+            size_t b = op;
+            while (b > 0 && isspace((unsigned char)text[b - 1])) --b;
+            size_t e0 = b;
+            while (e0 > 0 && IsIdentChar(text[e0 - 1], false)) --e0;
+            std::string w = text.substr(e0, b - e0);
+            if (w == "all" || w == "any") continue;
+        }
+        size_t ls = op;
+        {
+            int d = 0;
+            while (ls > 0) {
+                char c = text[ls - 1];
+                if (c == ')' || c == ']') { ++d; --ls; continue; }
+                if (c == '(' || c == '[') {
+                    if (d == 0) break;
+                    --d; --ls;
+                    continue;
+                }
+                if (d) { --ls; continue; }
+                if (c == '&' || c == '|' || c == '?' || c == ':' || c == ',' || c == '!' ||
+                    c == ';' || c == '{' || c == '}' || c == '=' || c == '<' || c == '>' ||
+                    c == '+' || c == '-' || c == '*' || c == '/' || c == '%' || c == '~' ||
+                    c == '^')
+                    break;
+                --ls;
+            }
+        }
+        size_t re = op + 2;
+        {
+            int d = 0;
+            while (re < text.size()) {
+                char c = text[re];
+                if (c == '(' || c == '[') { ++d; ++re; continue; }
+                if (c == ')' || c == ']') {
+                    if (d == 0) break;
+                    --d; ++re;
+                    continue;
+                }
+                if (d) { ++re; continue; }
+                if (c == '&' || c == '|' || c == '?' || c == ':' || c == ',' || c == '!' ||
+                    c == ';' || c == '{' || c == '}' || c == '=' || c == '<' || c == '>' ||
+                    c == '+' || c == '-' || c == '*' || c == '/' || c == '%' || c == '~' ||
+                    c == '^')
+                    break;
+                ++re;
+            }
+        }
+        std::string lhs = Trim(text.substr(ls, op - ls));
+        std::string rhs = Trim(text.substr(op + 2, re - op - 2));
+        if (lhs.empty() || rhs.empty() || (!isVec(lhs) && !isVec(rhs))) continue;
+        std::string rep = std::string(isEq ? "all(" : "any(") + lhs +
+                          (isEq ? " == " : " != ") + rhs + ")";
+        text = text.substr(0, ls) + rep + text.substr(re);
+    }
+}
+
+// ============ vector-bool trong `&&`/`||` và ternary (Solas/BSL/Photon) ====
+// GLSL strict cấm `bvec && bvec` và `bvec ? a : b`, nhưng driver desktop chấp
+// nhận (component-wise). MSL: `&&` chỉ nhận scalar, ternary cần `select`.
+//  - operand của `&&`/`||` chứa so sánh vector → bọc all()/any().
+//  - cond ternary vector → `select(a, b, cond)`.
+static bool VecSideSpan(const std::string& raw) {
+    std::string a = Trim(raw);
+    // bỏ ngoặc bao ngoài cân bằng
+    for (;;) {
+        if (a.size() < 2 || a.front() != '(' || a.back() != ')') break;
+        int d = 0;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i] == '(') ++d;
+            else if (a[i] == ')') {
+                --d;
+                if (d == 0 && i + 1 != a.size()) { d = -1; break; }
+            }
+        }
+        if (d != 0) break;
+        a = Trim(a.substr(1, a.size() - 2));
+    }
+    if (a.empty()) return false;
+    for (const char* c : {"float2(", "float3(", "float4(", "vec2(", "vec3(", "vec4(",
+                          "int2(", "int3(", "int4(", "ivec2(", "ivec3(", "ivec4(",
+                          "uint2(", "uint3(", "uint4(", "uvec2(", "uvec3(", "uvec4(",
+                          "bool2(", "bool3(", "bool4(", "bvec2(", "bvec3(", "bvec4("}) {
+        if (a.compare(0, strlen(c), c) == 0) return true;
+    }
+    // swizzle ≥2 ký tự ở cuối (`v.xy`, `c.rgb`, `_in.color.xyz`)
+    size_t dot = a.rfind('.');
+    if (dot != std::string::npos && dot > 0) {
+        std::string sw = a.substr(dot + 1);
+        bool ok = sw.size() >= 2 && sw.size() <= 4;
+        for (char c : sw)
+            if (!strchr("xyzwrgba", c)) ok = false;
+        if (ok) return true;
+    }
+    return false;
+}
+// span có so sánh mà ít nhất một vế là vector?
+static bool HasVectorCmp(const std::string& s) {
+    std::string t = Trim(s);
+    if (t.rfind("all(", 0) == 0 || t.rfind("any(", 0) == 0) return false;
+    static const char* kCmp[] = {"==", "!=", "<=", ">=", "<", ">", nullptr};
+    int d = 0;
+    for (size_t i = 0; i < t.size(); ++i) {
+        char c = t[i];
+        if (c == '(' || c == '[') { ++d; continue; }
+        if (c == ')' || c == ']') { --d; continue; }
+        if (d != 0) continue;
+        for (const char** op = kCmp; *op; ++op) {
+            size_t n = strlen(*op);
+            if (t.compare(i, n, *op) != 0) continue;
+            if (n == 1 && i + 1 < t.size() && (t[i + 1] == '=' || t[i + 1] == '>')) continue;
+            if (n == 1 && i > 0 && (t[i - 1] == '=' || t[i - 1] == '!' || t[i - 1] == '<' ||
+                                    t[i - 1] == '>'))
+                continue;
+            std::string lhs = t.substr(0, i), rhs = t.substr(i + n);
+            if (VecSideSpan(lhs) || VecSideSpan(rhs)) return true;
+            i += n - 1;
+            break;
+        }
+    }
+    return false;
+}
+static bool IsWordAt(const std::string& t, size_t p, const char* w) {
+    size_t n = strlen(w);
+    if (p + n > t.size() || t.compare(p, n, w) != 0) return false;
+    if (p > 0 && IsIdentChar(t[p - 1], false)) return false;
+    if (p + n < t.size() && IsIdentChar(t[p + n], false)) return false;
+    return true;
+}
+// Bắt đầu operand kết thúc tại `end` (không tính end), dừng ở toán tử/ngoặc.
+static size_t OperandStart(const std::string& t, size_t end) {
+    size_t ls = end;
+    int d = 0;
+    while (ls > 0) {
+        char c = t[ls - 1];
+        if (c == ')' || c == ']') { ++d; --ls; continue; }
+        if (c == '(' || c == '[') {
+            if (d == 0) break;
+            --d;
+            --ls;
+            continue;
+        }
+        if (d != 0) { --ls; continue; }
+        // `==`/`!=`/`<=`/`>=` là một toán tử — không cắt giữa chừng (cond ternary
+        // `v == vec2(0.0)` từng bị cắt còn `float2(0.0)` → bỏ sót select).
+        if ((c == '=' || c == '<' || c == '>') && ls >= 2 &&
+            (t[ls - 2] == '=' || t[ls - 2] == '!' || t[ls - 2] == '<' || t[ls - 2] == '>')) {
+            ls -= 2;
+            continue;
+        }
+        if (c == '&' || c == '|' || c == '?' || c == ':' || c == ',' || c == '!' ||
+            c == ';' || c == '{' || c == '}' || c == '=' || c == '<' || c == '>')
+            break;
+        --ls;
+    }
+    // `return` / `else` / `case` đứng trước → không thuộc operand
+    size_t q = ls;
+    while (q > 0 && isspace((unsigned char)t[q - 1])) --q;
+    for (const char* w : {"return", "else", "case"}) {
+        size_t n = strlen(w);
+        if (q >= n && t.compare(q - n, n, w) == 0 &&
+            (q == n || !IsIdentChar(t[q - n - 1], false))) {
+            ls = q;
+            break;
+        }
+    }
+    return ls;
+}
+// Kết thúc operand bắt đầu tại `from`.
+static size_t OperandEnd(const std::string& t, size_t from) {
+    int d = 0;
+    size_t i = from;
+    while (i < t.size()) {
+        char c = t[i];
+        if (c == '(' || c == '[') { ++d; ++i; continue; }
+        if (c == ')' || c == ']') {
+            if (d == 0) break;
+            --d;
+            ++i;
+            continue;
+        }
+        if (d == 0 && (c == '&' || c == '|' || c == '?' || c == ':' || c == ',' ||
+                       c == ';' || c == '{' || c == '}'))
+            break;
+        ++i;
+    }
+    return i;
+}
+static void PromoteVectorBoolOps(std::string& text) {
+    for (int guard = 0; guard < 64; ++guard) {
+        struct Rep { size_t a, b; bool all; };
+        std::vector<Rep> reps;
+        for (size_t i = 0; i + 1 < text.size(); ++i) {
+            bool isAnd = text[i] == '&' && text[i + 1] == '&';
+            bool isOr = text[i] == '|' && text[i + 1] == '|';
+            if (!isAnd && !isOr) continue;
+            // bỏ qua `&` trong `&&` đã xử lý
+            if (i + 2 < text.size() && text[i + 2] == text[i + 1]) continue;
+            size_t ls = OperandStart(text, i);
+            size_t re = OperandEnd(text, i + 2);
+            std::string lhs = text.substr(ls, i - ls);
+            std::string rhs = text.substr(i + 2, re - i - 2);
+            if (HasVectorCmp(lhs)) reps.push_back({ls, i, isAnd});
+            if (HasVectorCmp(rhs)) reps.push_back({i + 2, re, isAnd});
+        }
+        if (reps.empty()) return;
+        std::sort(reps.begin(), reps.end(), [](const Rep& x, const Rep& y) { return x.a > y.a; });
+        for (auto& r : reps) {
+            std::string v = Trim(text.substr(r.a, r.b - r.a));
+            text = text.substr(0, r.a) + (r.all ? " all(" : " any(") + v + ")" +
+                   text.substr(r.b);
+        }
+    }
+}
+static void PromoteVectorTernary(std::string& text) {
+    size_t from = 0;
+    for (int guard = 0; guard < 128; ++guard) {
+        size_t q = std::string::npos;
+        for (size_t i = from; i < text.size(); ++i) {
+            if (text[i] != '?') continue;
+            if (i > 0 && (text[i - 1] == '?' || text[i - 1] == ':')) continue;
+            q = i;
+            break;
+        }
+        if (q == std::string::npos) return;
+        // tìm `:` cùng cấp
+        int d = 0, nest = 0;
+        size_t colon = std::string::npos;
+        for (size_t k = q + 1; k < text.size(); ++k) {
+            char c = text[k];
+            if (c == '(' || c == '[' || c == '{') { ++d; continue; }
+            if (c == ')' || c == ']' || c == '}') {
+                if (d == 0) break;
+                --d;
+                continue;
+            }
+            if (d != 0) continue;
+            if (c == '?') { ++nest; continue; }
+            if (c == ':') {
+                if (nest == 0) { colon = k; break; }
+                --nest;
+            }
+        }
+        if (colon == std::string::npos) return;
+        size_t cs = OperandStart(text, q);
+        std::string cond = text.substr(cs, q - cs);
+        // `{ return v == f(0) ? ...` — OperandStart dừng ở `{` nên cond còn
+        // chứa keyword đứng trước biểu thức; tách ra, giữ keyword ngoài select.
+        {
+            std::string ct = Trim(cond);
+            for (const char* w : {"return", "else", "case"}) {
+                size_t n = strlen(w);
+                if (ct.size() > n && ct.compare(0, n, w) == 0 &&
+                    !IsIdentChar(ct[n], false)) {
+                    size_t off = cond.find(w);
+                    size_t pos = cs + off + n;
+                    while (pos < q && isspace((unsigned char)text[pos])) ++pos;
+                    cs = pos;
+                    cond = Trim(cond.substr(off + n));
+                    break;
+                }
+            }
+        }
+        if (!HasVectorCmp(cond)) {
+            from = q + 1; // `?` scalar (nested/khác) — bỏ qua, KHÔNG sửa text
+            continue;
+        }
+        size_t ae = colon;
+        size_t be = OperandEnd(text, colon + 1);
+        std::string a = Trim(text.substr(q + 1, ae - q - 1));
+        std::string b = Trim(text.substr(colon + 1, be - colon - 1));
+        text = text.substr(0, cs) + "select(" + a + ", " + b + ", " + Trim(cond) + ")" +
+               text.substr(be);
+        from = cs;
+    }
+}
 // ============ mat4(đơn-arg) expansion (end_portal + Iris inject) ====
 // GLSL `mat4(mat2 m)`/`mat4(mat3 m)`/`mat4(float)` — MSL không có các ctor này
 // (đã quan sát bằng metal thật: `mat4(1.0)` từ Iris CompositeTransformer).
@@ -1384,7 +2830,120 @@ static void ExpandMat4FromMat2(std::string& text) {
         }
         if (k >= text.size()) { out += text.substr(i); break; }
         if (hasComma) {
-            // 16-float ctor → giữ nguyên
+            std::vector<std::string> args = SplitCallArgs(text.substr(lp + 1, k - lp - 1));
+            // 4 cột hay 16 scalar → giữ nguyên
+            if (args.size() != 4 && args.size() != 16) {
+                // hỗn hợp scalar/vector (GLSL pack): mat4(red, 0, green, 0, ...)
+                auto argDim = [&](const std::string& raw, bool* intLit) -> int {
+                    std::string t = Trim(raw);
+                    *intLit = false;
+                    if (t.empty()) return -1;
+                    {
+                        bool num = true, hasDigit = false, hasDot = false, hasExp = false;
+                        for (size_t c = 0; c < t.size(); ++c) {
+                            char ch = t[c];
+                            if (isdigit((unsigned char)ch)) { hasDigit = true; continue; }
+                            if (ch == '.') { hasDot = true; continue; }
+                            if (ch == 'e' || ch == 'E') { hasExp = true; continue; }
+                            if ((ch == '-' || ch == '+') && c == 0) continue;
+                            num = false;
+                            break;
+                        }
+                        if (num && hasDigit) {
+                            if (!hasDot && !hasExp) *intLit = true;
+                            return 1;
+                        }
+                    }
+                    for (int d = 2; d <= 4; ++d) {
+                        std::string ctor = "float" + std::to_string(d) + "(";
+                        if (t.compare(0, ctor.size(), ctor) == 0 && t.back() == ')') {
+                            int dd = 0;
+                            bool closed = false;
+                            for (size_t e2 = ctor.size() - 1; e2 < t.size(); ++e2) {
+                                if (t[e2] == '(') ++dd;
+                                else if (t[e2] == ')') {
+                                    if (--dd == 0) { closed = (e2 + 1 == t.size()); break; }
+                                }
+                            }
+                            if (closed) return d;
+                        }
+                    }
+                    if (t.back() != ')') {
+                        size_t dot = t.rfind('.');
+                        if (dot != std::string::npos && dot > 0) {
+                            std::string sw = t.substr(dot + 1);
+                            if (sw.size() >= 2 && sw.size() <= 4) {
+                                bool ok2 = true;
+                                for (char c : sw)
+                                    if (!strchr("xyzwrgba", c)) ok2 = false;
+                                if (ok2) return (int)sw.size();
+                            }
+                        }
+                    }
+                    std::string base = t;
+                    size_t d2 = base.rfind('.');
+                    if (d2 != std::string::npos) base = base.substr(d2 + 1);
+                    bool bare = !base.empty() &&
+                                (isalpha((unsigned char)base[0]) || base[0] == '_');
+                    for (size_t q = 1; bare && q < base.size(); ++q)
+                        if (!IsIdentChar(base[q], false)) bare = false;
+                    if (bare) {
+                        int dd = 0;
+                        char f = NearestDeclFamily(text, p, base, &dd);
+                        if (f == 'f') return dd;
+                    }
+                    return -1;
+                };
+                int total = 0;
+                bool ok = true;
+                std::vector<std::pair<std::string, int>> comps;
+                for (auto& a : args) {
+                    bool il = false;
+                    int ad = argDim(a, &il);
+                    if (ad < 1) { ok = false; break; }
+                    std::string t = Trim(a);
+                    comps.push_back({t, ad});
+                    total += ad;
+                }
+                if (ok && total == 16) {
+                    std::string rep = "float4x4(";
+                    int col = 0, cidx = 0;
+                    bool of = false, first = true;
+                    for (size_t ai = 0; ai < comps.size() && !of; ++ai) {
+                        std::string t = comps[ai].first;
+                        int ad = comps[ai].second;
+                        bool il = !t.empty();
+                        for (size_t c = 0; c < t.size() && il; ++c)
+                            if (!isdigit((unsigned char)t[c]) &&
+                                !(c == 0 && (t[c] == '-' || t[c] == '+')))
+                                il = false;
+                        if (il) t += ".0";
+                        if (col == 0) {
+                            if (!first) rep += ", ";
+                            rep += "float4(";
+                            first = false;
+                        } else {
+                            rep += ", ";
+                        }
+                        rep += t;
+                        col += ad;
+                        if (col == 4) {
+                            rep += ")";
+                            col = 0;
+                            ++cidx;
+                        } else if (col > 4) {
+                            of = true;
+                        }
+                    }
+                    if (!of && col == 0 && cidx == 4) {
+                        rep += ")";
+                        out += text.substr(i, p - i);
+                        out += rep;
+                        i = k + 1;
+                        continue;
+                    }
+                }
+            }
             out += text.substr(i, k - i + 1);
             i = k + 1;
             continue;
@@ -1404,7 +2963,7 @@ static void ExpandMat4FromMat2(std::string& text) {
 // để không phá `mat3(float)` (đường chéo) hay 3-vec ctor.
 static void ExpandMat3FromMat4(std::string& text,
                                const std::vector<std::string>& mat4Names) {
-    if (mat4Names.empty()) return;
+    (void)mat4Names; // wrap MỌI float3x3(X) 1-arg; mat4Names chỉ còn để tương thích
     std::string out;
     size_t i = 0;
     while (i < text.size()) {
@@ -1423,12 +2982,57 @@ static void ExpandMat3FromMat4(std::string& text,
         }
         if (k >= text.size()) { out += text.substr(i); break; }
         std::string inner = Trim(text.substr(lp + 1, k - lp - 1));
-        bool hit = false;
-        for (auto& mn : mat4Names)
-            if (inner == mn) { hit = true; break; }
-        if (!hit) { out += text.substr(i, k - i + 1); i = k + 1; continue; }
+        // MỌI float3x3(X) một-arg: MSL không nhận float4x4/float (chỉ 3 vec).
+        // `float3x3(1.0)` (đường chéo GLSL) và `float3x3(mat4)` đều phải qua
+        // tglmt_mat3_ctor (overload float/float3x3/float4x4).
+        bool single = true;
+        {
+            int dd = 0;
+            for (size_t z = lp + 1; z < k; ++z) {
+                if (text[z] == '(') ++dd;
+                else if (text[z] == ')') --dd;
+                else if (text[z] == ',' && dd == 0) { single = false; break; }
+            }
+        }
+        if (!single) { out += text.substr(i, k - i + 1); i = k + 1; continue; }
         out += text.substr(i, p - i);
         out += "tglmt_mat3_ctor(" + inner + ")";
+        i = k + 1;
+    }
+    text.swap(out);
+}
+// GLSL `mat2(mat4)` / `mat2(1.0)` — MSL không có ctor này.
+static void ExpandMat2FromMat4(std::string& text) {
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t p = text.find("float2x2(", i);
+        if (p == std::string::npos) { out += text.substr(i); break; }
+        bool l = p > 0 && IsIdentChar(text[p - 1], false);
+        if (l) { out += text.substr(i, p - i + 1); i = p + 1; continue; }
+        size_t lp = p + 8;
+        int d = 0;
+        size_t k = lp;
+        for (; k < text.size(); ++k) {
+            if (text[k] == '(') ++d;
+            else if (text[k] == ')') {
+                if (--d == 0) break;
+            }
+        }
+        if (k >= text.size()) { out += text.substr(i); break; }
+        std::string inner = Trim(text.substr(lp + 1, k - lp - 1));
+        bool single = true;
+        {
+            int dd = 0;
+            for (size_t z = lp + 1; z < k; ++z) {
+                if (text[z] == '(') ++dd;
+                else if (text[z] == ')') --dd;
+                else if (text[z] == ',' && dd == 0) { single = false; break; }
+            }
+        }
+        if (!single) { out += text.substr(i, k - i + 1); i = k + 1; continue; }
+        out += text.substr(i, p - i);
+        out += "tglmt_mat2_ctor(" + inner + ")";
         i = k + 1;
     }
     text.swap(out);
@@ -1508,7 +3112,10 @@ static void RenameShadowedVars(std::string& body,
             bool l = p > 0 && IsIdentChar(body[p - 1], false);
             size_t e = p + H.size();
             bool r = e < body.size() && IsIdentChar(body[e], false);
-            if (l || r) { out += body.substr(i, e - i); i = e; continue; }
+            size_t pd = p;
+            while (pd > 0 && isspace((unsigned char)body[pd - 1])) --pd;
+            bool member = pd > 0 && body[pd - 1] == '.';
+            if (l || r || member) { out += body.substr(i, e - i); i = e; continue; }
             // lookahead `(` sau spaces → call/def → giữ
             size_t q = e;
             while (q < body.size() && isspace((unsigned char)body[q])) ++q;
@@ -1639,13 +3246,21 @@ static std::set<std::string> HelperVecReturns(const std::string& restGLSL) {
 // Tách args call theo dấu phẩy depth 0 (ngoặc tròn).
 static std::vector<std::string> SplitCallArgs(const std::string& s) {
     std::vector<std::string> out;
-    int d = 0;
+    int d = 0, ad = 0;
     size_t s0 = 0;
     for (size_t k = 0; k <= s.size(); ++k) {
         char ch = k < s.size() ? s[k] : ',';
         if (ch == '(') ++d;
         else if (ch == ')') --d;
-        else if (ch == ',' && d == 0) {
+        else if (ch == '<') {
+            // MSL texture3d<float, access::write> — dấu phẩy trong template KHÔNG
+            // phải phân cách param (image param helper, Photon lpv).
+            size_t w = k;
+            while (w > 0 && IsIdentChar(s[w - 1], false)) --w;
+            std::string word = s.substr(w, k - w);
+            if (word.rfind("texture", 0) == 0 || word.rfind("depth", 0) == 0) ++ad;
+        } else if (ch == '>' && ad > 0) --ad;
+        else if (ch == ',' && d == 0 && ad == 0) {
             out.push_back(Trim(s.substr(s0, k - s0)));
             s0 = k + 1;
         }
@@ -1772,6 +3387,18 @@ static void RenameLocalShadowUniforms(
         size_t pos;
         std::string name;
         size_t end;
+        size_t useStart; // scope bắt đầu SAU declarator (initializer thấy biến ngoài)
+    };
+    // Kết thúc câu lệnh khai báo (`;` ở depth 0 tính từ vị trí tên).
+    auto declStmtEnd = [&](size_t from) -> size_t {
+        int d = 0;
+        for (size_t k = from; k < text.size(); ++k) {
+            char c = text[k];
+            if (c == '(' || c == '{' || c == '[') ++d;
+            else if (c == ')' || c == '}' || c == ']') { if (d > 0) --d; }
+            else if (c == ';' && d == 0) return k + 1;
+        }
+        return text.size();
     };
     std::vector<Decl> decls;
     for (size_t i = 0; i < text.size(); ++i) {
@@ -1801,12 +3428,15 @@ static void RenameLocalShadowUniforms(
             continue;
         }
         size_t bs = enclosingBraceStart(i);
-        if (bs == std::string::npos || isStructBrace(bs)) {
+        if (bs != std::string::npos && isStructBrace(bs)) {
             i = e - 1;
             continue;
         }
-        auto itEnd = braceEnd.find(bs);
-        decls.push_back({i, nm, itEnd == braceEnd.end() ? text.size() : itEnd->second});
+        // bs == npos: decl ở top-level của main body đã bị bóc ngoặc → scope tới hết text.
+        auto itEnd = bs == std::string::npos ? braceEnd.end() : braceEnd.find(bs);
+        decls.push_back({i, nm, (bs == std::string::npos || itEnd == braceEnd.end())
+                                     ? text.size() : itEnd->second,
+                         declStmtEnd(i)});
         i = e - 1;
     }
     if (decls.empty()) return;
@@ -1830,7 +3460,7 @@ static void RenameLocalShadowUniforms(
             // innermost decl chứa p
             const Decl* best = nullptr;
             for (auto& d : decls)
-                if (d.name == nm && p >= d.pos && p < d.end)
+                if (d.name == nm && (p == d.pos || p >= d.useStart) && p < d.end)
                     if (!best || d.pos > best->pos) best = &d;
             if (best) reps.push_back({p, nm.size(), nm});
             p = e;
@@ -1871,6 +3501,208 @@ static std::string RewriteOneParamMSL(const std::string& p) {
     }
     if (byRef) return isConst ? ("const thread " + ty + "& " + nm) : ("thread " + ty + "& " + nm);
     return (isConst ? "const " : "") + ty + " " + nm;
+}
+// `return <a == vecN>;` / `bool b = <a == vecN>;` → all(...) (BSL shadowcomp).
+static bool HasVectorEq(const std::string& s, const std::set<std::string>& vecNames = {}) {
+    std::string t = Trim(s);
+    if (t.rfind("all(", 0) == 0 || t.rfind("any(", 0) == 0) return false;
+    auto isVec = [&](std::string x) -> bool {
+        if (VecSideSpan(x)) return true;
+        std::string b = Trim(x);
+        size_t dot = b.rfind('.');
+        if (dot != std::string::npos) b = b.substr(0, dot);
+        return vecNames.count(Trim(b)) > 0;
+    };
+    int d = 0;
+    for (size_t i = 0; i + 1 < t.size(); ++i) {
+        char c = t[i];
+        if (c == '(' || c == '[') { ++d; continue; }
+        if (c == ')' || c == ']') { --d; continue; }
+        if (d != 0) continue;
+        if ((c == '=' || c == '!') && t[i + 1] == '=') {
+            std::string lhs = t.substr(0, i), rhs = t.substr(i + 2);
+            if (isVec(lhs) || isVec(rhs)) return true;
+            ++i;
+        }
+    }
+    return false;
+}
+static void PromoteVectorBoolReturn(std::string& text) {
+    // tên vector từ khai báo `floatN name` (BSL `voxelPos == clampedVoxelPos`)
+    std::set<std::string> vecNames;
+    for (size_t i = 0; i + 6 < text.size(); ++i) {
+        if (text.compare(i, 5, "float") != 0 || (i > 0 && IsIdentChar(text[i - 1], false)))
+            continue;
+        if (text[i + 5] < '2' || text[i + 5] > '4') continue;
+        size_t p = i + 6;
+        if (p >= text.size() || !isspace((unsigned char)text[p])) continue;
+        while (p < text.size() && isspace((unsigned char)text[p])) ++p;
+        if (p >= text.size() || !(isalpha((unsigned char)text[p]) || text[p] == '_')) continue;
+        size_t e = p;
+        while (e < text.size() && IsIdentChar(text[e], e == p)) ++e;
+        vecNames.insert(text.substr(p, e - p));
+    }
+    std::vector<std::pair<size_t, size_t>> spans; // (exprStart, exprEnd)
+    // return EXPR;
+    for (size_t p = 0; p + 6 < text.size(); ++p) {
+        if (text.compare(p, 6, "return") != 0) continue;
+        if (p > 0 && IsIdentChar(text[p - 1], false)) continue;
+        if (IsIdentChar(text[p + 6], false)) continue;
+        size_t a = p + 6;
+        int d = 0;
+        size_t e = a;
+        for (; e < text.size(); ++e) {
+            char c = text[e];
+            if (c == '(' || c == '[' || c == '{') ++d;
+            else if (c == ')' || c == ']' || c == '}') { if (d == 0) break; --d; }
+            else if (c == ';' && d == 0) break;
+        }
+        if (e >= text.size() || text[e] != ';') continue;
+        if (HasVectorEq(text.substr(a, e - a), vecNames)) spans.push_back({a, e});
+    }
+    // bool NAME = EXPR;
+    for (size_t p = 0; p + 4 < text.size(); ++p) {
+        if (text.compare(p, 4, "bool") != 0) continue;
+        if (p > 0 && IsIdentChar(text[p - 1], false)) continue;
+        size_t q = p + 4;
+        if (q < text.size() && IsIdentChar(text[q], false)) continue;
+        while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+        if (q >= text.size() || !(isalpha((unsigned char)text[q]) || text[q] == '_')) continue;
+        size_t ne = q;
+        while (ne < text.size() && IsIdentChar(text[ne], false)) ++ne;
+        size_t k = ne;
+        while (k < text.size() && isspace((unsigned char)text[k])) ++k;
+        if (k >= text.size() || text[k] != '=') continue;
+        size_t a = k + 1;
+        int d = 0;
+        size_t e = a;
+        for (; e < text.size(); ++e) {
+            char c = text[e];
+            if (c == '(' || c == '[' || c == '{') ++d;
+            else if (c == ')' || c == ']' || c == '}') { if (d == 0) break; --d; }
+            else if (c == ';' && d == 0) break;
+        }
+        if (e >= text.size() || text[e] != ';') continue;
+        if (HasVectorEq(text.substr(a, e - a), vecNames)) spans.push_back({a, e});
+    }
+    std::sort(spans.begin(), spans.end(), [](auto& x, auto& y) { return x.first > y.first; });
+    for (auto& sp : spans) {
+        std::string v = Trim(text.substr(sp.first, sp.second - sp.first));
+        text = text.substr(0, sp.first) + " all(" + v + ")" + text.substr(sp.second);
+    }
+}
+// Pack tự định nghĩa hàm trùng tên Metal builtin (`float tanh(float)`) →
+// `using namespace metal` làm ambiguous. Đổi def + mọi call thành `<name>_uf`.
+static void RenameMetalBuiltinHelpers(std::string& helpersMSL, std::string& body) {
+    static const char* kB[] = {"sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh",
+                               "tanh", "pow", "exp", "exp2", "log", "log2", "sqrt",
+                               "inversesqrt", "abs", "sign", "floor", "trunc", "round",
+                               "fract", "mod", "min", "max", "clamp", "mix", "step",
+                               "smoothstep", "length", "length_squared", "distance", "dot", "cross",
+                               "normalize", "reflect", "refract", "faceforward", "fma",
+                               "transpose", "determinant", "inverse", "log10", nullptr};
+    std::set<std::string> defs;
+    for (auto& d : ParseHelperDefs(helpersMSL, true)) defs.insert(d.name);
+    std::vector<std::string> hit;
+    for (const char** b = kB; *b; ++b)
+        if (defs.count(*b)) hit.push_back(*b);
+    if (hit.empty()) return;
+    auto renameIn = [&](std::string& text) {
+        for (auto& nm : hit) {
+            std::string out;
+            size_t i = 0;
+            while (i < text.size()) {
+                size_t p = text.find(nm, i);
+                if (p == std::string::npos) { out += text.substr(i); break; }
+                bool l = p > 0 && IsIdentChar(text[p - 1], false);
+                size_t e = p + nm.size();
+                bool r = e < text.size() && IsIdentChar(text[e], false);
+                if (l || r) { out += text.substr(i, e - i); i = e; continue; }
+                size_t q = e;
+                while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+                if (q >= text.size() || text[q] != '(') {
+                    out += text.substr(i, e - i);
+                    i = e;
+                    continue;
+                }
+                out += text.substr(i, p - i) + nm + "_uf";
+                i = e;
+            }
+            text.swap(out);
+        }
+    };
+    renameIn(helpersMSL);
+    renameIn(body);
+}
+// ============ helper param bị shadow bởi local cùng tên (Solas/Bliss/BSL) ====
+// GLSL driver chấp nhận `f(float4 color){ float3 color = ...; }` (local thắng),
+// C++/MSL là lỗi redefinition ở cùng scope. Bọc thân hàm trong `{ }` để local
+// vào scope con.
+static void WrapHelperBodyShadowing(std::string& text) {
+    auto defs = ParseHelperDefs(text, true);
+    struct Ins { size_t pos; bool open; };
+    std::vector<Ins> ins;
+    for (auto& d : defs) {
+        if (!d.hasBody) continue;
+        std::vector<std::string> parts = SplitCallArgs(d.params);
+        std::set<std::string> pn;
+        for (auto& pp : parts) {
+            std::string t = Trim(pp);
+            while (!t.empty() && (t.back() == ']' || isdigit((unsigned char)t.back()))) {
+                size_t lb = t.rfind('[');
+                if (lb == std::string::npos) break;
+                t = Trim(t.substr(0, lb));
+            }
+            while (!t.empty() && (t.back() == ')' || t.back() == '&' || t.back() == '*'))
+                t.pop_back();
+            size_t e = t.size();
+            while (e > 0 && isspace((unsigned char)t[e - 1])) --e;
+            size_t b = e;
+            while (b > 0 && IsIdentChar(t[b - 1], false)) --b;
+            if (e > b) pn.insert(t.substr(b, e - b));
+        }
+        if (pn.empty()) continue;
+        int depth = 0;
+        bool hit = false;
+        for (size_t k = d.bodyStart + 1; k < d.bodyEnd && !hit; ++k) {
+            char c = text[k];
+            if (c == '{' || c == '(' || c == '[') { ++depth; continue; }
+            if (c == '}' || c == ')' || c == ']') { --depth; continue; }
+            if (depth != 0) continue;
+            if (!(isalpha((unsigned char)c) || c == '_')) continue;
+            size_t e = k;
+            while (e < text.size() && IsIdentChar(text[e], false)) ++e;
+            std::string nm = text.substr(k, e - k);
+            if (!pn.count(nm)) { k = e - 1; continue; }
+            size_t q = k;
+            while (q > d.bodyStart && isspace((unsigned char)text[q - 1])) --q;
+            size_t we = q;
+            while (we > d.bodyStart && IsIdentChar(text[we - 1], false)) --we;
+            std::string prev = text.substr(we, q - we);
+            if (prev.empty() || !(isalpha((unsigned char)prev[0]) || prev[0] == '_')) {
+                k = e - 1;
+                continue;
+            }
+            static const char* kNotType[] = {"return", "else", "case", "do", nullptr};
+            for (const char** w = kNotType; *w; ++w)
+                if (prev == *w) prev.clear();
+            if (prev.empty()) { k = e - 1; continue; }
+            size_t s = e;
+            while (s < text.size() && isspace((unsigned char)text[s])) ++s;
+            if (s >= text.size() || (text[s] != '=' && text[s] != ';' && text[s] != ',' &&
+                                     text[s] != '[' && text[s] != ')')) {
+                k = e - 1;
+                continue;
+            }
+            hit = true;
+        }
+        if (hit) {
+            ins.push_back({d.bodyStart + 1, true});
+            ins.push_back({d.bodyEnd, false});
+        }
+    }
+    std::sort(ins.begin(), ins.end(), [](const Ins& a, const Ins& b) { return a.pos > b.pos; });
+    for (auto& x : ins) text.insert(x.pos, x.open ? "{\n" : "}\n");
 }
 // Rewrite param list của MỌI function definition ở depth 0: `ret name(inout T x,...){`.
 // Chạy trên helpersMSL (post mp-rewrite) — trước ThreadHelpersMSL (engine chỉ đọc
@@ -1938,12 +3770,223 @@ static void RewriteParamQualifiers(std::string& text) {
 // thành block + temp: `{ T t = EXPR; f(t,...); EXPR = t; }` (EXPR là lvalue).
 // Chỉ fire khi call đứng riêng như STATEMENT (prev `;`/`{`/`}`), ngược lại giữ
 // nguyên (metal báo trung thực).
+// MSL không cho compound-assign vào swizzle (`.xy` là vector phần tử, không bind
+// được ref) — GLSL thì được (`v.xy *= m`). Mở thành `v.xy = v.xy * (rhs)`.
+static void RewriteSwizzleCompoundAssign(std::string& text) {
+    for (int guard = 0; guard < 512; ++guard) {
+        size_t opPos = std::string::npos, st = 0, re = 0;
+        std::string lhs, rhs;
+        char op = 0;
+        for (size_t i = 1; i < text.size(); ++i) {
+            if (text[i] != '=') continue;
+            if (i + 1 < text.size() && text[i + 1] == '=') continue;
+            char c = text[i - 1];
+            if (!strchr("+-*/%&|^", c)) continue;
+            size_t ls = i - 1;
+            while (ls > 0 && isspace((unsigned char)text[ls - 1])) --ls;
+            size_t b = ls;
+            while (b > 0 && (IsIdentChar(text[b - 1], false) || text[b - 1] == '.')) --b;
+            if (b >= ls) continue;
+            if (b > 0 && (text[b - 1] == ')' || text[b - 1] == ']')) continue;
+            std::string l = text.substr(b, ls - b);
+            size_t dot = l.rfind('.');
+            if (dot == std::string::npos || dot == 0) continue;
+            std::string sw = l.substr(dot + 1);
+            bool ok = !sw.empty() && sw.size() <= 4;
+            for (char ch : sw)
+                if (!strchr("xyzwrgba", ch)) { ok = false; break; }
+            if (!ok) continue;
+            size_t rs = i + 1;
+            while (rs < text.size() && isspace((unsigned char)text[rs])) ++rs;
+            int d = 0;
+            size_t e = rs;
+            while (e < text.size()) {
+                char ch = text[e];
+                if (ch == '(' || ch == '[') { ++d; ++e; continue; }
+                if (ch == ')' || ch == ']') {
+                    if (d == 0) break;
+                    --d; ++e; continue;
+                }
+                if (d == 0 && (ch == ';' || ch == ',' || ch == '{' || ch == '}')) break;
+                ++e;
+            }
+            std::string r = Trim(text.substr(rs, e - rs));
+            if (r.empty()) continue;
+            opPos = i; st = b; re = e; lhs = l; rhs = r; op = c;
+            break;
+        }
+        if (opPos == std::string::npos) return;
+        std::string repl = lhs + " = " + lhs + " " + op + " (" + rhs + ")";
+        text = text.substr(0, st) + repl + text.substr(re);
+        (void)opPos;
+    }
+}
+// Image là THAM SỐ helper (`void f(writeonly image3D img)`) — Photon lpv.
+// GLSL type + qualifier → MSL `texture3d<elem, access::X>`; đăng ký tên vào
+// itab để imageLoad/Store trong helper được rewrite.
+static void RewriteImageHelperParams(std::string& text, std::map<std::string, char>& itab) {
+    for (int guard = 0; guard < 64; ++guard) {
+        size_t p = std::string::npos;
+        std::string ty;
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (!(text[i] == 'i') || (i > 0 && IsIdentChar(text[i - 1], false))) continue;
+            for (const char* t : {"image2D", "image3D", "image2DArray"}) {
+                size_t n = strlen(t);
+                if (text.compare(i, n, t) == 0 &&
+                    (i + n >= text.size() || !IsIdentChar(text[i + n], false))) {
+                    p = i; ty = t; break;
+                }
+            }
+            if (p != std::string::npos) break;
+        }
+        if (p == std::string::npos) return;
+        char kind = ImageKind(ty);
+        if (!kind) { text[p] = 'X'; continue; } // ngoài subset, tránh lặp
+        size_t nameB = p + ty.size();
+        while (nameB < text.size() && isspace((unsigned char)text[nameB])) ++nameB;
+        size_t nameE = nameB;
+        while (nameE < text.size() && IsIdentChar(text[nameE], false)) ++nameE;
+        std::string nm = text.substr(nameB, nameE - nameB);
+        if (nm.empty() || (nameE < text.size() && text[nameE] == '(')) { text[p] = 'X'; continue; }
+        // qualifier đứng trước type
+        size_t st = p;
+        char access = 'B';
+        for (;;) {
+            size_t b = st;
+            while (b > 0 && isspace((unsigned char)text[b - 1])) --b;
+            size_t w = b;
+            while (w > 0 && IsIdentChar(text[w - 1], false)) --w;
+            std::string word = text.substr(w, b - w);
+            if (word == "writeonly") { access = 'W'; st = w; continue; }
+            if (word == "readonly") { access = 'R'; st = w; continue; }
+            if (word == "coherent" || word == "volatile" || word == "restrict" ||
+                word == "highp" || word == "mediump" || word == "lowp" || word == "uniform") {
+                st = w; continue;
+            }
+            break;
+        }
+        std::string elem = ImageElem(ty);
+        std::string acc = (access == 'R') ? "access::read"
+                        : (access == 'W') ? "access::write" : "access::read_write";
+        std::string base = (kind == '2') ? "texture2d" : (kind == 'A') ? "texture2d_array"
+                         : (kind == 'C') ? "texturecube" : "texture3d";
+        std::string repl = base + "<" + elem + ", " + acc + "> ";
+        text = text.substr(0, st) + repl + text.substr(nameB);
+        itab[nm] = kind;
+    }
+}
+// GLSL `modf(x, out i)` — MSL cần ref lvalue; swizzle (`xy.y`) không bind được.
+// Tách temp: khai báo trước statement, gán lại sau statement.
+static void RewriteModfSwizzle(std::string& text) {
+    int tmpN = 0;
+    size_t from = 0;
+    for (int guard = 0; guard < 128; ++guard) {
+        size_t p = std::string::npos;
+        for (size_t i = from; i + 4 < text.size(); ++i) {
+            if (text.compare(i, 4, "modf") != 0) continue;
+            if (i > 0 && IsIdentChar(text[i - 1], false)) continue;
+            if (i + 4 < text.size() && IsIdentChar(text[i + 4], false)) continue;
+            size_t q = i + 4;
+            while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+            if (q < text.size() && text[q] == '(') { p = i; break; }
+        }
+        if (p == std::string::npos) return;
+        from = p + 4;
+        size_t lp = text.find('(', p);
+        int d = 0;
+        size_t rp = lp;
+        for (; rp < text.size(); ++rp) {
+            if (text[rp] == '(') ++d;
+            else if (text[rp] == ')') { if (--d == 0) break; }
+        }
+        if (rp >= text.size()) return;
+        std::string inner = text.substr(lp + 1, rp - lp - 1);
+        auto args = SplitCallArgs(inner);
+        if (args.size() != 2) continue;
+        std::string a2 = Trim(args[1]);
+        size_t dot = a2.rfind('.');
+        if (dot == std::string::npos) continue;
+        std::string base = a2.substr(0, dot), sw = a2.substr(dot + 1);
+        bool ok = !sw.empty() && sw.size() <= 4 && !base.empty();
+        for (char c : sw) if (!strchr("xyzwrgba", c)) { ok = false; break; }
+        for (size_t z = 0; ok && z < base.size(); ++z)
+            if (!IsIdentChar(base[z], z == 0) && base[z] != '.' && base[z] != '[' && base[z] != ']') ok = false;
+        if (!ok) continue;
+        std::string ty = sw.size() == 1 ? "float" : "float" + std::to_string(sw.size());
+        std::string tmp = "tglmt_modf_" + std::to_string(tmpN++);
+        text.replace(lp + 1, rp - lp - 1, Trim(args[0]) + ", " + tmp);
+        // statement start
+        size_t ss = lp;
+        while (ss > 0 && text[ss - 1] != ';' && text[ss - 1] != '{' && text[ss - 1] != '}') --ss;
+        // statement end
+        size_t se = lp;
+        int dd = 0;
+        for (; se < text.size(); ++se) {
+            char c = text[se];
+            if (c == '(') ++dd;
+            else if (c == ')') --dd;
+            else if (dd == 0 && c == ';') break;
+        }
+        if (se >= text.size()) return;
+        text.insert(se + 1, " " + base + "." + sw + " = " + tmp + ";");
+        text.insert(ss, ty + " " + tmp + "; ");
+        from = se + 1;
+    }
+}
+// MSL KHÔNG có unary `-` cho matrix (`-m` lỗi) — GLSL photon dùng. Đổi `-M`
+// thành `(-1.0 * M)` cho các tên đã biết là matrix.
+static void RewriteMatrixUnaryMinus(std::string& text) {
+    std::set<std::string> mats;
+    for (const char* ty : {"float2x2", "float3x3", "float4x4"}) {
+        std::string needle = std::string(ty) + " ";
+        size_t p = 0;
+        while ((p = text.find(needle, p)) != std::string::npos) {
+            size_t q = p + needle.size();
+            while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+            if (q < text.size() && (isalpha((unsigned char)text[q]) || text[q] == '_')) {
+                size_t e = q;
+                while (e < text.size() && IsIdentChar(text[e], false)) ++e;
+                mats.insert(text.substr(q, e - q));
+            }
+            p += needle.size();
+        }
+    }
+    if (mats.empty()) return;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '-') continue;
+        size_t b = i;
+        while (b > 0 && isspace((unsigned char)text[b - 1])) --b;
+        if (b > 0 && !strchr("(,=*/+-!<>?:;{}", text[b - 1])) continue;
+        size_t q = i + 1;
+        while (q < text.size() && isspace((unsigned char)text[q])) ++q;
+        if (q >= text.size() || !(isalpha((unsigned char)text[q]) || text[q] == '_')) continue;
+        size_t e = q;
+        while (e < text.size() && IsIdentChar(text[e], false)) ++e;
+        if (!mats.count(text.substr(q, e - q))) continue;
+        if (e < text.size() && (text[e] == '+' || text[e] == '-')) continue;
+        text.insert(e, ")");
+        text.replace(i, 1, "(-1.0 * ");
+        i = e + 6;
+    }
+}
+static void RewriteInverseCalls(std::string& text) {
+    size_t p = 0;
+    while ((p = text.find("inverse(", p)) != std::string::npos) {
+        bool l = p > 0 && IsIdentChar(text[p - 1], false);
+        if (!l) { text.replace(p, 8, "tglmt_inverse("); p += 14; }
+        else p += 8;
+    }
+}
 static void BindSwizzleInoutCalls(std::string& text, const std::string& helpersMSL) {
-    // def → các arg vị trí ref + type (từ header `thread T [(&n)[N]|& n]`)
-    std::map<std::string, std::map<size_t, std::string>> refInfo;
+    // def → (arity, arg vị trí ref + type). GIỮ RIÊNG từng overload: gộp chung
+    // thì `blueNoise(float2 coord, thread float& a, ...)` bị lấy nhầm type
+    // `float` của overload 1 ở arg0 (Bliss composite2).
+    std::map<std::string, std::vector<std::pair<size_t,
+        std::map<size_t, std::string>>>> refInfo;
     for (auto& d : ParseHelperDefs(helpersMSL, true)) {
         auto parts = SplitCallArgs(d.params);
         if (parts.size() == 1 && Trim(parts[0]).empty()) parts.clear();
+        std::map<size_t, std::string> refs;
         for (size_t i = 0; i < parts.size(); ++i) {
             std::string pt = Trim(parts[i]);
             size_t tw = pt.find("thread ");
@@ -1954,8 +3997,9 @@ static void BindSwizzleInoutCalls(std::string& text, const std::string& helpersM
             std::string ty = Trim(rest.substr(0, amp));
             if (!ty.empty() && ty.back() == '(') ty = Trim(ty.substr(0, ty.size() - 1));
             if (ty.empty()) continue;
-            refInfo[d.name][i] = ty;
+            refs[i] = ty;
         }
+        refInfo[d.name].push_back({parts.size(), refs});
     }
     if (refInfo.empty()) return;
     auto swizzleBase = [](const std::string& a, std::string& base, std::string& sw) -> bool {
@@ -2005,7 +4049,8 @@ static void BindSwizzleInoutCalls(std::string& text, const std::string& helpersM
             bool lw = pb == 4 || !IsIdentChar(out[pb - 5], false);
             stmtOk = lw;
         }
-        if (!stmtOk || rit == refInfo.end()) {
+        (void)stmtOk;
+        if (rit == refInfo.end()) {
             out += text.substr(i, e - i);
             i = e;
             continue;
@@ -2024,10 +4069,18 @@ static void BindSwizzleInoutCalls(std::string& text, const std::string& helpersM
         }
         std::vector<std::string> args = SplitCallArgs(text.substr(q + 1, c - q - 1));
         if (args.size() == 1 && Trim(args[0]).empty()) args.clear();
+        const std::map<size_t, std::string>* refs = nullptr;
+        for (auto& ov : rit->second)
+            if (ov.first == args.size() && !ov.second.empty()) { refs = &ov.second; break; }
+        if (!refs) {
+            out += text.substr(i, e - i);
+            i = e;
+            continue;
+        }
         bool any = false;
         std::vector<std::pair<size_t, std::string>> tmps; // (argIdx, base)
         std::vector<std::pair<size_t, std::string>> types;
-        for (auto& [idx, ty] : rit->second) {
+        for (auto& [idx, ty] : *refs) {
             if (idx >= args.size()) continue;
             std::string base, sw;
             if (!swizzleBase(args[idx], base, sw)) continue;
@@ -2040,6 +4093,30 @@ static void BindSwizzleInoutCalls(std::string& text, const std::string& helpersM
             i = e;
             continue;
         }
+        // Call nằm trong biểu thức (`material = f(..., _out.mrt1.a, ...)`) cũng
+        // phải mở block: lui `out` về đầu STATEMENT rồi chèn temp trước, gán lại sau.
+        size_t so = out.size();
+        while (so > 0 && out[so - 1] != ';' && out[so - 1] != '{' && out[so - 1] != '}')
+            --so;
+        std::string prefix = out.substr(so);
+        out.resize(so);
+        int dd2 = 0;
+        size_t se = c + 1;
+        bool stmtEndOk = false;
+        for (; se < text.size(); ++se) {
+            char ch = text[se];
+            if (ch == '(' || ch == '[' || ch == '{') ++dd2;
+            else if (ch == ')' || ch == ']' || ch == '}') {
+                if (dd2 == 0) break;
+                --dd2;
+            } else if (ch == ';' && dd2 == 0) { stmtEndOk = true; break; }
+        }
+        if (!stmtEndOk) {
+            out += prefix + text.substr(i, e - i);
+            i = e;
+            continue;
+        }
+        std::string suffix = text.substr(c + 1, se - c - 1);
         // emit block
         std::string blk = "{ ";
         std::vector<std::string> tmpNames;
@@ -2049,20 +4126,16 @@ static void BindSwizzleInoutCalls(std::string& text, const std::string& helpersM
             blk += types[k].second + " " + tn + " = " + tmps[k].second + "; ";
             args[tmps[k].first] = tn;
         }
-        blk += nm + "(";
+        blk += prefix + nm + "(";
         for (size_t k = 0; k < args.size(); ++k) {
             if (k) blk += ", ";
             blk += Trim(args[k]);
         }
-        blk += "); ";
+        blk += ")" + suffix + "; ";
         for (size_t k = 0; k < tmps.size(); ++k) blk += tmps[k].second + " = " + tmpNames[k] + "; ";
         blk += "}";
         out += blk;
-        i = c + 1;
-        // bỏ `;` ngay sau (đã có trong block) — nếu có
-        size_t s2 = i;
-        while (s2 < text.size() && isspace((unsigned char)text[s2])) ++s2;
-        if (s2 < text.size() && text[s2] == ';') i = s2 + 1;
+        i = se + 1;
     }
     text.swap(out);
 }
@@ -2637,14 +4710,23 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         return body.compare(i, n, w) == 0 && (i == 0 || !IsIdentChar(body[i - 1], false)) &&
                (i + n >= body.size() || !IsIdentChar(body[i + n], false));
     };
+    // `texture` cũng có thể là TÊN BIẾN sampler truyền vào hàm khác
+    // (`textureGrad(texture, ...)` trong BSL): chỉ rewrite khi token này
+    // thực sự được gọi — ký tự kế tiếp (bỏ spaces) phải là '('.
+    auto nextParen = [&](size_t from) -> size_t {
+        size_t p = from;
+        while (p < body.size() && isspace((unsigned char)body[p])) ++p;
+        if (p < body.size() && body[p] == '(') return p;
+        return std::string::npos;
+    };
     // ---- texture() ----
     {
         std::string out;
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "texture")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 7);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 7);
+            if (lp == std::string::npos) { out += body.substr(i, 7); i += 7; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "texture(...) ngoặc không cân bằng"; return false; }
@@ -2675,6 +4757,19 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
                 // GL_TEXTURE_COMPARE_MODE).
                 rep = sname + "_tex.sample_compare(" + sname + "_smp, float2((" +
                       args[1] + ").xy), (" + args[1] + ").z" + bias + ")";
+                out += rep;
+                i = k + 1;
+                // GLSL compat: texture(shadow).r trả float — MSL sample_compare
+                // đã là float, swizzle .r/.x thừa → bỏ.
+                {
+                    size_t q = i;
+                    while (q < body.size() && isspace((unsigned char)body[q])) ++q;
+                    if (q + 1 < body.size() && body[q] == '.' &&
+                        (body[q + 1] == 'r' || body[q + 1] == 'x') &&
+                        (q + 2 >= body.size() || !IsIdentChar(body[q + 2], false)))
+                        i = q + 2;
+                }
+                continue;
             } else {
                 rep = sname + "_tex.sample(" + sname + "_smp, float2(" + args[1] + ")" + bias + ")";
             }
@@ -2689,8 +4784,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "texelFetch")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 10);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 10);
+            if (lp == std::string::npos) { out += body.substr(i, 10); i += 10; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "texelFetch(...) ngoặc không cân bằng"; return false; }
@@ -2732,8 +4827,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureGrad")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 11);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 11);
+            if (lp == std::string::npos) { out += body.substr(i, 11); i += 11; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureGrad(...) ngoặc không cân bằng"; return false; }
@@ -2760,8 +4855,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureLod")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 10);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 10);
+            if (lp == std::string::npos) { out += body.substr(i, 10); i += 10; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureLod(...) ngoặc không cân bằng"; return false; }
@@ -2793,8 +4888,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureProj")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 11);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 11);
+            if (lp == std::string::npos) { out += body.substr(i, 11); i += 11; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureProj(...) ngoặc không cân bằng"; return false; }
@@ -2829,8 +4924,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureSize")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 11);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 11);
+            if (lp == std::string::npos) { out += body.substr(i, 11); i += 11; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureSize(...) ngoặc không cân bằng"; return false; }
@@ -2875,8 +4970,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureGather")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 13);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 13);
+            if (lp == std::string::npos) { out += body.substr(i, 13); i += 13; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureGather(...) ngoặc không cân bằng"; return false; }
@@ -2917,8 +5012,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureOffset")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 13);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 13);
+            if (lp == std::string::npos) { out += body.substr(i, 13); i += 13; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureOffset(...) ngoặc không cân bằng"; return false; }
@@ -2951,8 +5046,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "texelFetchOffset")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 16);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 16);
+            if (lp == std::string::npos) { out += body.substr(i, 16); i += 16; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "texelFetchOffset(...) ngoặc không cân bằng"; return false; }
@@ -2972,8 +5067,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureLodOffset")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 16);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 16);
+            if (lp == std::string::npos) { out += body.substr(i, 16); i += 16; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureLodOffset(...) ngoặc không cân bằng"; return false; }
@@ -2999,8 +5094,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureGradOffset")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 17);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 17);
+            if (lp == std::string::npos) { out += body.substr(i, 17); i += 17; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureGradOffset(...) ngoặc không cân bằng"; return false; }
@@ -3022,8 +5117,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureGatherOffset")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 19);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 19);
+            if (lp == std::string::npos) { out += body.substr(i, 19); i += 19; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureGatherOffset(...) ngoặc không cân bằng"; return false; }
@@ -3053,8 +5148,8 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
         size_t i = 0;
         while (i < body.size()) {
             if (!isHead(i, "textureProjLod")) { out += body[i]; ++i; continue; }
-            size_t lp = body.find('(', i + 14);
-            if (lp == std::string::npos) { out += body.substr(i); break; }
+            size_t lp = nextParen(i + 14);
+            if (lp == std::string::npos) { out += body.substr(i, 14); i += 14; continue; }
             std::vector<std::string> args;
             size_t k = 0;
             if (!splitArgs(lp, k, args)) { err = "textureProjLod(...) ngoặc không cân bằng"; return false; }
@@ -3092,9 +5187,15 @@ static std::string RewriteIdents(const std::string& src,
             size_t j = i + 1;
             while (j < src.size() && IsIdentChar(src[j], false)) ++j;
             std::string w = src.substr(i, j - i);
+            // `material.emission` — thành viên struct TRÙNG TÊN varying/uniform
+            // KHÔNG được đổi (`material._in.emission`).
+            size_t pb = i;
+            while (pb > 0 && isspace((unsigned char)src[pb - 1])) --pb;
+            bool member = pb > 0 && src[pb - 1] == '.';
             bool hit = false;
-            for (auto& kv : mp)
-                if (kv.first == w) { o += kv.second; hit = true; break; }
+            if (!member)
+                for (auto& kv : mp)
+                    if (kv.first == w) { o += kv.second; hit = true; break; }
             if (!hit) o += w;
             i = j;
             continue;
@@ -3551,10 +5652,12 @@ static void PromoteIntLitInMinMaxClamp(std::string& text) {
 static bool ThreadHelpersMSL(
     std::string& helpersMSL, std::string& body,
     const std::map<std::string, std::vector<std::pair<std::string, SampEntry>>>& helperSamp,
-    const SampTable& globalSamp, const std::vector<std::string>& uboBlocks, bool isVertex,
+    const SampTable& globalSamp, const std::vector<std::string>& uboBlocks,
+    const std::vector<std::string>& ssboBlocks, bool isVertex,
     const std::vector<GLSLVar>& vertexAttrs, const std::vector<GLSLVar>& outVars,
     const std::map<std::string, std::string>& matVaryTypes,
     const std::vector<std::pair<std::string, std::string>>& entryBuiltins,
+    const std::map<std::string, std::string>& imgTypes,
     std::string& err) {
     // P-Sodium: attribute (vs) / varying (fs) map (name → mslType) để thread vào
     // helpers đọc trực tiếp (vd a_TexCoord trong _vert_init; `texCoord` trong
@@ -3566,8 +5669,9 @@ static bool ThreadHelpersMSL(
     // O: out-varying của VS đọc trong helper (`wave *= clamp(lmCoord.y ...)`):
     // helper nhận `thread T&` cùng tên, body truyền `_out.X` (read+write-through).
     std::map<std::string, std::string> outTypes;
-    if (isVertex)
-        for (auto& o : outVars) outTypes[o.name] = o.mslType;
+    // Cả VS out-varying lẫn FS output (Photon final.fsh helper ghi
+    // `fragment_color` → thread float3& + call-site `_out.fragment_color`).
+    for (auto& o : outVars) outTypes[o.name] = o.mslType;
     for (auto& [mn, mt] : matVaryTypes) {
         if (isVertex) outTypes[mn] = mt;
         else attrTypes[mn] = mt;
@@ -3737,27 +5841,60 @@ static bool ThreadHelpersMSL(
     // sqrt*, clamp01...). MSL cũng overload được → nếu mọi candidate cùng shape gọi được
     // (req y hệt + splitKind y hệt theo vị trí) thì chọn candidate đầu: call site giữ tên,
     // MSL tự chọn overload theo kiểu tại compile time. Khác req/kind → vẫn mơ hồ thật.
-    auto resolveOverload = [&](const std::string& nm, int arity, Def*& out) -> bool {
-        Def* f = nullptr;
-        for (auto& d : defs) {
-            if (d.name != nm || d.origCount != arity) continue;
-            if (!f) { f = &d; continue; }
-            if (d.req != f->req || d.formalNames.size() != f->formalNames.size()) return false;
-            for (size_t i = 0; i < d.formalNames.size(); ++i) {
+    // Overload cùng arity: GLSL cho phép khác kiểu (`reproject(vec3, bool)` vs
+    // `reproject(vec3, sampler2D)` — Photon). Phân biệt bằng actual: formal
+    // sampler ↔ actual là sampler uniform/tên _tex/_smp.
+    auto argLooksSampler = [&](const std::string& a) {
+        std::string t = Trim(a);
+        if (t.empty() || !(isalpha((unsigned char)t[0]) || t[0] == '_')) return false;
+        for (size_t k = 1; k < t.size(); ++k)
+            if (!IsIdentChar(t[k], false)) return false;
+        if (t.size() > 4 && (t.substr(t.size() - 4) == "_tex" ||
+                             t.substr(t.size() - 4) == "_smp"))
+            return true;
+        return globalSamp.find(t) != globalSamp.end();
+    };
+    auto resolveOverload = [&](const std::string& nm,
+                               const std::vector<std::string>& actuals,
+                               Def*& out) -> bool {
+        std::vector<Def*> cand;
+        for (auto& d : defs)
+            if (d.name == nm && (int)actuals.size() == d.origCount) cand.push_back(&d);
+        if (cand.empty()) return false;
+        if (cand.size() == 1) { out = cand[0]; return true; }
+        std::vector<Def*> fit;
+        for (auto* d : cand) {
+            bool ok = true;
+            for (size_t i = 0; i < d->formalNames.size() && ok; ++i) {
+                bool wantsSampler = d->splitKind.count(d->formalNames[i]) > 0;
+                bool gotSampler = i < actuals.size() && argLooksSampler(actuals[i]);
+                if (wantsSampler != gotSampler) ok = false;
+            }
+            if (ok) fit.push_back(d);
+        }
+        if (fit.size() == 1) { out = fit[0]; return true; }
+        if (fit.empty()) fit = cand;
+        Def* f = fit[0];
+        for (size_t k = 1; k < fit.size(); ++k) {
+            Def* d = fit[k];
+            if (d->req != f->req || d->formalNames.size() != f->formalNames.size())
+                return false;
+            for (size_t i = 0; i < d->formalNames.size(); ++i) {
                 char ka = 0, kb = 0;
-                auto ia = d.splitKind.find(d.formalNames[i]);
+                auto ia = d->splitKind.find(d->formalNames[i]);
                 auto ib = f->splitKind.find(f->formalNames[i]);
-                if (ia != d.splitKind.end()) ka = ia->second;
+                if (ia != d->splitKind.end()) ka = ia->second;
                 if (ib != f->splitKind.end()) kb = ib->second;
                 if (ka != kb) return false;
             }
         }
         out = f;
-        return f != nullptr;
+        return true;
     };
     auto declFor = [&](const std::string& item) -> std::string {
         if (item == "U:") return "constant TGLMTUniforms& tglmt_u";
         if (item.rfind("B:", 0) == 0) return "constant TGLMTUBO_" + item.substr(2) + "& ubo_" + item.substr(2);
+        if (item.rfind("S:", 0) == 0) return "device TGLMTSSBO_" + item.substr(2) + "& ssbo_" + item.substr(2);
         // P-Sodium: attribute → value param CÙNG TÊN (body helper dùng ngay, khỏi rewrite).
         if (item.rfind("A:", 0) == 0) {
             std::string nm = item.substr(2);
@@ -3778,6 +5915,11 @@ static bool ThreadHelpersMSL(
             if (it == builtinTypes.end()) return "";
             return it->second + " " + nm;
         }
+        if (item.rfind("I:", 0) == 0) {
+            auto it = imgTypes.find(item.substr(2));
+            if (it == imgTypes.end()) return "";
+            return it->second + " " + item.substr(2);
+        }
         if (item.rfind("T:", 0) == 0) {
             std::string n = item.substr(2);
             if (n.size() > 4 && n.substr(n.size() - 4) == "_smp") return "sampler " + n;
@@ -3795,6 +5937,8 @@ static bool ThreadHelpersMSL(
     auto argFor = [&](const std::string& item, bool isBody) -> std::string {
         if (item == "U:") return "tglmt_u";
         if (item.rfind("B:", 0) == 0) return "ubo_" + item.substr(2);
+        if (item.rfind("S:", 0) == 0) return "ssbo_" + item.substr(2);
+        if (item.rfind("I:", 0) == 0) return item.substr(2);
         if (item.rfind("T:", 0) == 0) return item.substr(2);
         // P-Sodium: attribute — main có stage_in (`_in.X`), helper dùng param cùng tên.
         if (item.rfind("A:", 0) == 0) {
@@ -3833,6 +5977,8 @@ static bool ThreadHelpersMSL(
         if (hasWordIn(helpersMSL, d.bodyStart, d.bodyEnd + 1, "tglmt_u")) mine.push_back("U:");
         for (auto& ub : uboBlocks)
             if (hasWordIn(helpersMSL, d.bodyStart, d.bodyEnd + 1, "ubo_" + ub)) mine.push_back("B:" + ub);
+        for (auto& sb : ssboBlocks)
+            if (hasWordIn(helpersMSL, d.bodyStart, d.bodyEnd + 1, "ssbo_" + sb)) mine.push_back("S:" + sb);
         // Attribute (vs) / varying (fs) đọc trong helper tên thô → thread param
         // (body truyền `_in.X`). Formal trùng tên (shadowing) thì dùng param sẵn.
         for (auto& [anm, aty] : attrTypes) {
@@ -3846,6 +5992,14 @@ static bool ThreadHelpersMSL(
             if (isOwn(bnm)) continue;
             if (hasWordIn(helpersMSL, d.bodyStart, d.bodyEnd + 1, bnm))
                 mine.push_back("V:" + bnm);
+        }
+        // Image uniform (image3D floodfill_img…) dùng trong helper → thread param
+        // value (texture object đã có ở entry param, tên giữ nguyên).
+        for (auto& [inm, ity] : imgTypes) {
+            (void)ity;
+            if (isOwn(inm)) continue;
+            if (hasWordIn(helpersMSL, d.bodyStart, d.bodyEnd + 1, inm))
+                mine.push_back("I:" + inm);
         }
         for (auto& [onm, oty] : outTypes) {
             (void)oty;
@@ -3988,7 +6142,7 @@ static bool ThreadHelpersMSL(
                           std::to_string(cs.actuals.size()) + ")";
                     return false;
                 }
-                if (nmatch > 1 && !resolveOverload(cs.callee, (int)cs.actuals.size(), target)) {
+                if (nmatch > 1 && !resolveOverload(cs.callee, cs.actuals, target)) {
                     err = "helper " + cs.callee + " gọi mơ hồ (trùng arity n=" +
                           std::to_string(cs.actuals.size()) + " defs=";
                     for (auto& d2 : defs)
@@ -4013,6 +6167,7 @@ static bool ThreadHelpersMSL(
                         std::string a;
                         if (it == "U:") a = "tglmt_u";
                         else if (it.rfind("B:", 0) == 0) a = "ubo_" + it.substr(2);
+                        else if (it.rfind("S:", 0) == 0) a = "ssbo_" + it.substr(2);
                         else if (it.rfind("T:", 0) == 0) a = it.substr(2);
                         else if (it.rfind("A:", 0) == 0) a = it.substr(2);
                         else if (it.rfind("O:", 0) == 0) a = "_out." + it.substr(2);
@@ -4098,6 +6253,20 @@ static bool ThreadHelpersMSL(
             }
         }
     }
+    // Uniform trùng tên param (Solas `in vec4 color` + uniform `color`): bỏ
+    // khỏi req NGAY để cả header lẫn call-site không thêm lần 2.
+    for (auto& d : defs) {
+        std::set<std::string> have(d.formalNames.begin(), d.formalNames.end());
+        std::vector<std::string> keep;
+        for (auto& item : d.req) {
+            std::string dd2 = declFor(item);
+            std::string nm = dd2.empty() ? std::string() : ParamBaseName(dd2);
+            if (!nm.empty() && have.count(nm)) continue;
+            if (!nm.empty()) have.insert(nm);
+            keep.push_back(item);
+        }
+        d.req.swap(keep);
+    }
     // ---- áp dụng edits: headers (split + append) ----
     {
         struct Edit {
@@ -4112,6 +6281,7 @@ static bool ThreadHelpersMSL(
             if (pieces.size() == 1 && Trim(pieces[0]).empty()) pieces.clear();
             std::string rebuilt;
             bool first = true;
+            std::set<std::string> haveParam;
             auto emitP = [&](const std::string& a) {
                 if (!first) rebuilt += ", ";
                 rebuilt += a;
@@ -4121,6 +6291,7 @@ static bool ThreadHelpersMSL(
                 std::string pt = Trim(pp);
                 if (pt.empty()) continue;
                 std::string nm = ParamBaseName(pt);
+                haveParam.insert(nm);
                 auto sk = d.splitKind.find(nm);
                 if (sk != d.splitKind.end()) {
                     char k = sk->second;
@@ -4139,7 +6310,13 @@ static bool ThreadHelpersMSL(
             }
             for (auto& item : d.req) {
                 std::string dd2 = declFor(item);
-                if (!dd2.empty()) emitP(dd2);
+                // Uniform trùng tên param (Solas `in vec4 color` + uniform
+                // `color`) — ThreadHelpers thấy word trong body nhưng đó là
+                // param → không được thêm lần 2.
+                if (!dd2.empty() && !haveParam.count(ParamBaseName(dd2))) {
+                    haveParam.insert(ParamBaseName(dd2));
+                    emitP(dd2);
+                }
             }
             edits.push_back({d.lp + 1, d.rp, rebuilt});
         }
@@ -4214,7 +6391,7 @@ static bool ThreadHelpersMSL(
                         rwOk = false;
                         break;
                     }
-                    if (nmatch > 1 && !resolveOverload(nm, (int)actuals.size(), target)) {
+                    if (nmatch > 1 && !resolveOverload(nm, actuals, target)) {
                         err = "helper " + nm + " gọi mơ hồ (trùng arity kids=";
                         for (auto& d2 : defs)
                             if (d2.name == nm) err += d2.key + " ";
@@ -4238,7 +6415,8 @@ static bool ThreadHelpersMSL(
                             if (!isBareName(E)) { err = "arg sampler phức tạp ngoài subset: " + E; rwOk = false; break; }
                             emitArg(E + "_tex");
                             char kk = sk->second;
-                            if (kk == '2' || kk == 'S' || kk == 'C' || kk == 'A') emitArg(E + "_smp");
+                            if (kk == '2' || kk == '3' || kk == 'S' || kk == 'C' || kk == 'A')
+                                emitArg(E + "_smp");
                             continue;
                         }
                         if (ai >= actuals.size()) { err = "thiếu arg cho " + fn; rwOk = false; break; }
@@ -4312,6 +6490,173 @@ static bool ExtractMainBody(const std::string& src, std::string& inner, std::str
 
 } // namespace
 
+// `struct S { ... } var;` (global mutable, Photon final.fsh `} text;`) →
+// `struct S { ... }; S var;` để scanner thấy 2 statement: struct def vào helpers,
+// `S var;` vào hoisted-global (MSL cấm global mutable).
+static void SplitStructDeclarators(std::string& src) {
+    size_t p = 0;
+    while ((p = src.find("struct", p)) != std::string::npos) {
+        size_t e = p + 6;
+        if (p > 0 && IsIdentChar(src[p - 1], false)) { p = e; continue; }
+        size_t ns = e;
+        while (ns < src.size() && isspace((unsigned char)src[ns])) ++ns;
+        if (ns >= src.size() || !(isalpha((unsigned char)src[ns]) || src[ns] == '_')) { p = e; continue; }
+        size_t ne = ns;
+        while (ne < src.size() && IsIdentChar(src[ne], false)) ++ne;
+        std::string nm = src.substr(ns, ne - ns);
+        size_t lb = ne;
+        while (lb < src.size() && isspace((unsigned char)src[lb])) ++lb;
+        if (lb >= src.size() || src[lb] != '{') { p = e; continue; }
+        int d = 0;
+        size_t rb = lb;
+        for (; rb < src.size(); ++rb) {
+            if (src[rb] == '{') ++d;
+            else if (src[rb] == '}') { if (--d == 0) break; }
+        }
+        if (rb >= src.size()) break;
+        size_t a = rb + 1;
+        while (a < src.size() && isspace((unsigned char)src[a])) ++a;
+        if (a < src.size() && (isalpha((unsigned char)src[a]) || src[a] == '_')) {
+            src.insert(a, nm + " ");
+            src.insert(rb + 1, ";");
+            p = a + nm.size() + 1;
+        } else {
+            p = rb + 1;
+        }
+    }
+}
+// Struct varying (`flat out CloudsParameters clouds_params;` — Photon):
+// Metal user(locn) chỉ nhận scalar/vector. Tách thành từng member varying, giữ
+// local struct CÙNG TÊN trong main (body không phải sửa); VS copy ra `_out`,
+// FS copy từ `_in` ở đầu entry.
+struct StructVaryingExpand {
+    std::string inDecl, outDecl, outCopy;
+};
+static StructVaryingExpand ExpandStructVaryings(std::string& src, bool isVertex) {
+    StructVaryingExpand r;
+    struct SDef {
+        std::string name;
+        std::vector<std::pair<std::string, std::string>> members;
+    };
+    std::vector<SDef> defs;
+    size_t p = 0;
+    while ((p = src.find("struct", p)) != std::string::npos) {
+        size_t e = p + 6;
+        if (p > 0 && IsIdentChar(src[p - 1], false)) { p = e; continue; }
+        size_t ns = e;
+        while (ns < src.size() && isspace((unsigned char)src[ns])) ++ns;
+        if (ns >= src.size() || !(isalpha((unsigned char)src[ns]) || src[ns] == '_')) { p = e; continue; }
+        size_t ne = ns;
+        while (ne < src.size() && IsIdentChar(src[ne], false)) ++ne;
+        std::string sname = src.substr(ns, ne - ns);
+        size_t lb = ne;
+        while (lb < src.size() && isspace((unsigned char)src[lb])) ++lb;
+        if (lb >= src.size() || src[lb] != '{') { p = e; continue; }
+        int d = 0;
+        size_t rb = lb;
+        for (; rb < src.size(); ++rb) {
+            if (src[rb] == '{') ++d;
+            else if (src[rb] == '}') { if (--d == 0) break; }
+        }
+        if (rb >= src.size()) break;
+        SDef sd;
+        sd.name = sname;
+        bool ok = true;
+        std::string body = src.substr(lb + 1, rb - lb - 1);
+        size_t st = 0;
+        while (st < body.size()) {
+            size_t sc = body.find(';', st);
+            if (sc == std::string::npos) break;
+            std::string m = Trim(body.substr(st, sc - st));
+            st = sc + 1;
+            if (m.empty()) continue;
+            size_t q = m.size();
+            while (q > 0 && isspace((unsigned char)m[q - 1])) --q;
+            size_t qe = q;
+            while (qe > 0 && IsIdentChar(m[qe - 1], false)) --qe;
+            if (qe == q) { ok = false; break; }
+            std::string mn = m.substr(qe, q - qe);
+            std::string mt = Trim(m.substr(0, qe));
+            if (mn.find('[') != std::string::npos || mt.empty() ||
+                mt.find('[') != std::string::npos || mt.find('(') != std::string::npos) {
+                ok = false;
+                break;
+            }
+            sd.members.emplace_back(mt, mn);
+        }
+        if (ok && !sd.members.empty()) defs.push_back(sd);
+        p = rb + 1;
+    }
+    auto hasTok = [](const std::string& t, const char* w) {
+        size_t n = strlen(w), p = 0;
+        while ((p = t.find(w, p)) != std::string::npos) {
+            bool l = p > 0 && IsIdentChar(t[p - 1], false);
+            size_t e = p + n;
+            bool rr = e < t.size() && IsIdentChar(t[e], false);
+            if (!l && !rr) return true;
+            p = e;
+        }
+        return false;
+    };
+    std::vector<std::pair<std::string, std::vector<std::string>>> accessRewrite;
+    for (auto& sd : defs) {
+        size_t q = 0;
+        while ((q = src.find(sd.name, q)) != std::string::npos) {
+            size_t e = q + sd.name.size();
+            if ((q > 0 && IsIdentChar(src[q - 1], false)) ||
+                (e < src.size() && IsIdentChar(src[e], false))) { q = e; continue; }
+            size_t a = e;
+            while (a < src.size() && isspace((unsigned char)src[a])) ++a;
+            if (a >= src.size() || !(isalpha((unsigned char)src[a]) || src[a] == '_')) { q = e; continue; }
+            size_t b = a;
+            while (b < src.size() && IsIdentChar(src[b], false)) ++b;
+            std::string vn = src.substr(a, b - a);
+            size_t c = b;
+            while (c < src.size() && isspace((unsigned char)src[c])) ++c;
+            if (c >= src.size() || src[c] != ';') { q = e; continue; }
+            size_t st = q;
+            while (st > 0 && src[st - 1] != ';' && src[st - 1] != '{' && src[st - 1] != '}')
+                --st;
+            std::string prefix = src.substr(st, q - st);
+            bool isIn = hasTok(prefix, "in"), isOut = hasTok(prefix, "out");
+            if (!isIn && !isOut) { q = c + 1; continue; }
+            std::string qual;
+            for (const char* w : {"flat", "smooth", "noperspective", "centroid", "sample",
+                                  "patch", "invariant", "precise"}) {
+                if (hasTok(prefix, w)) qual += std::string(w) + " ";
+            }
+            std::string repl;
+            for (auto& m : sd.members)
+                repl += qual + (isOut ? "out " : "in ") + m.first + " " + vn + "_" + m.second + "; ";
+            src.replace(st, c + 1 - st, repl);
+            // VS: local struct cùng tên (gán cả struct được) + copy ra _out.
+            // FS: helper cũng đọc varying → rewrite `name.m` → `name_m` toàn src,
+            //     machinery thread varying sẵn có lo phần đưa vào helper.
+            if (isOut && isVertex) {
+                r.outDecl += sd.name + " " + vn + ";\n";
+                for (auto& m : sd.members)
+                    r.outCopy += "_out." + vn + "_" + m.second + " = " + vn + "." + m.second + "; ";
+            }
+            if (isIn && !isVertex) {
+                std::vector<std::string> mns;
+                for (auto& m : sd.members) mns.push_back(m.second);
+                accessRewrite.emplace_back(vn, mns);
+            }
+            q = st + repl.size();
+        }
+    }
+    for (auto& [vn, mns] : accessRewrite) {
+        for (auto& mn : mns) {
+            std::string from = vn + "." + mn, to = vn + "_" + mn;
+            size_t q = 0;
+            while ((q = src.find(from, q)) != std::string::npos) {
+                src.replace(q, from.size(), to);
+                q += to.size();
+            }
+        }
+    }
+    return r;
+}
 GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     GLSLConvertResult R;
     R.isVertex = (stage == 0x8B31);
@@ -4325,6 +6670,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         return fail("tessellation evaluation shader chưa hỗ trợ (P-Tess T2)");
 
     std::string src = StripComments(glsl);
+    RenameCxxOnlyKeywords(src);
     // Tiền xử lý: #version, #define/#undef (object-like, kiểu Blaze3D prepend),
     // #ifdef/#ifndef/#else/#endif, #line (bỏ), #pragma/#extension (bỏ), precision (bỏ).
     // Blaze3D tiền tố mọi shader vanilla bằng defines biến thể + #line nên thiếu
@@ -4538,8 +6884,16 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         }
         src = kept;
     }
+    SplitStructDeclarators(src);
+    // Struct varying (Photon fog_params/clouds_params) → member varyings.
+    StructVaryingExpand sve;
+    if (R.isVertex || (!R.isCompute && !R.isTessControl))
+        sve = ExpandStructVaryings(src, R.isVertex);
     // Quét khai báo top-level (bao gồm UBO blocks cho vanilla 1.17+/Sodium read-only)
     std::vector<GLSLVar> ins, outs, uniforms;
+    // Iris injects một số uniform vào MỌI program (Bliss dùng `entityId` mà
+    // không khai báo — Iris thêm ngầm). Chưa có runtime value → hằng 0.
+    std::vector<std::string> irisInject;
     // P6e subroutine: type decls, impls (type→func), uniforms (var→type).
     // Dispatch fn sinh sau scan (switch trên uniform int, MSL không có fn pointer).
     struct SubType { std::string name, ret, params; };
@@ -4669,7 +7023,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         // P6g: `layout(fmt[, binding=N]) uniform [readonly|writeonly] image2D img;`
         // → GLSLVar isImage. Format bắt buộc theo GLSL (không validate chi tiết,
         // backend bind texture thật). Binding -1 = chưa khai báo → glUniform1i.
-        auto tryParseImage = [&](const std::string& t, GLSLVar& out) -> bool {
+        auto tryParseImage = [&](const std::string& t, std::vector<GLSLVar>& out) -> bool {
             std::string s = Trim(t);
             if (!s.empty() && s.back() == ';') s.pop_back();
             s = Trim(s);
@@ -4703,21 +7057,47 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 else break;
             }
             if (!sawUniform || k + 1 >= w.size()) return false;
-            std::string itype = w[k], iname = w[k + 1];
-            if (!iname.empty() && iname.back() == ';') iname.pop_back();
-            if (iname.find('[') != std::string::npos) return false; // image array ngoài subset
+            std::string itype = w[k];
             char kind = ImageKind(itype);
             if (!kind) return false;
-            // chỉ 1 declarator (image đơn, không `image2D a, b;`)
-            if (k + 2 < w.size()) return false;
-            out.glslType = itype; out.name = iname;
-            out.isImage = true; out.imageAccess = access; out.imageBinding = binding;
+            // Nhiều declarator: `image3D a, b;` (Solas shadowcomp). Tên có thể
+            // dính dấu phẩy/`;` sau khi split whitespace.
+            std::vector<std::string> names;
+            for (size_t nk = k + 1; nk < w.size(); ++nk) {
+                std::string rem = w[nk];
+                size_t st = 0;
+                while (st <= rem.size()) {
+                    size_t cm = rem.find(',', st);
+                    std::string nm = rem.substr(st, cm == std::string::npos ? std::string::npos : cm - st);
+                    if (!nm.empty() && nm.back() == ';') nm.pop_back();
+                    nm = Trim(nm);
+                    if (nm.empty()) {
+                        if (cm == std::string::npos) break; // dấu phẩy cuối token
+                        st = cm + 1;
+                        continue;
+                    }
+                    if (nm.find('[') != std::string::npos) return false; // image array ngoài subset
+                    if (!nm.empty() && !isalpha((unsigned char)nm[0]) && nm[0] != '_') return false;
+                    for (size_t q = 1; q < nm.size(); ++q)
+                        if (!IsIdentChar(nm[q], false)) return false;
+                    names.push_back(nm);
+                    if (cm == std::string::npos) break;
+                    st = cm + 1;
+                }
+            }
+            if (names.empty()) return false;
             std::string elem = ImageElem(itype);
             std::string acc = (access == 'R') ? "access::read"
                             : (access == 'W') ? "access::write" : "access::read_write";
             std::string base = (kind == '2') ? "texture2d" : (kind == 'A') ? "texture2d_array"
                              : (kind == 'C') ? "texturecube" : "texture3d";
-            out.mslType = base + "<" + elem + ", " + acc + ">";
+            for (auto& nm : names) {
+                GLSLVar v;
+                v.glslType = itype; v.name = nm;
+                v.isImage = true; v.imageAccess = access; v.imageBinding = binding;
+                v.mslType = base + "<" + elem + ", " + acc + ">";
+                out.push_back(v);
+            }
             return true;
         };
         // P9 atomic counter: `layout(binding=N, offset=M) uniform atomic_uint ac;`
@@ -4853,12 +7233,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             }
             // P6g image: `layout(...) uniform image2D img;` (không `{`, không phải UBO).
             {
-                GLSLVar iv;
+                std::vector<GLSLVar> iv;
                 if ((t.rfind("layout", 0) == 0 || t.rfind("uniform", 0) == 0 ||
                      t.find("uniform") != std::string::npos) &&
                     t.find("image") != std::string::npos && t.find('{') == std::string::npos &&
                     tryParseImage(t, iv)) {
-                    R.images.push_back(iv);
+                    for (auto& v : iv) R.images.push_back(v);
                     continue;
                 }
             }
@@ -5218,7 +7598,18 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                     }
                     bool cok = false;
                     std::string cm = MSLType(ctype, cok);
-                    if (!cok) return fail("kiểu không hỗ trợ: " + ctype);
+                    if (!cok) {
+                        // Const global kiểu struct user (`const Material water_material =
+                        // Material(...)`): MSL cho const namespace-scope; ctor → brace
+                        // init bởi ExpandStructCtors(helpersMSL).
+                        bool plain = !ctype.empty() &&
+                                     (isalpha((unsigned char)ctype[0]) || ctype[0] == '_');
+                        for (size_t q = 1; plain && q < ctype.size(); ++q)
+                            if (!IsIdentChar(ctype[q], false)) plain = false;
+                        if (!plain) return fail("kiểu không hỗ trợ: " + ctype);
+                        cok = true;
+                        cm = ctype;
+                    }
                     std::vector<std::pair<std::string, int>> cds;
                     if (!SplitDeclarators(crest, cds)) return fail("khai báo không hỗ trợ: " + t);
                     for (auto& [cnm, carr] : cds) {
@@ -5307,9 +7698,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         auto expandMats = [&](std::vector<GLSLVar>& vars, bool isOut) {
             std::vector<GLSLVar> nv;
             for (auto& v : vars) {
-                int rows = 0, cols = 0;
-                if (sscanf(v.mslType.c_str(), "float%dx%d", &rows, &cols) == 2 &&
+                int cols = 0, rows = 0;
+                if (sscanf(v.mslType.c_str(), "float%dx%d", &cols, &rows) == 2 &&
                     rows >= 2 && rows <= 4 && cols >= 2 && cols <= 4) {
+                    // Metal floatCxR = C CỘT × R hàng (GLSL matCxR y hệt) → mỗi
+                    // cột là floatR, số cột = C. (auurora_data mat2x4 từng sai
+                    // thành 4 cột float2 → "no matching constructor".)
                     std::string colT = "float" + std::to_string(rows);
                     matVaryTypes[v.name] = v.mslType;
                     for (int i = 0; i < cols; ++i) {
@@ -5341,6 +7735,9 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (R.isVertex) expandMats(outs, true);
         else if (fragStage) expandMats(ins, false);
     }
+    matVaryInDecl += sve.inDecl;
+    matVaryOutDecl += sve.outDecl;
+    matVaryOutCopy += sve.outCopy;
     // Varying/attribute thiếu location: linker gán ở LinkProgram (đúng GL).
     // Tạm đánh số 900+ordinal trong MSL, link viết lại số thật.
     {
@@ -6062,24 +8459,29 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     } else if (R.isCompute) {
         // P6f compute: gl_*ID → kernel thread-position params (probe Metal thật OK).
         // localSize bắt ở preprocessor (dòng layout local_size bị bỏ).
-        if (body.find("gl_GlobalInvocationID") != std::string::npos) {
+        // Helper cũng có thể dùng (Photon update_lpv) → quét cả rest; tên trong
+        // helper được rename xuống `tglmt_*` và thread thành param.
+        auto cUsed = [&](const char* nm) {
+            return body.find(nm) != std::string::npos || rest.find(nm) != std::string::npos;
+        };
+        if (cUsed("gl_GlobalInvocationID")) {
             useGlobalID = true;
             mpVary.emplace_back("gl_GlobalInvocationID", "tglmt_globalID");
         }
-        if (body.find("gl_LocalInvocationID") != std::string::npos) {
+        if (cUsed("gl_LocalInvocationID")) {
             useLocalID = true;
             mpVary.emplace_back("gl_LocalInvocationID", "tglmt_localID");
         }
-        if (body.find("gl_WorkGroupID") != std::string::npos) {
+        if (cUsed("gl_WorkGroupID")) {
             useWorkGroupID = true;
             mpVary.emplace_back("gl_WorkGroupID", "tglmt_workGroupID");
         }
-        if (body.find("gl_NumWorkGroups") != std::string::npos) {
+        if (cUsed("gl_NumWorkGroups")) {
             useNumWG = true;
             mpVary.emplace_back("gl_NumWorkGroups", "tglmt_numWorkGroups");
         }
         // [[thread_index_in_threadgroup]] = local linear index (gl_LocalInvocationIndex).
-        if (body.find("gl_LocalInvocationIndex") != std::string::npos) {
+        if (cUsed("gl_LocalInvocationIndex")) {
             useLocalIndex = true;
             mpVary.emplace_back("gl_LocalInvocationIndex", "tglmt_localIndex");
         }
@@ -6195,6 +8597,32 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         if (u.isSampler) continue;
         mpShared.emplace_back(u.name, "tglmt_u." + u.name);
     }
+    {
+        static const char* kIrisInts[] = {"entityId", "blockEntityId", "currentRenderedItemId",
+                                          "renderStage", nullptr};
+        auto hasWord = [](const std::string& hay, const std::string& w) {
+            size_t p = 0;
+            while ((p = hay.find(w, p)) != std::string::npos) {
+                bool l = p > 0 && IsIdentChar(hay[p - 1], false);
+                size_t e = p + w.size();
+                bool r = e < hay.size() && IsIdentChar(hay[e], false);
+                if (!l && !r) return true;
+                p = e;
+            }
+            return false;
+        };
+        std::set<std::string> declared;
+        for (auto& u : uniforms) declared.insert(u.name);
+        for (auto& v : ins) declared.insert(v.name);
+        for (auto& v : outs) declared.insert(v.name);
+        for (auto& sm : R.samplers) declared.insert(sm.name);
+        for (const char** n = kIrisInts; *n; ++n) {
+            std::string nm = *n;
+            if (declared.count(nm)) continue;
+            if (!hasWord(body, nm) && !hasWord(rest, nm)) continue;
+            irisInject.push_back(nm);
+        }
+    }
     // Entry builtins đọc trong HELPER: helper rewrite chỉ dùng mpShared, nên cần
     // map tương tự mpVary (ThreadHelpersMSL thread param cùng tên — đọc-only).
     if (R.isVertex) {
@@ -6287,6 +8715,15 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     mpShared.emplace_back("bvec2", "bool2");
     mpShared.emplace_back("bvec3", "bool3");
     mpShared.emplace_back("bvec4", "bool4");
+    mpShared.emplace_back("mat2x2", "float2x2");
+    mpShared.emplace_back("mat2x3", "float2x3");
+    mpShared.emplace_back("mat2x4", "float2x4");
+    mpShared.emplace_back("mat3x2", "float3x2");
+    mpShared.emplace_back("mat3x3", "float3x3");
+    mpShared.emplace_back("mat3x4", "float3x4");
+    mpShared.emplace_back("mat4x2", "float4x2");
+    mpShared.emplace_back("mat4x3", "float4x3");
+    mpShared.emplace_back("mat4x4", "float4x4");
     mpShared.emplace_back("mat2", "float2x2");
     mpShared.emplace_back("mat3", "float3x3");
     mpShared.emplace_back("mat4", "float4x4");
@@ -6450,16 +8887,9 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                 p = helpersOnly.find("void", p + 1);
             }
         }
-        for (const char* fn : {"imageLoad", "imageStore", "imageSize"}) {
-            size_t p = 0;
-            while ((p = helpersOnly.find(fn, p)) != std::string::npos) {
-                bool l = p > 0 && IsIdentChar(helpersOnly[p - 1], false);
-                size_t e = p + strlen(fn);
-                bool r = e < helpersOnly.size() && IsIdentChar(helpersOnly[e], false);
-                if (!l && !r) return fail("image trong helper function ngoài subset");
-                p = e;
-            }
-        }
+        // Image trong helper: thread param value (texture object) — không fail.
+        // Cú pháp imageLoad/Store trong helper được rewrite ở engine helper
+        // (helpersOnly) bên dưới, trước ThreadHelpersMSL.
         // P-Tess T1: tess builtin/var trong helper → fail rõ (helper không nhận
         // tess params — thread phức tạp; inline vào main hoặc truyền phần tử).
         // Chỉ check builtin (không false-positive param trùng tên); var khai báo
@@ -6722,11 +9152,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     for (auto& g : hoisted)
         if (g.mslType == "float4x4") mat4Names.push_back(g.name);
     // Struct GLSL (kể cả inject Iris) → brace-init cho ctor `S(...)`.
-    std::vector<std::string> structNames = CollectStructNames(glsl);
+    std::vector<std::string> structNames = CollectStructNames(src);
     // Helper GLSL trả vector — resolveVec cho `if (v == helper(...))`.
     std::set<std::string> vecHelpers = HelperVecReturns(rest);
     {
         PromoteVanillaIntMixing(body);
+        RewriteAtan2(body);
         // GLSL int-lit + float arg (`min(1, x.z)`) → MSL ambiguous.
         PromoteIntLitInMinMaxClamp(body);
         // P-Sodium: uint/int→float implicit trong `*`/`/` (vd uint3-call * float).
@@ -6735,6 +9166,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         PromoteBoolVecMix(body);
         ExpandMat4FromMat2(body);
         ExpandMat3FromMat4(body, mat4Names);
+        ExpandMat2FromMat4(body);
         ExpandStructCtors(body, structNames);
         {
             // Struct instance trong MSL: `_in`/`_out`/`tglmt_u` + UBO/SSBO + local struct.
@@ -6744,6 +9176,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             NormalizeSwizzles(body, swRoots);
         }
         ExpandRelationalBuiltins(body);
+        // GLSL driver chấp nhận bvec trong `&&`/`||`/ternary (Solas, Photon).
+        PromoteVectorBoolOps(body);
+        PromoteVectorTernary(body);
+        PromoteVectorBoolReturn(body);
         // mix(x,y,lessThan(a,b)) → 3rd arg `(a < b)` chỉ có SAU relational expand.
         PromoteBoolVecMix(body);
         CoerceIntInitToFloat(body, intUniforms);
@@ -6753,15 +9189,34 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             std::vector<GLSLVar> iv = ins;
             iv.insert(iv.end(), outs.begin(), outs.end());
             CoerceIntArgsInFloatCtors(body, iv, uniforms, blocks);
+            CoerceFloatArgsInIntCtors(body);
+            PromoteIntVecArith(body, iv, uniforms, blocks);
+            PromoteIntVecCastsInFloatArith(body, uniforms, iv);
+            FloatifyNumericLiteralArgsInCall(body, "smoothstep");
+            SizeArrayDeclarators(body);
+            ResolveArrayLengths(body, src);
         }
         {
-            std::set<std::string> knownVec;
+            std::set<std::string> knownVec, vecMem;
             if (R.isVertex)
                 for (auto& v : outs) knownVec.insert("_out." + v.name);
             else
                 for (auto& v : ins) knownVec.insert("_in." + v.name);
             if (R.isVertex) knownVec.insert("_out.tglmt_position");
+            auto mtVec = [](const std::string& t) {
+                if (t.size() >= 6 && t.compare(0, 5, "float") == 0 &&
+                    t[5] >= '2' && t[5] <= '4')
+                    return true;
+                if (t.size() >= 4 && (t.compare(0, 3, "int") == 0 ||
+                                      t.compare(0, 4, "uint") == 0))
+                    return true;
+                return false;
+            };
+            for (auto& v : ins) if (mtVec(v.mslType)) vecMem.insert(v.name);
+            for (auto& v : outs) if (mtVec(v.mslType)) vecMem.insert(v.name);
+            for (auto& v : uniforms) if (mtVec(v.mslType)) vecMem.insert(v.name);
             WrapVectorConditions(body, knownVec, vecHelpers);
+            WrapVectorEquality(body, knownVec, vecHelpers, vecMem);
         }
         // Tên helper (pre-mp, GLSL) để rename biến local trùng tên trong body.
         // Lấy từ rest (chưa RI) để có tên gốc như `notGamma`.
@@ -6829,12 +9284,44 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         // Param helper trùng tên uniform/UBO phải đổi tên TRƯỚC RewriteIdents
         // (`float far` → nếu không sẽ thành `float tglmt_u.far` — invalid MSL).
         RenameParamShadowUniforms(helpersOnly, mpShared);
+        // Image calls trong helper (imageLoad/Store/Size) → .read/.write.
+        {
+            ImgTable itab;
+            for (auto& im : R.images) {
+                char kind = ImageKind(im.glslType);
+                if (kind) itab[im.name] = kind;
+            }
+            RewriteImageHelperParams(helpersOnly, itab);
+            std::string ierr;
+            if (!RewriteImageCalls(helpersOnly, itab, ierr)) return fail(ierr);
+        }
         RenameLocalShadowUniforms(helpersOnly, mpShared);
         std::string helpersMSL = RewriteIdents(RewriteArrayCtors(helpersOnly), mpShared);
+        // Compute builtins trong helper (Photon lpv) — rename sớm để ThreadHelpers
+        // thread `tglmt_*` param từ entryBuiltins (body đã rename bởi mpVary).
+        if (R.isCompute) {
+            for (auto& rp : std::vector<std::pair<std::string, std::string>>{
+                     {"gl_GlobalInvocationID", "tglmt_globalID"},
+                     {"gl_LocalInvocationID", "tglmt_localID"},
+                     {"gl_WorkGroupID", "tglmt_workGroupID"},
+                     {"gl_NumWorkGroups", "tglmt_numWorkGroups"},
+                     {"gl_LocalInvocationIndex", "tglmt_localIndex"}}) {
+                size_t pp = 0;
+                while ((pp = helpersMSL.find(rp.first, pp)) != std::string::npos) {
+                    bool l = pp > 0 && IsIdentChar(helpersMSL[pp - 1], false);
+                    size_t ee = pp + rp.first.size();
+                    bool r2 = ee < helpersMSL.size() && IsIdentChar(helpersMSL[ee], false);
+                    if (l || r2) { ++pp; continue; }
+                    helpersMSL.replace(pp, rp.first.size(), rp.second);
+                    pp += rp.second.size();
+                }
+            }
+        }
         // Cùng promotion/expansion trên helpers (sample_lightmap `uv/256.0` và
         // end_portal `float4x4(mat2)` đều nằm trong helper, không phải body).
         // KHÔNG RenameShadowedVars ở đây (định nghĩa hàm luôn kèm `(` nên giữ).
         PromoteVanillaIntMixing(helpersMSL);
+        RewriteAtan2(helpersMSL);
         // GLSL int-lit + float arg (`min(1, x.z)`) → MSL ambiguous.
         PromoteIntLitInMinMaxClamp(helpersMSL);
         // P-Sodium: uint/int→float implicit trong `*`/`/` (helpers _deinterleave...).
@@ -6843,6 +9330,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         PromoteBoolVecMix(helpersMSL);
         ExpandMat4FromMat2(helpersMSL);
         ExpandMat3FromMat4(helpersMSL, mat4Names);
+        ExpandMat2FromMat4(helpersMSL);
         ExpandStructCtors(helpersMSL, structNames);
         {
             std::set<std::string> swRoots = {"_in", "_out", "tglmt_u"};
@@ -6851,6 +9339,9 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             NormalizeSwizzles(helpersMSL, swRoots);
         }
         ExpandRelationalBuiltins(helpersMSL);
+        PromoteVectorBoolOps(helpersMSL);
+        PromoteVectorTernary(helpersMSL);
+        PromoteVectorBoolReturn(helpersMSL);
         // mix(x,y,lessThan(a,b)) → 3rd arg `(a < b)` chỉ có SAU relational expand.
         PromoteBoolVecMix(helpersMSL);
         CoerceIntInitToFloat(helpersMSL, intUniforms);
@@ -6861,12 +9352,32 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             std::vector<GLSLVar> iv = ins;
             iv.insert(iv.end(), outs.begin(), outs.end());
             CoerceIntArgsInFloatCtors(helpersMSL, iv, uniforms, blocks);
+            CoerceFloatArgsInIntCtors(helpersMSL);
+            PromoteIntVecArith(helpersMSL, iv, uniforms, blocks);
+            PromoteIntVecCastsInFloatArith(helpersMSL, uniforms, iv);
+            FloatifyNumericLiteralArgsInCall(helpersMSL, "smoothstep");
+            SizeArrayDeclarators(helpersMSL);
+            ResolveArrayLengths(helpersMSL, src);
+            ResolveArrayLengths(body, helpersMSL);
         }
         {
-            std::set<std::string> knownVec;
+            std::set<std::string> knownVec, vecMem;
             if (R.isVertex)
                 for (auto& v : outs) knownVec.insert("_out." + v.name);
+            auto mtVec = [](const std::string& t) {
+                if (t.size() >= 6 && t.compare(0, 5, "float") == 0 &&
+                    t[5] >= '2' && t[5] <= '4')
+                    return true;
+                if (t.size() >= 4 && (t.compare(0, 3, "int") == 0 ||
+                                      t.compare(0, 4, "uint") == 0))
+                    return true;
+                return false;
+            };
+            for (auto& v : ins) if (mtVec(v.mslType)) vecMem.insert(v.name);
+            for (auto& v : outs) if (mtVec(v.mslType)) vecMem.insert(v.name);
+            for (auto& v : uniforms) if (mtVec(v.mslType)) vecMem.insert(v.name);
             WrapVectorConditions(helpersMSL, knownVec, vecHelpers);
+            WrapVectorEquality(helpersMSL, knownVec, vecHelpers, vecMem);
         }
         // GLSL inout/out param → MSL thread T& (sau mp-rewrite để type đã float3).
         RewriteParamQualifiers(helpersMSL);
@@ -6876,11 +9387,20 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             SampEntry e = EntryOfSampler(s);
             globalSamp[s.name] = e;
         }
-        std::vector<std::string> uboNames;
-        for (auto& b : blocks) uboNames.push_back(b.name);
+        std::vector<std::string> uboNames, ssboNames;
+        for (auto& b : blocks) {
+            if (b.isStorage) ssboNames.push_back(b.name);
+            else uboNames.push_back(b.name);
+        }
         std::string err;
         std::vector<std::pair<std::string, std::string>> entryBuiltins;
-        if (R.isVertex) {
+        if (R.isCompute) {
+            if (useGlobalID) entryBuiltins.emplace_back("tglmt_globalID", "uint3");
+            if (useLocalID) entryBuiltins.emplace_back("tglmt_localID", "uint3");
+            if (useWorkGroupID) entryBuiltins.emplace_back("tglmt_workGroupID", "uint3");
+            if (useNumWG) entryBuiltins.emplace_back("tglmt_numWorkGroups", "uint3");
+            if (useLocalIndex) entryBuiltins.emplace_back("tglmt_localIndex", "uint");
+        } else if (R.isVertex) {
             if (R.usesVertexID) entryBuiltins.emplace_back("tglmt_vertexID", "uint");
             if (R.usesInstanceID) entryBuiltins.emplace_back("tglmt_instanceID", "uint");
         } else if (!R.isCompute && !R.isTessControl && !R.isTessEval) {
@@ -6888,18 +9408,72 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             if (R.usesPointCoord) entryBuiltins.emplace_back("tglmt_pointCoord", "float2");
             if (R.usesFrontFacing) entryBuiltins.emplace_back("tglmt_frontFacing", "bool");
         }
-        if (!ThreadHelpersMSL(helpersMSL, body, helperSamp, globalSamp, uboNames, R.isVertex, ins,
-                              R.outputs, matVaryTypes, entryBuiltins, err))
+        std::map<std::string, std::string> imgTypes;
+        for (auto& im : R.images) imgTypes[im.name] = im.mslType;
+        if (!ThreadHelpersMSL(helpersMSL, body, helperSamp, globalSamp, uboNames, ssboNames, R.isVertex, ins,
+                              R.outputs, matVaryTypes, entryBuiltins, imgTypes, err))
             return fail(err);
         // inout `thread T&` + actual swizzle → block + temp (sau khi params đã final).
+        // Pack định nghĩa lại builtin (`tanh`) → tránh ambiguous với metal::.
+        RenameMetalBuiltinHelpers(helpersMSL, body);
+        // Local cùng tên param (Solas/Bliss/BSL) → bọc thân helper trong block.
+        WrapHelperBodyShadowing(helpersMSL);
         BindSwizzleInoutCalls(body, helpersMSL);
         BindSwizzleInoutCalls(helpersMSL, helpersMSL);
+        RewriteSwizzleCompoundAssign(body);
+        RewriteSwizzleCompoundAssign(helpersMSL);
+        RewriteModfSwizzle(body);
+        RewriteModfSwizzle(helpersMSL);
+        RewriteMatrixUnaryMinus(body);
+        RewriteMatrixUnaryMinus(helpersMSL);
+        WrapSwitchCaseBodies(body);
+        WrapSwitchCaseBodies(helpersMSL);
+        RewriteInverseCalls(body);
+        RewriteInverseCalls(helpersMSL);
         rest = helpersMSL;
     }
 
     // Sinh MSL
     std::ostringstream msl_out;
     msl_out << "#include <metal_stdlib>\nusing namespace metal;\n";
+    for (auto& nm : irisInject) msl_out << "constant int " << nm << " = 0;\n";
+    // GLSL nâng ngầm int→float ở builtin (sign(int), length(ivec2), max(float,int)).
+    // MSL có overload float + half → int lưỡng lự = "ambiguous". Template/overload
+    // dưới đây thắng nhờ khớp chính xác (exact match đánh bại conversion).
+    msl_out << "template<class A, class B> inline auto min(A a, B b) -> decltype(a + b) {"
+               " typedef decltype(a + b) R; return metal::min(R(a), R(b)); }\n";
+    msl_out << "template<class A, class B> inline auto max(A a, B b) -> decltype(a + b) {"
+               " typedef decltype(a + b) R; return metal::max(R(a), R(b)); }\n";
+    msl_out << "template<class T, class A, class B> inline auto clamp(T x, A lo, B hi)"
+               " -> decltype(x + lo + hi) { typedef decltype(x + lo + hi) R;"
+               " return metal::clamp(R(x), R(lo), R(hi)); }\n";
+    msl_out << "inline float exp(int v) { return metal::exp(float(v)); }\n";
+    msl_out << "inline float exp(uint v) { return metal::exp(float(v)); }\n";
+    msl_out << "inline float exp2(int v) { return metal::exp2(float(v)); }\n";
+    msl_out << "inline float exp2(uint v) { return metal::exp2(float(v)); }\n";
+    msl_out << "inline float2 exp2(int2 v) { return metal::exp2(float2(v)); }\n";
+    msl_out << "inline float3 exp2(int3 v) { return metal::exp2(float3(v)); }\n";
+    msl_out << "inline float4 exp2(int4 v) { return metal::exp2(float4(v)); }\n";
+    msl_out << "inline float2 exp2(uint2 v) { return metal::exp2(float2(v)); }\n";
+    msl_out << "inline float3 exp2(uint3 v) { return metal::exp2(float3(v)); }\n";
+    msl_out << "inline float4 exp2(uint4 v) { return metal::exp2(float4(v)); }\n";
+    msl_out << "inline float length(float v) { return metal::abs(v); }\n";
+    msl_out << "inline float length(int v) { return metal::fabs(float(v)); }\n";
+    msl_out << "inline float length(uint v) { return metal::fabs(float(v)); }\n";
+    for (const char* t : {"2", "3", "4"}) {
+        msl_out << "inline float length(int" << t << " v) { return metal::length(float" << t << "(v)); }\n";
+        msl_out << "inline float length(uint" << t << " v) { return metal::length(float" << t << "(v)); }\n";
+        msl_out << "inline float distance(int" << t << " a, int" << t << " b) { return metal::distance(float" << t << "(a), float" << t << "(b)); }\n";
+        msl_out << "inline float distance(uint" << t << " a, uint" << t << " b) { return metal::distance(float" << t << "(a), float" << t << "(b)); }\n";
+        msl_out << "inline float dot(int" << t << " a, int" << t << " b) { return metal::dot(float" << t << "(a), float" << t << "(b)); }\n";
+        msl_out << "inline float" << t << " normalize(int" << t << " v) { return metal::normalize(float" << t << "(v)); }\n";
+        msl_out << "inline float" << t << " normalize(uint" << t << " v) { return metal::normalize(float" << t << "(v)); }\n";
+        msl_out << "inline int" << t << " sign(int" << t << " v) { return int" << t << "(metal::sign(float" << t << "(v))); }\n";
+        msl_out << "inline uint" << t << " sign(uint" << t << " v) { return uint" << t << "(metal::sign(float" << t << "(v))); }\n";
+    }
+    msl_out << "inline int sign(int v) { return (v > 0) - (v < 0); }\n";
+    msl_out << "inline uint sign(uint v) { return v > 0u ? 1u : 0u; }\n";
+    msl_out << "inline float3 cross(int3 a, int3 b) { return metal::cross(float3(a), float3(b)); }\n";
     // Builtins GLSL thiếu trong Metal (chỉ phát khi dùng — kiểm tra body+rest
     // để khỏi rác; `find` word-boundary đơn giản vì tên đã là tglmt_*).
     {
@@ -6931,8 +9505,52 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             msl_out << "float4x4 tglmt_mat4_ctor(float3x3 m) { return float4x4(float4(m[0], 0.0), float4(m[1], 0.0), float4(m[2], 0.0), float4(0.0, 0.0, 0.0, 1.0)); }\n";
             msl_out << "float4x4 tglmt_mat4_ctor(float4x4 m) { return m; }\n";
         }
-        if (useM3C)
+        if (useM3C) {
+            msl_out << "float3x3 tglmt_mat3_ctor(float s) { return float3x3(s); }\n";
+            msl_out << "float3x3 tglmt_mat3_ctor(float3x3 m) { return m; }\n";
             msl_out << "float3x3 tglmt_mat3_ctor(float4x4 m) { return float3x3(m[0].xyz, m[1].xyz, m[2].xyz); }\n";
+            msl_out << "float2x2 tglmt_mat2_ctor(float s) { return float2x2(s); }\n";
+            msl_out << "float2x2 tglmt_mat2_ctor(float2x2 m) { return m; }\n";
+            msl_out << "float2x2 tglmt_mat2_ctor(float3x3 m) { return float2x2(m[0].xy, m[1].xy); }\n";
+            msl_out << "float2x2 tglmt_mat2_ctor(float4x4 m) { return float2x2(m[0].xy, m[1].xy); }\n";
+            msl_out << "inline float2x2 tglmt_inverse(float2x2 m) { float d = m[0][0]*m[1][1] - m[1][0]*m[0][1];"
+                       " return float2x2(float2(m[1][1], -m[1][0]), float2(-m[0][1], m[0][0])) * (1.0/d); }\n";
+            msl_out << "inline float3x3 tglmt_inverse(float3x3 m) { float3 c0 = cross(m[1], m[2]);"
+                       " float3 c1 = cross(m[2], m[0]); float3 c2 = cross(m[0], m[1]);"
+                       " float d = dot(m[0], c0); return transpose(float3x3(c0, c1, c2)) * (1.0/d); }\n";
+            msl_out << "inline float4x4 tglmt_inverse(float4x4 m) {"
+                       " float s0 = m[0][0]*m[1][1] - m[1][0]*m[0][1];"
+                       " float s1 = m[0][0]*m[1][2] - m[1][0]*m[0][2];"
+                       " float s2 = m[0][0]*m[1][3] - m[1][0]*m[0][3];"
+                       " float s3 = m[0][1]*m[1][2] - m[1][1]*m[0][2];"
+                       " float s4 = m[0][1]*m[1][3] - m[1][1]*m[0][3];"
+                       " float s5 = m[0][2]*m[1][3] - m[1][2]*m[0][3];"
+                       " float c5 = m[2][2]*m[3][3] - m[3][2]*m[2][3];"
+                       " float c4 = m[2][1]*m[3][3] - m[3][1]*m[2][3];"
+                       " float c3 = m[2][1]*m[3][2] - m[3][1]*m[2][2];"
+                       " float c2 = m[2][0]*m[3][3] - m[3][0]*m[2][3];"
+                       " float c1 = m[2][0]*m[3][2] - m[3][0]*m[2][2];"
+                       " float c0 = m[2][0]*m[3][1] - m[3][0]*m[2][1];"
+                       " float det = s0*c5 - s1*c4 + s2*c3 + s3*c2 - s4*c1 + s5*c0;"
+                       " float id = 1.0/det;"
+                       " return float4x4("
+                       " float4(( m[1][1]*c5 - m[1][2]*c4 + m[1][3]*c3)*id,"
+                       "        (-m[0][1]*c5 + m[0][2]*c4 - m[0][3]*c3)*id,"
+                       "        ( m[3][1]*s5 - m[3][2]*s4 + m[3][3]*s3)*id,"
+                       "        (-m[2][1]*s5 + m[2][2]*s4 - m[2][3]*s3)*id),"
+                       " float4((-m[1][0]*c5 + m[1][2]*c2 - m[1][3]*c1)*id,"
+                       "        ( m[0][0]*c5 - m[0][2]*c2 + m[0][3]*c1)*id,"
+                       "        (-m[3][0]*s5 + m[3][2]*s2 - m[3][3]*s1)*id,"
+                       "        ( m[2][0]*s5 - m[2][2]*s2 + m[2][3]*s1)*id),"
+                       " float4(( m[1][0]*c4 - m[1][1]*c2 + m[1][3]*c0)*id,"
+                       "        (-m[0][0]*c4 + m[0][1]*c2 - m[0][3]*c0)*id,"
+                       "        ( m[3][0]*s4 - m[3][1]*s2 + m[3][3]*s0)*id,"
+                       "        (-m[2][0]*s4 + m[2][1]*s2 - m[2][3]*s0)*id),"
+                       " float4((-m[1][0]*c3 + m[1][1]*c1 - m[1][2]*c0)*id,"
+                       "        ( m[0][0]*c3 - m[0][1]*c1 + m[0][2]*c0)*id,"
+                       "        (-m[3][0]*s3 + m[3][1]*s1 - m[3][2]*s0)*id,"
+                       "        ( m[2][0]*s3 - m[2][1]*s1 + m[2][2]*s0)*id)); }\n";
+        }
         if (useMod) {
             msl_out << "float tglmt_mod(float x, float y) { return x - y * floor(x / y); }\n";
             msl_out << "float2 tglmt_mod(float2 x, float2 y) { return x - y * floor(x / y); }\n";
@@ -7130,21 +9748,47 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // Khai báo texture/sampler params (index theo thứ tự khai báo sampler).
     // Buffer sampler (CloudFaces): texture2d<elem> KHÔNG sampler (chỉ .read).
     std::string texParams;
-    for (size_t k = 0; k < R.samplers.size(); ++k) {
-        auto& s = R.samplers[k];
-        std::string ks = std::to_string(k);
-        if (s.isBuffer) {
-            texParams += ", texture2d<" + s.sampleType + "> " + s.name + "_tex [[texture(" + ks + ")]]";
-            continue;
+    // Metal: 16 sampler/stage. Texture slot = k (backend bind theo thứ tự khai
+    // báo); sampler slot đánh riêng 0..N-1 chỉ cho sampler CÓ dùng (deferred4:
+    // 17 texture nhưng 4 cái chỉ read() → 13 sampler).
+    int sampSlot = 0;
+    {
+        auto wordRef2 = [&](const std::string& hay, const std::string& w) {
+            size_t p = 0;
+            while ((p = hay.find(w, p)) != std::string::npos) {
+                bool l = p > 0 && IsIdentChar(hay[p - 1], false);
+                size_t e = p + w.size();
+                bool r = e < hay.size() && IsIdentChar(hay[e], false);
+                if (!l && !r) return true;
+                p = e;
+            }
+            return false;
+        };
+        for (size_t k = 0; k < R.samplers.size(); ++k) {
+            auto& s = R.samplers[k];
+            std::string ks = std::to_string(k);
+            if (s.isBuffer) {
+                s.samplerSlot = -1;
+                texParams += ", texture2d<" + s.sampleType + "> " + s.name + "_tex [[texture(" + ks + ")]]";
+                continue;
+            }
+            std::string ttype = s.isShadow ? "depth2d<float>"
+                              : s.isCube ? "texturecube<float>"
+                              : s.isArray ? "texture2d_array<float>"
+                              : s.is1D ? "texture2d<" + s.sampleType + ">"        // P3: 1D ≈ 2D
+                              : s.is3D ? "texture3d<" + s.sampleType + ">"        // P3: 3D thật
+                                       : "texture2d<" + s.sampleType + ">";       // 2D (i/u → int/uint)
+            std::string smp = s.name + "_smp";
+            bool needSmp = wordRef2(body, smp) || wordRef2(rest, smp);
+            if (needSmp) {
+                s.samplerSlot = sampSlot;
+                texParams += ", " + ttype + " " + s.name + "_tex [[texture(" + ks +
+                             ")]], sampler " + smp + " [[sampler(" + std::to_string(sampSlot++) + ")]]";
+            } else {
+                s.samplerSlot = -1;
+                texParams += ", " + ttype + " " + s.name + "_tex [[texture(" + ks + ")]]";
+            }
         }
-        std::string ttype = s.isShadow ? "depth2d<float>"
-                          : s.isCube ? "texturecube<float>"
-                          : s.isArray ? "texture2d_array<float>"
-                          : s.is1D ? "texture2d<" + s.sampleType + ">"        // P3: 1D ≈ 2D
-                          : s.is3D ? "texture3d<" + s.sampleType + ">"        // P3: 3D thật
-                                   : "texture2d<" + s.sampleType + ">";       // 2D (i/u → int/uint)
-        texParams += ", " + ttype + " " + s.name + "_tex [[texture(" + ks +
-                     ")]], sampler " + s.name + "_smp [[sampler(" + ks + ")]]";
     }
     // P6g image params: texture slot nối tiếp sampler (không sampler state —
     // imageLoad/Store là texel access, không sample). Param tên = tên image GLSL

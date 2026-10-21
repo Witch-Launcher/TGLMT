@@ -273,6 +273,9 @@ struct ProgramObject {
     // Loại sampler theo tên ('2' 2D, 'C' cube, 'A' array, 'S' shadow, 'B' buffer)
     // để AppleDrawGL bỏ bind khi texture target không khớp (tránh abort Metal).
     std::unordered_map<std::string, char> samplerKind;
+    // Sampler → Metal sampler attribute slot (khác texture slot khi có sampler
+    // không dùng; -1 = dùng chung index với texture).
+    std::unordered_map<std::string, int> samplerSlots;
     // Tag program entity_shadow (Fix #6): DT+Fog+Proj, 1 fs 2D Sampler0, không
     // vs sampler. AppleDrawGL dùng để bắt draw sample sai texture (quads bóng
     // thấy texture gà) + dump texring tại chỗ.

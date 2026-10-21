@@ -103,6 +103,7 @@ class Preprocessor:
         self.out = []
         self.depth = 0
         self.in_block_comment = False
+        self.pending = ""
 
     # ---------- include ----------
     def read_include(self, ref, curdir):
@@ -116,7 +117,9 @@ class Preprocessor:
         return p
 
     # ---------- macro expansion ----------
-    def expand(self, text, hide=frozenset()):
+    def expand(self, text, hide=frozenset(), depth=0):
+        if depth > 32:  # macro đệ quy bệnh lý
+            return text
         out = []
         i = 0
         while i < len(text):
@@ -135,15 +138,20 @@ class Preprocessor:
                     continue
                 # function-like: cần '(' sau tên
                 k = j
-                while k < len(text) and text[k] in " \t":
+                # Pending nhiều dòng: macro và '(' có thể khác dòng (Coi whitespace
+                # gồm cả newline, đúng C preprocessor) — Photon `clamp01(\n ...`.
+                while k < len(text) and text[k] in " \t\r\n":
                     k += 1
                 if k < len(text) and text[k] == "(":
                     args, end = self._read_args(text, k)
                     if args is not None:
                         body = mac.body
                         for p, a in zip(mac.params, args):
+                            # C prescan: arg được expand TRƯỚC khi thay (cho phép
+                            # macro lồng cùng tên: clamp01(clamp01(x))).
+                            a = self.expand(a, hide, depth + 1)
                             body = re.sub(r"\b%s\b" % re.escape(p), a, body)
-                        out.append(self.expand(body, hide | {name}))
+                        out.append(self.expand(body, hide | {name}, depth + 1))
                         i = end
                         continue
             out.append(name)
@@ -229,8 +237,14 @@ class Preprocessor:
                 break
             if k >= 0 and (j < 0 or k < j):
                 out.append(self.expand(line[i:k]))
-                out.append(line[k:])
-                break
+                # pending nhiều dòng: `//` chỉ hết ở newline, không phải cuối text.
+                nl = line.find("\n", k)
+                if nl < 0:
+                    out.append(line[k:])
+                    break
+                out.append(line[k:nl + 1])
+                i = nl + 1
+                continue
             out.append(self.expand(line[i:j]))
             self.in_block_comment = True
             i = j
@@ -238,19 +252,47 @@ class Preprocessor:
 
     @staticmethod
     def join_continuations(lines):
+        # C/GLSL: backslash-newline là MỘT splice, quét trái→phải, KHÔNG đệ quy.
+        # `\\\` (3 backslash) + newline → còn 2 backslash cuối dòng, KHÔNG nối
+        # tiếp dòng sau (Bliss overworld_fog.glsl từng nuốt `int SAMPLECOUNT`).
+        text = "\n".join(lines)
         out = []
-        buf = None
-        for ln in lines:
-            if buf is not None:
-                ln = buf + ln
-                buf = None
-            if ln.rstrip().endswith("\\"):
-                buf = ln.rstrip()[:-1]
+        i = 0
+        n = len(text)
+        while i < n:
+            if text[i] == "\\" and i + 1 < n and text[i + 1] == "\n":
+                i += 2
                 continue
-            out.append(ln)
-        if buf is not None:
-            out.append(buf)
-        return out
+            out.append(text[i])
+            i += 1
+        return "".join(out).split("\n")
+
+    @staticmethod
+    def _paren_balanced(text):
+        d = 0
+        i = 0
+        while i < len(text):
+            if text.startswith("//", i):
+                j = text.find("\n", i)
+                if j < 0:
+                    break
+                i = j
+                continue
+            if text.startswith("/*", i):
+                j = text.find("*/", i + 2)
+                if j < 0:
+                    break
+                i = j + 2
+                continue
+            c = text[i]
+            if c == '(':
+                d += 1
+            elif c == ')':
+                d -= 1
+                if d < 0:
+                    return True
+            i += 1
+        return d == 0
 
     def process_text(self, text, curdir):
         lines = self.join_continuations(text.splitlines())
@@ -260,8 +302,16 @@ class Preprocessor:
             stripped = line.lstrip()
             if not stripped.startswith("#"):
                 if active:
-                    self.out.append(self.expand_code_line(line))
+                    # Macro function-like gọi trải nhiều dòng (`return max0(`
+                    # ... `);` — Photon) → gộp tới khi ngoặc cân mới expand.
+                    self.pending += line + "\n"
+                    if self._paren_balanced(self.pending):
+                        self.out.append(self.expand_code_line(self.pending.rstrip("\n")))
+                        self.pending = ""
                 continue
+            if self.pending:
+                self.out.append(self.expand_code_line(self.pending.rstrip("\n")))
+                self.pending = ""
             d = stripped[1:].strip()
             if not d:
                 continue
@@ -354,6 +404,9 @@ class Preprocessor:
                 self.out.append(line)
                 continue
             # directive lạ → bỏ
+        if self.pending:
+            self.out.append(self.expand_code_line(self.pending.rstrip("\n")))
+            self.pending = ""
         return "\n".join(self.out) + "\n"
 
 
@@ -627,6 +680,22 @@ def patch_iris(text, stage, kind="composite", ie=False, newlines=False):
                 text = text[:m.end()] + prelude + text[m.end():]
             else:
                 text = prelude + text
+        # Pack core-spec khai báo lại attr sau khi va* rename → giữ bản CUỐI
+        # (ivec2 iris_UV2 của core-spec thay vec2 của prelude).
+        if True:
+            _ip = re.compile(r"(?:^|\n)[ \t]*(?:layout\s*\([^)]*\)\s*)?"
+                             r"(?:(?:flat|smooth|noperspective)\s+)?in\s+"
+                             r"(?:(?:highp|mediump|lowp)\s+)?\w+\s+(\w+)\s*;")
+            _ms = list(_ip.finditer(text))
+            _last = {}
+            for _m in _ms:
+                _last[_m.group(1)] = _m
+            for _m in reversed(_ms):
+                if _last[_m.group(1)] is not _m:
+                    _a, _b = _m.start(), _m.end()
+                    if _a < len(text) and text[_a] == "\n":
+                        _a += 1
+                    text = text[:_a] + text[_b:]
         text = re.sub(r"\bgl_ModelViewMatrixInverse\b", "iris_ModelViewMatInverse", text)
         text = re.sub(r"\bgl_ProjectionMatrixInverse\b", "iris_ProjMatInverse", text)
         text = re.sub(r"\bgl_ModelViewProjectionMatrix\b",
@@ -696,8 +765,20 @@ def patch_iris(text, stage, kind="composite", ie=False, newlines=False):
         prelude = "const float mc_chunkFade = -1.0;\n"                 # :29
         # addIfNotExists(...) — Iris inject cả 6 attr bất kể dùng hay không (:128-134)
         if stage == "vsh":
-            prelude += ("in vec3 iris_Position;\nin vec3 iris_Normal;\nin vec2 iris_UV0;\n"
-                        "in vec2 iris_UV1;\nin vec2 iris_UV2;\nin vec4 iris_Color;\n")
+            # Iris addIfNotExists: chỉ inject attr CHƯA được pack khai báo
+            # (gbuffers_line core-spec tự khai `in ivec2 iris_UV2;`).
+            for _ty, _nm in (("vec3", "iris_Position"), ("vec3", "iris_Normal"),
+                             ("vec2", "iris_UV0"), ("vec2", "iris_UV1"),
+                             ("vec2", "iris_UV2"), ("vec4", "iris_Color")):
+                _suf = _nm.split("_", 1)[1]
+                # vaColor bị XOÁ + thay bằng biểu thức iris_Color → phải inject;
+                # các va* khác được rename nên tính là đã có.
+                _pat = (r"\b(?:in|attribute)\s+(?:(?:highp|mediump|lowp)\s+)?"
+                        r"\w+\s+iris" + _suf + r"\s*;") if _nm == "iris_Color" else \
+                       (r"\b(?:in|attribute)\s+(?:(?:highp|mediump|lowp)\s+)?"
+                        r"\w+\s+(?:iris|va)" + _suf + r"\s*;")
+                if not re.search(_pat, text):
+                    prelude += "in %s %s;\n" % (_ty, _nm)
         for re_use, block in ((r"\bmodelViewMatrix\b|\bgl_ModelViewMatrix\b", IRIS_UBO_DYNAMIC_TRANSFORMS),
                               (r"\bprojectionMatrix\b|\bgl_ProjectionMatrix\b", IRIS_UBO_PROJECTION)):
             if re.search(re_use, text):
@@ -719,12 +800,20 @@ def patch_iris(text, stage, kind="composite", ie=False, newlines=False):
         if has_ftransform:
             text = re.sub(r"\bftransform\b", "iris_ftransform", text)
         text = re.sub(r"\bvaPosition\b", "iris_Position", text)          # :102
+        # Bỏ khai báo attribute cũ (Iris thay bằng iris_Color); nếu không
+        # replace use sẽ thành `in vec4 (expr);`.
+        text = re.sub(r"\b(?:in|attribute)\s+(?:(?:highp|mediump|lowp)\s+)?vec4\s+vaColor\s*;",
+                      "", text)
         text = re.sub(r"\bvaColor\b", "(iris_Color * iris_transforms.ColorModulator)", text)
         text = re.sub(r"\bvaNormal\b", "iris_Normal", text)              # :107
         text = re.sub(r"\bvaUV0\b", "iris_UV0", text)                    # :109
         text = re.sub(r"\bvaUV1\b", "iris_UV1", text)                    # :125
         text = re.sub(r"\bvaUV2\b", "iris_UV2", text)                    # :114/:123
         text = re.sub(r"\balphaTestRef\b", "iris_currentAlphaTest", text)  # :75
+        # Iris KHÔNG khai báo lại matrix (UBO iris_transforms) → bỏ decl gốc.
+        text = re.sub(r"\buniform\s+mat4\s+(?:modelViewMatrix|projectionMatrix|textureMatrix)\s*;",
+                      "", text)
+        text = re.sub(r"\buniform\s+mat3\s+normalMatrix\s*;", "", text)
         text = re.sub(r"\bmodelViewMatrix\b", "iris_transforms.ModelViewMat", text)  # :76
         text = re.sub(r"\bgl_ModelViewMatrix\b", "iris_transforms.ModelViewMat", text)
         text = re.sub(r"\bprojectionMatrix\b", "iris_ProjMat", text)     # :80
@@ -752,6 +841,17 @@ def patch_iris(text, stage, kind="composite", ie=False, newlines=False):
                           "(iris_Color * iris_transforms.ColorModulator)", text)
         else:
             text = re.sub(r"\bgl_Color\b", "iris_transforms.ColorModulator", text)
+    # Legacy `gl_FogFragCoord` không còn ở core profile → varying thường
+    # (Iris compatibility: VS ghi, FS/GS đọc).
+    if re.search(r"\bgl_FogFragCoord\b", text):
+        _fd = ("out float iris_FogFragCoord;\n" if stage == "vsh"
+               else "in float iris_FogFragCoord;\n")
+        _m = re.search(r"^[ \t]*#[ \t]*version[^\n]*\n", text, re.M)
+        if _m:
+            text = text[:_m.end()] + _fd + text[_m.end():]
+        else:
+            text = _fd + text
+        text = re.sub(r"\bgl_FogFragCoord\b", "iris_FogFragCoord", text)
     # CommonTransformer fog: `gl_Fog` → `irisInt_Fog` + inject (chỉ khi dùng).
     if re.search(r"\bgl_Fog\b", text):
         text = re.sub(r"\bgl_Fog\b", "irisInt_Fog", text)

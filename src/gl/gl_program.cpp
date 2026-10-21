@@ -172,6 +172,7 @@ void glLinkProgram(GLuint p) {
             for (auto& s : its->second.conv.samplers) {
                 pr.computeSamplers.push_back(s.name);
                 pr.samplerKind[s.name] = kindOf(s);
+                if (s.samplerSlot >= 0) pr.samplerSlots[s.name] = s.samplerSlot;
                 if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
             }
             // Uniforms: 1 stage (isVS=true), offset/size từ converter.
@@ -423,11 +424,13 @@ void glLinkProgram(GLuint p) {
         for (auto& s : vsC.samplers) {
             pr.vsSamplers.push_back(s.name);
             pr.samplerKind[s.name] = kindOf(s);
+            if (s.samplerSlot >= 0) pr.samplerSlots[s.name] = s.samplerSlot;
             if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
         }
         for (auto& s : fsC.samplers) {
             pr.fsSamplers.push_back(s.name);
             pr.samplerKind[s.name] = kindOf(s);
+            if (s.samplerSlot >= 0) pr.samplerSlots[s.name] = s.samplerSlot;
             if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
         }
         // P6g images: slot = samplerCount + index (chung texture index space).
