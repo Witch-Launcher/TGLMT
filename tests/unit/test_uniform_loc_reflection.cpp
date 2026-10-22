@@ -46,6 +46,14 @@ int main() {
     Check(glGetUniformLocation(p, "texGhost") == -1, "sampler khai báo không dùng (prune) → -1");
     Check(glGetUniformLocation(p, "neverDeclared") == -1, "tên chưa khai báo → -1");
     Check(glGetUniformLocation(p, "texUsed[0]") == locUsed, "query 'texUsed[0]' = loc base (strip mảng)");
+    // Loc phải vào uniformLayout (AppleDraw upload theo e.loc >= 0; thiếu →
+    // uniform không bao giờ tới shader: FS đọc 0).
+    {
+        GLint layLoc = -2;
+        for (auto& e : ctx.programs[p].uniformLayout)
+            if (e.name == "uTint") layLoc = e.loc;
+        Check(layLoc == locTint, "uTint loc vào uniformLayout (upload được)");
+    }
     Check(glGetUniformLocation(p, "texUsed") == locUsed, "query lặp ổn định (cache)");
     Check(glGetUniformLocation(p, "") == -1, "tên rỗng (đã link) → -1");
 
@@ -65,6 +73,14 @@ int main() {
     glGetProgramiv(p2, 0x8B82, &ok);
     Check(ok == 1, "program B link");
     Check(glGetUniformLocation(p2, "uB") == preLoc, "loc cache trước link vẫn đúng sau link");
+    {
+        // Pre-link loc 0 được cache; query lại sau link phải điền e.loc, nếu
+        // không uniform bị bỏ qua im lặng (bug upload âm thầm).
+        GLint layLoc = -2;
+        for (auto& e : ctx.programs[p2].uniformLayout)
+            if (e.name == "uB") layLoc = e.loc;
+        Check(layLoc == preLoc, "loc cache sớm vẫn vào uniformLayout sau link");
+    }
     Check(glGetUniformLocation(p2, "uPreGhost") == -1, "sau link: tên lạ → -1 (không dùng cache nới lỏng)");
 
     // ---- Compute: honesty áp dụng cả đường compute ----

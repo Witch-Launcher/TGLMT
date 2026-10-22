@@ -1308,6 +1308,27 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (vsb.size() != vsSize) vsb.assign(vsSize, 0); else std::fill(vsb.begin(), vsb.end(), 0);
         if (fsb.size() != fsSize) fsb.assign(fsSize, 0); else std::fill(fsb.begin(), fsb.end(), 0);
         for (auto& e : pr.uniformLayout) {
+            // Diag tint 1.21 (standalone uniform): giá trị ColorModulator THỰC SỰ
+            // đưa vào FS buffer — kể cả loc<0/chưa set (in "unset").
+            if (dgPhase && !e.isVS && e.name == "ColorModulator") {
+                static int nTintDraw = 0;
+                if (++nTintDraw <= 120) {
+                    auto tu = (e.loc < 0) ? pr.uniforms.end() : pr.uniforms.find(e.loc);
+                    if (tu != pr.uniforms.end() && tu->second.size() >= 16) {
+                        float f[4] = {0, 0, 0, 0};
+                        memcpy(f, tu->second.data(), 16);
+                        fprintf(stderr,
+                                "[TGLMT] tintdraw#%d prog=%u off=%zu loc=%d val=%.4f %.4f %.4f "
+                                "%.4f\n",
+                                nTintDraw, prog, e.offset, e.loc, f[0], f[1], f[2], f[3]);
+                    } else {
+                        fprintf(stderr,
+                                "[TGLMT] tintdraw#%d prog=%u off=%zu loc=%d unset\n", nTintDraw,
+                                prog, e.offset, e.loc);
+                    }
+                    fflush(stderr);
+                }
+            }
             if (e.loc < 0) continue;
             auto uit = pr.uniforms.find(e.loc);
             if (uit == pr.uniforms.end()) continue;

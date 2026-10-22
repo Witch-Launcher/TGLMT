@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <type_traits>
 using namespace tglmt;
 
@@ -17,6 +18,27 @@ static ProgramObject* CurProg(Context& c) {
 }
 static void SetU(ProgramObject& pr, GLint loc, const void* v, size_t n) {
     pr.uniforms[loc].assign((const uint8_t*)v, (const uint8_t*)v + n);
+}
+// Diag tint (1.21): ColorModulator/FogColor là standalone uniform — log giá trị
+// game set (dedupe theo prog|name|value, tối đa 400 dòng) để đối chiếu bytes
+// upload (tintdraw trong gl_apple_draw) khi TGLMT_DIAG=1.
+static void DiagUniform4(ProgramObject& pr, GLint loc, const float* v) {
+    Context& c = Context::Current();
+    if (!c.DiagOn()) return;
+    for (auto& kv : pr.uniformLoc) {
+        if (kv.second != loc) continue;
+        const std::string& nm = kv.first;
+        if (nm != "ColorModulator" && nm != "FogColor") return;
+        static std::set<std::string> seen;
+        char key[160];
+        snprintf(key, sizeof key, "%u|%s|%.4f,%.4f,%.4f,%.4f", pr.id, nm.c_str(), v[0], v[1],
+                 v[2], v[3]);
+        if (!seen.insert(key).second || seen.size() > 400) return;
+        fprintf(stderr, "[TGLMT] uni4f prog=%u %s = %.4f %.4f %.4f %.4f\n", pr.id, nm.c_str(),
+                v[0], v[1], v[2], v[3]);
+        fflush(stderr);
+        return;
+    }
 }
 // Sampler unit tracking: glUniform1i(samplerLoc, unit) → samplerUnits[name]=unit.
 // Đúng GL: sampler uniform giá trị là texture unit. AppleDrawGL bind slot k theo unit này.
@@ -86,7 +108,14 @@ GLint glGetUniformLocation(GLuint p, const GLchar* n) {
     // cache loc sớm — loc vẫn đúng sau link vì tra theo tên.
     if (pr.linked && pr.reflectionComplete && !ProgramHasUniformName(pr, nm)) return -1;
     auto f = pr.uniformLoc.find(nm);
-    if (f != pr.uniformLoc.end()) return f->second;
+    if (f != pr.uniformLoc.end()) {
+        // Loc cache sớm (trước link) / query lại: PHẢI điền e.loc cho
+        // uniformLayout — AppleDraw upload theo (loc >= 0), thiếu là uniform
+        // không bao giờ tới shader (FS đọc 0 → đen/tint sai).
+        for (auto& e : pr.uniformLayout)
+            if (e.name == nm) { e.loc = f->second; break; }
+        return f->second;
+    }
     GLint loc = (GLint)pr.uniformLoc.size();
     pr.uniformLoc[nm] = loc;
     for (auto& e : pr.uniformLayout)
@@ -171,8 +200,8 @@ void glUniform3ui(GLint l, GLuint a, GLuint b, GLuint c_) { GLuint v[3]={a,b,c_}
 void glUniform3uiv(GLint l, GLsizei n, const GLuint* v) { Context& c=Context::Current(); if(auto* pr=CurProg(c)) SetU(*pr,l,v,(size_t)n*12); }
 void glUniform3d(GLint l, GLdouble a, GLdouble b, GLdouble c_) { GLdouble v[3]={a,b,c_}; Context& ctx=Context::Current(); if(auto* pr=CurProg(ctx)) SetU(*pr,l,v,24); }
 void glUniform3dv(GLint l, GLsizei n, const GLdouble* v) { Context& c=Context::Current(); if(auto* pr=CurProg(c)) SetU(*pr,l,v,(size_t)n*24); }
-void glUniform4f(GLint l, GLfloat a, GLfloat b, GLfloat c_, GLfloat d) { GLfloat v[4]={a,b,c_,d}; Context& ctx=Context::Current(); if(auto* pr=CurProg(ctx)) SetU(*pr,l,v,16); }
-void glUniform4fv(GLint l, GLsizei n, const GLfloat* v) { Context& c=Context::Current(); if(auto* pr=CurProg(c)) SetU(*pr,l,v,(size_t)n*16); }
+void glUniform4f(GLint l, GLfloat a, GLfloat b, GLfloat c_, GLfloat d) { GLfloat v[4]={a,b,c_,d}; Context& ctx=Context::Current(); if(auto* pr=CurProg(ctx)) { SetU(*pr,l,v,16); DiagUniform4(*pr,l,v); } }
+void glUniform4fv(GLint l, GLsizei n, const GLfloat* v) { Context& c=Context::Current(); if(auto* pr=CurProg(c)) { SetU(*pr,l,v,(size_t)n*16); if(n>0) DiagUniform4(*pr,l,v); } }
 void glUniform4i(GLint l, GLint a, GLint b, GLint c_, GLint d) { GLint v[4]={a,b,c_,d}; Context& ctx=Context::Current(); if(auto* pr=CurProg(ctx)) SetU(*pr,l,v,16); }
 void glUniform4iv(GLint l, GLsizei n, const GLint* v) { Context& c=Context::Current(); if(auto* pr=CurProg(c)) SetU(*pr,l,v,(size_t)n*16); }
 void glUniform4ui(GLint l, GLuint a, GLuint b, GLuint c_, GLuint d) { GLuint v[4]={a,b,c_,d}; Context& ctx=Context::Current(); if(auto* pr=CurProg(ctx)) SetU(*pr,l,v,16); }
@@ -222,8 +251,8 @@ void glProgramUniform3ui(GLuint p, GLint l, GLuint a, GLuint b, GLuint c_) { GLu
 void glProgramUniform3uiv(GLuint p, GLint l, GLsizei n, const GLuint* v) { Context& c=Context::Current(); auto it=c.programs.find(p); if(it==c.programs.end()){c.errors.Record(0x0502);return;} SetU(it->second,l,v,(size_t)n*12); }
 void glProgramUniform3d(GLuint p, GLint l, GLdouble a, GLdouble b, GLdouble c_) { GLdouble v[3]={a,b,c_}; Context& ctx=Context::Current(); auto it=ctx.programs.find(p); if(it==ctx.programs.end()){ctx.errors.Record(0x0502);return;} SetU(it->second,l,v,24); }
 void glProgramUniform3dv(GLuint p, GLint l, GLsizei n, const GLdouble* v) { Context& c=Context::Current(); auto it=c.programs.find(p); if(it==c.programs.end()){c.errors.Record(0x0502);return;} SetU(it->second,l,v,(size_t)n*24); }
-void glProgramUniform4f(GLuint p, GLint l, GLfloat a, GLfloat b, GLfloat c_, GLfloat d) { GLfloat v[4]={a,b,c_,d}; Context& ctx=Context::Current(); auto it=ctx.programs.find(p); if(it==ctx.programs.end()){ctx.errors.Record(0x0502);return;} SetU(it->second,l,v,16); }
-void glProgramUniform4fv(GLuint p, GLint l, GLsizei n, const GLfloat* v) { Context& c=Context::Current(); auto it=c.programs.find(p); if(it==c.programs.end()){c.errors.Record(0x0502);return;} SetU(it->second,l,v,(size_t)n*16); }
+void glProgramUniform4f(GLuint p, GLint l, GLfloat a, GLfloat b, GLfloat c_, GLfloat d) { GLfloat v[4]={a,b,c_,d}; Context& ctx=Context::Current(); auto it=ctx.programs.find(p); if(it==ctx.programs.end()){ctx.errors.Record(0x0502);return;} SetU(it->second,l,v,16); DiagUniform4(it->second,l,v); }
+void glProgramUniform4fv(GLuint p, GLint l, GLsizei n, const GLfloat* v) { Context& c=Context::Current(); auto it=c.programs.find(p); if(it==c.programs.end()){c.errors.Record(0x0502);return;} SetU(it->second,l,v,(size_t)n*16); if(n>0) DiagUniform4(it->second,l,v); }
 void glProgramUniform4i(GLuint p, GLint l, GLint a, GLint b, GLint c_, GLint d) { GLint v[4]={a,b,c_,d}; Context& ctx=Context::Current(); auto it=ctx.programs.find(p); if(it==ctx.programs.end()){ctx.errors.Record(0x0502);return;} SetU(it->second,l,v,16); }
 void glProgramUniform4iv(GLuint p, GLint l, GLsizei n, const GLint* v) { Context& c=Context::Current(); auto it=c.programs.find(p); if(it==c.programs.end()){c.errors.Record(0x0502);return;} SetU(it->second,l,v,(size_t)n*16); }
 void glProgramUniform4ui(GLuint p, GLint l, GLuint a, GLuint b, GLuint c_, GLuint d) { GLuint v[4]={a,b,c_,d}; Context& ctx=Context::Current(); auto it=ctx.programs.find(p); if(it==ctx.programs.end()){ctx.errors.Record(0x0502);return;} SetU(it->second,l,v,16); }

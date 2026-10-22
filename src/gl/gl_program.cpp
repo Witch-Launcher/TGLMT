@@ -130,6 +130,10 @@ void glLinkProgram(GLuint p) {
     pr.linked = false; pr.infoLog.clear();
     pr.reflectionComplete = false;
     pr.uniformLayout.clear();
+    // Bytes uniform cũ (loc → data) thuộc layout CŨ; giữ lại sau relink sẽ
+    // upload nhầm giá trị cho loc trùng số nhưng khác nghĩa. `uniformLoc`
+    // (name → loc) VẪN giữ: app cache loc trước link là hành vi được hỗ trợ.
+    pr.uniforms.clear();
     pr.attribLoc.clear(); pr.appleVS.reset(); pr.appleFS.reset();
     pr.appleCS.reset(); pr.appleCSPipeline.reset(); pr.computeMSL.clear();
     pr.computeBlockSlots.clear(); pr.computeSamplers.clear(); pr.computeUBSize = 0;
@@ -600,6 +604,23 @@ void glLinkProgram(GLuint p) {
                     nLink, p, vsC.inputs.size(), (int)vsC.usesVertexID,
                     (int)vsC.usesInstanceID, vsC.outputs.size(), fsC.inputs.size(),
                     vsC.blocks.size());
+    }
+    // Tint 1.21 (standalone uniform): log layout ColorModulator/Fog* để đối
+    // chiếu với giá trị game set (uni4f) và bytes thực upload (tintdraw).
+    if (c.DiagOn()) {
+        static int nTintProg = 0;
+        bool any = false;
+        for (auto& e : pr.uniformLayout)
+            if (e.name == "ColorModulator" || e.name == "FogColor" ||
+                e.name == "FogStart" || e.name == "FogEnd") any = true;
+        if (any && ++nTintProg <= 64) {
+            for (auto& e : pr.uniformLayout)
+                if (e.name == "ColorModulator" || e.name == "FogColor" ||
+                    e.name == "FogStart" || e.name == "FogEnd")
+                    fprintf(stderr,
+                            "[TGLMT] tintprog#%d prog=%u %s off=%zu size=%zu loc=%d vs=%d\n",
+                            nTintProg, p, e.name.c_str(), e.offset, e.size, e.loc, (int)e.isVS);
+        }
     }
     pr.linked = true;
     pr.reflectionComplete = true;
