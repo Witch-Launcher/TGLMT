@@ -6686,32 +6686,89 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             for (bool b : activeStack) if (!b) return false;
             return true;
         };
+        // Bộ đánh giá #if: defined(X), !, &&, ||, ngoặc, số, macro số.
+        // (26.2 core/entity: `#if defined(PER_FACE_LIGHTING) ||
+        //  !defined(NO_CARDINAL_LIGHTING)` — trước đây chỉ đọc mệnh đề đầu
+        //  nên bỏ UBO Lighting nhưng thân vẫn dùng Light0_Direction.)
         auto evalIf = [&](const std::string& expr) -> std::pair<bool, bool> {
-            std::string e = Trim(expr);
-            if (e.rfind("defined", 0) == 0) {
-                size_t lp = e.find('('), rp = e.find(')');
-                std::string nm = (lp != std::string::npos && rp != std::string::npos && rp > lp)
-                    ? Trim(e.substr(lp + 1, rp - lp - 1)) : Trim(e.substr(7));
-                return {macros.count(nm) > 0, true};
-            }
-            if (e.rfind("!defined", 0) == 0) {
-                size_t lp = e.find('('), rp = e.find(')');
-                std::string nm = (lp != std::string::npos && rp != std::string::npos && rp > lp)
-                    ? Trim(e.substr(lp + 1, rp - lp - 1)) : Trim(e.substr(8));
-                return {macros.count(nm) == 0, true};
-            }
-            // số nguyên trần: #if 0 / #if 1
-            if (!e.empty() && (isdigit((unsigned char)e[0]) || e[0] == '-')) {
-                return {atoi(e.c_str()) != 0, true};
-            }
-            // macro đơn trị số: #if ALPHA_CUTOUT (sau define số)
-            auto it = macros.find(e);
-            if (it != macros.end() && !it->second.empty()) {
-                const std::string& v = Trim(it->second);
-                if (!v.empty() && (isdigit((unsigned char)v[0]) || v[0] == '-' || v[0] == '.'))
-                    return {atof(v.c_str()) != 0.0, true};
-            }
-            return {false, false}; // biểu thức lạ → fail trung thực ở caller
+            struct P {
+                const std::string& s;
+                size_t i = 0;
+                const std::unordered_map<std::string, std::string>& m;
+                bool ok = true;
+                void ws() { while (i < s.size() && isspace((unsigned char)s[i])) ++i; }
+                bool peek(const char* t) {
+                    ws();
+                    return s.compare(i, strlen(t), t) == 0;
+                }
+                bool eat(const char* t) {
+                    if (!peek(t)) return false;
+                    i += strlen(t);
+                    return true;
+                }
+                std::string ident() {
+                    ws();
+                    size_t b = i;
+                    while (i < s.size() &&
+                           (isalnum((unsigned char)s[i]) || s[i] == '_'))
+                        ++i;
+                    return s.substr(b, i - b);
+                }
+                long macroVal(const std::string& n) {
+                    if (n == "true") return 1;
+                    if (n == "false") return 0;
+                    auto it = m.find(n);
+                    if (it == m.end()) return 0;
+                    std::string v = Trim(it->second);
+                    if (v.empty()) return 0;
+                    char* e = nullptr;
+                    long x = strtol(v.c_str(), &e, 0);
+                    if (e == v.c_str()) return 0; // macro chuỗi → 0
+                    return x;
+                }
+                long unary() {
+                    if (eat("!")) return !unary();
+                    if (eat("-")) return -unary();
+                    if (eat("(")) {
+                        long v = orExpr();
+                        if (!eat(")")) ok = false;
+                        return v;
+                    }
+                    if (peek("defined")) {
+                        i += 7;
+                        bool paren = eat("(");
+                        std::string n = ident();
+                        if (paren && !eat(")")) ok = false;
+                        return m.count(n) ? 1 : 0;
+                    }
+                    ws();
+                    if (i < s.size() && isdigit((unsigned char)s[i])) {
+                        char* e = nullptr;
+                        long v = strtol(s.c_str() + i, &e, 0);
+                        if (e == s.c_str() + i) { ok = false; return 0; }
+                        i = e - s.c_str();
+                        return v;
+                    }
+                    std::string n = ident();
+                    if (n.empty()) { ok = false; return 0; }
+                    return macroVal(n);
+                }
+                long andExpr() {
+                    long v = unary();
+                    while (peek("&&")) { i += 2; long r = unary(); v = (v && r); }
+                    return v;
+                }
+                long orExpr() {
+                    long v = andExpr();
+                    while (peek("||")) { i += 2; long r = andExpr(); v = (v || r); }
+                    return v;
+                }
+            };
+            P p{expr, 0, macros};
+            long v = p.orExpr();
+            p.ws();
+            if (!p.ok || p.i != expr.size()) return {false, false};
+            return {v != 0, true};
         };
         while (std::getline(iss, line)) {
             std::string t = Trim(line);
