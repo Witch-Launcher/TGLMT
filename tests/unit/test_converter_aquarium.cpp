@@ -53,13 +53,15 @@ int main() {
         GLSLConvertResult fr = ConvertGLSLtoMSL(fs, 0x8B30);
         if (!vr.ok) { printf("FAIL convert %s: %s\n", pr[0], vr.log.c_str()); return 1; }
         if (!fr.ok) { printf("FAIL convert %s: %s\n", pr[1], fr.log.c_str()); return 1; }
-        // varyings vs-out ↔ fs-in khớp (tên, location, kiểu)
-        for (auto& o : vr.outputs) {
+        // varying khớp (tên, location, kiểu): mọi FS input PHẢI có VS output
+        // (đúng luật link GL); VS output thừa được phép — FS `in` khai mà không
+        // đọc là inactive và bị strip (vd water.frag khai vWorld không dùng).
+        for (auto& i : fr.inputs) {
             bool found = false;
-            for (auto& i : fr.inputs)
+            for (auto& o : vr.outputs)
                 if (i.name == o.name && i.location == o.location && i.mslType == o.mslType)
                     found = true;
-            if (!found) { printf("FAIL varying mismatch %s:%s\n", pr[0], o.name.c_str()); return 1; }
+            if (!found) { printf("FAIL varying mismatch %s:%s\n", pr[1], i.name.c_str()); return 1; }
         }
         // uniform layout sanity: offsets tăng dần, trong buffer
         for (auto& u : vr.uniforms) {

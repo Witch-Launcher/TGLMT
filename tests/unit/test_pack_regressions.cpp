@@ -547,6 +547,65 @@ int main() {
         }
     }
 
+    // 19) MC 1.21.11 rendertype_item_entity_translucent_cull.vsh:
+    // `in ivec2 UV2; out vec2 texCoord2; texCoord2 = UV2;` — GLSL implicit
+    // int→float; MSL "assigning to 'float2' from incompatible type 'int2'"
+    // (fatal pipeline 1.21.11). Phải bọc floatN(RHS).
+    {
+        const char* s = "#version 330 core\n"
+                        "layout(location = 0) in vec3 Position;\n"
+                        "layout(location = 1) in ivec2 UV2;\n"
+                        "out vec2 texCoord2;\n"
+                        "void main() {\n"
+                        "    texCoord2 = UV2;\n"
+                        "    gl_Position = vec4(Position, 1.0);\n"
+                        "}\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B31);
+        CHECK(r.ok, "int2→float2 varying assign convert ok");
+        if (!r.ok) printf("  log: %s\n", r.log.c_str());
+        if (r.ok) {
+            CHECK(Has(r.msl, "_out.texCoord2 = float2(_in.UV2);"),
+                  "gán UV2 (ivec2) → texCoord2 (vec2) bọc float2");
+            CHECK(!Has(r.msl, "float2(float2(_in.UV2))"), "không bọc lặp");
+            MetalCheck("int2assign", r.msl, "MSL int2→float2 assign biên dịch được");
+        }
+    }
+
+    // 20) MC 1.21.11 rendertype_text_background.fsh khai `in vec2 texCoord0;`
+    // KHÔNG dùng, vsh không output; GL link OK nhưng MSL bắt mọi field
+    // TGLMT_FIn được VS ghi → link "fragment input not written by vertex"
+    // (fatal 1.21.11). Input inactive phải bị strip khỏi FIn/inputs.
+    {
+        const char* sv = "#version 330 core\n"
+                         "layout(location = 0) in vec3 Position;\n"
+                         "out vec4 vertexColor;\n"
+                         "void main() {\n"
+                         "    vertexColor = vec4(1.0);\n"
+                         "    gl_Position = vec4(Position, 1.0);\n"
+                         "}\n";
+        const char* sf = "#version 330 core\n"
+                         "in vec2 texCoord0;\n"
+                         "in vec4 vertexColor;\n"
+                         "out vec4 fragColor;\n"
+                         "void main() { fragColor = vertexColor; }\n";
+        GLSLConvertResult rv = ConvertGLSLtoMSL(sv, 0x8B31);
+        GLSLConvertResult rf = ConvertGLSLtoMSL(sf, 0x8B30);
+        CHECK(rv.ok && rf.ok, "FS unused input convert ok");
+        if (!rf.ok) printf("  log: %s\n", rf.log.c_str());
+        if (rf.ok) {
+            CHECK(!Has(rf.msl, "texCoord0"), "FS input không dùng bị strip khỏi TGLMT_FIn");
+            bool matched = true;
+            for (auto& fi : rf.inputs) {
+                bool found = false;
+                for (auto& vo : rv.outputs)
+                    if (vo.name == fi.name && vo.mslType == fi.mslType) found = true;
+                if (!found) matched = false;
+            }
+            CHECK(matched, "mọi FS input còn lại đều có VS output (link khớp)");
+            MetalCheck("unusedfsin", rf.msl, "MSL FS unused input biên dịch được");
+        }
+    }
+
     // metal -c cho case 4 (toolchain trên máy này không đáng tin — chỉ chạy khi probe pass).
     if (MetalAvail()) {
         const char* s = "#version 130\n"

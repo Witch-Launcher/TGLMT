@@ -1425,6 +1425,130 @@ static void CoerceIntInitToFloat(std::string& text, const std::set<std::string>&
     }
     text.swap(out);
 }
+// ============ gán int-family → float-family (implicit int→float) =============
+// GLSL 1.20+ cho phép implicit int→float trong gán; MSL cấm (int2 → float2).
+// Thực chiến 1.21.11 (crash item_entity_translucent_cull/text_background):
+// `out vec2 texCoord2; in ivec2 UV2; ... texCoord2 = UV2;` → `_out.texCoord2 =
+// _in.UV2;` MSL: "assigning to 'float2' from incompatible type 'int2'".
+// Bọc RHS bằng floatN(...) khi RHS là TOÀN BỘ vế phải và biết chắc int-family:
+// `_in.<varying intN>` (kèm swizzle), ctor `intN(...)`/`uintN(...)`, số nguyên.
+// CHỈ LHS `_out.<varying floatN>` — local bỏ qua vì scope-blind.
+static void CoerceIntAssignToFloat(std::string& text, const std::vector<GLSLVar>& ins,
+                                   const std::vector<GLSLVar>& outs) {
+    auto typeDim = [](const std::string& t) -> int {
+        if (t.size() >= 2 && t.back() >= '2' && t.back() <= '4' && t[t.size() - 2] != 'x')
+            return t.back() - '0';
+        return 1;
+    };
+    // CHỈ LHS `_out.<varying>`: local scope-blind (cùng tên `pos` là float3 ở
+    // hàm khác) từng bọc oan `int3 pos = int3(...)` → float3 (Photon
+    // shadowcomp.csh). Local int→float chưa từng gặp trong pack thực chiến.
+    std::map<std::string, int> intDim;
+    for (auto& v : ins)
+        if (v.mslType.rfind("int", 0) == 0 || v.mslType.rfind("uint", 0) == 0)
+            intDim[v.name] = typeDim(v.mslType);
+    std::map<std::string, int> outDim;
+    for (auto& v : outs)
+        if (v.mslType.rfind("float", 0) == 0) outDim[v.name] = typeDim(v.mslType);
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t eq = text.find('=', i);
+        if (eq == std::string::npos) { out += text.substr(i); break; }
+        // `==`, `!=`, `<=`, `>=` — không phải gán.
+        if ((eq + 1 < text.size() && text[eq + 1] == '=') ||
+            (eq > 0 && (text[eq - 1] == '=' || text[eq - 1] == '!' ||
+                        text[eq - 1] == '<' || text[eq - 1] == '>'))) {
+            out += text.substr(i, eq - i + 1);
+            i = eq + 1;
+            continue;
+        }
+        size_t le = eq;
+        while (le > 0 && isspace((unsigned char)text[le - 1])) --le;
+        size_t st = le;
+        while (st > 0 && IsIdentChar(text[st - 1], false)) --st;
+        std::string lhs = text.substr(st, le - st);
+        int lhsDim = 0;
+        if (st > 0 && text[st - 1] == '.') {
+            size_t b = st - 1, bs = b;
+            while (bs > 0 && IsIdentChar(text[bs - 1], false)) --bs;
+            if (text.substr(bs, b - bs) == "_out") {
+                auto it = outDim.find(lhs);
+                if (it != outDim.end()) lhsDim = it->second;
+            }
+        }
+        if (!lhsDim) {
+            out += text.substr(i, eq - i + 1);
+            i = eq + 1;
+            continue;
+        }
+        size_t v = eq + 1;
+        while (v < text.size() && isspace((unsigned char)text[v])) ++v;
+        size_t semi = text.find(';', v);
+        if (semi == std::string::npos) { out += text.substr(i, eq - i + 1); i = eq + 1; continue; }
+        std::string rhs = Trim(text.substr(v, semi - v));
+        bool rhsInt = false;
+        int rhsDim = 0;
+        if (rhs.compare(0, 4, "_in.") == 0) {
+            std::string nm = rhs.substr(4);
+            size_t dot = nm.find('.');
+            if (dot != std::string::npos) {
+                std::string base = nm.substr(0, dot), sw = nm.substr(dot + 1);
+                bool swOk = !sw.empty() && sw.size() <= 4;
+                for (char ch : sw)
+                    if (!strchr("xyzwrgba", ch) || !isalpha((unsigned char)ch)) swOk = false;
+                auto it = intDim.find(base);
+                if (swOk && it != intDim.end()) {
+                    rhsInt = true;
+                    rhsDim = (int)sw.size();
+                }
+            } else {
+                auto it = intDim.find(nm);
+                if (it != intDim.end()) { rhsInt = true; rhsDim = it->second; }
+            }
+        }
+        // Tên trần (local) không phân giải được scope → bỏ qua (tránh bọc oan
+        // float local trùng tên int local ở hàm khác).
+        if (!rhsInt) {
+            // ctor intN(...)/uintN(...)/int(...)/uint(...) phủ toàn bộ RHS.
+            for (const char* k : {"int", "uint"}) {
+                std::string kk = k;
+                if (rhs.compare(0, kk.size(), kk) != 0) continue;
+                size_t u = kk.size();
+                int dim = 1;
+                if (u < rhs.size() && rhs[u] >= '2' && rhs[u] <= '4') { dim = rhs[u] - '0'; ++u; }
+                if (u >= rhs.size() || rhs[u] != '(') continue;
+                int d = 0;
+                size_t e = u;
+                for (; e < rhs.size(); ++e) {
+                    if (rhs[e] == '(') ++d;
+                    else if (rhs[e] == ')' && --d == 0) break;
+                }
+                if (e + 1 == rhs.size()) { rhsInt = true; rhsDim = dim; }
+                break;
+            }
+        }
+        if (!rhsInt && lhsDim == 1 && !rhs.empty()) {
+            // số nguyên (có thể kèm dấu) → float scalar.
+            bool lit = true;
+            for (size_t c = 0; c < rhs.size(); ++c)
+                if (!isdigit((unsigned char)rhs[c]) &&
+                    !(c == 0 && (rhs[c] == '-' || rhs[c] == '+'))) lit = false;
+            if (lit) { rhsInt = true; rhsDim = 1; }
+        }
+        // GLSL không cho gán intN → floatM khác dim; scalar chỉ hợp lệ với scalar.
+        if (!rhsInt || (rhsDim != lhsDim && !(rhsDim == 1 && lhsDim == 1))) {
+            out += text.substr(i, eq - i + 1);
+            i = eq + 1;
+            continue;
+        }
+        out += text.substr(i, v - i);
+        out += "float" + (lhsDim > 1 ? std::to_string(lhsDim) : std::string()) +
+               "(" + rhs + ")";
+        i = semi;
+    }
+    text.swap(out);
+}
 // ============ ctor floatN: arg int-family (implicit GLSL) → floatM(arg) ========
 // GLSL cho phép implicit int→float TỪNG COMPONENT trong vector ctor:
 // `vec4(iris_UV2, 0.0, 1.0)` với `in ivec2 iris_UV2;` — ĐÚNG dạng Iris sinh ra
@@ -9122,18 +9246,13 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
     // (crumbling.vsh không đọc Normal nhưng game vẫn bind "Normal"→0 trong khi
     // Position auto→0). Giữ lại là Metal `attribute index used more than once`
     // → crash khởi động (2026-09-28). Strip theo `_in.NAME` trong body.
-    // Fragment inputs là varyings (link kiểm khớp) — KHÔNG strip.
-    if (R.isVertex && !ins.empty()) {
-        auto usesAttr = [&](const std::string& nm) {
-            std::string key = "_in." + nm;
-            size_t p = 0;
-            while ((p = body.find(key, p)) != std::string::npos) {
-                size_t e = p + key.size();
-                if (e >= body.size() || !IsIdentChar(body[e], false)) return true;
-                p = e;
-            }
-            return false;
-        };
+    // FS: varying khai báo nhưng KHÔNG đọc cũng inactive ở desktop GL —
+    // 1.21.11 rendertype_text_background.fsh khai `in vec2 texCoord0` không
+    // dùng, vsh không output; GL link OK nhưng MSL bắt mọi field TGLMT_FIn
+    // được VS ghi → "fragment input not written by vertex" (fatal 1.21.11).
+    // Chỉ strip khi tên không xuất hiện trong body/helper (giữ nếu helper đọc
+    // tên trần — thà giữ còn hơn mất varying đang dùng → Metal undeclared).
+    {
         // P-Sodium: attribute đọc trong HELPER (tên thô, vd a_TexCoord trong
         // _vert_init) cũng ACTIVE — strip chỉ theo main sẽ làm helper treo
         // (`use of undeclared identifier` ở Metal compile). Quét bodies của
@@ -9143,7 +9262,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
         std::vector<std::pair<size_t, size_t>> helperBodies;
         for (auto& h : ParseHelperDefs(rest, true))
             if (h.hasBody) helperBodies.emplace_back(h.bodyStart, h.bodyEnd + 1);
-        auto usesAttrHelper = [&](const std::string& nm) {
+        auto usedInHelper = [&](const std::string& nm) {
             for (auto& [from, to] : helperBodies) {
                 size_t p = from;
                 while ((p = rest.find(nm, p)) != std::string::npos && p < to) {
@@ -9156,11 +9275,43 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             }
             return false;
         };
-        std::vector<GLSLVar> active;
-        for (auto& a : ins)
-            if (usesAttr(a.name) || usesAttrHelper(a.name)) active.push_back(a);
-        ins.swap(active);
-        R.inputs = ins; // conv mang đi link dùng bản đã strip (struct MSL dưới cũng dùng ins)
+        auto usedIn = [&](const std::string& nm) {
+            std::string key = "_in." + nm;
+            size_t p = 0;
+            while ((p = body.find(key, p)) != std::string::npos) {
+                size_t e = p + key.size();
+                if (e >= body.size() || !IsIdentChar(body[e], false)) return true;
+                // mat4 varying tách cột: `_in.<name>_c0.._c3` (tên gốc không
+                // xuất hiện nguyên vẹn trong body) — vẫn là ĐANG DÙNG.
+                if (body[e] == '_' && e + 1 < body.size() && body[e + 1] == 'c') return true;
+                p = e;
+            }
+            return false;
+        };
+        bool isFragment = !R.isVertex && !R.isCompute && !R.isTessControl && !R.isTessEval;
+        if ((R.isVertex || isFragment) && !ins.empty()) {
+            std::vector<GLSLVar> active;
+            for (auto& a : ins) {
+                // Matrix varying tách cột (name_c0..c3) được đọc bởi code SINH
+                // (matVaryInDecl `_in.name_c0..`), không xuất hiện nguyên tên
+                // gốc trong body — luôn giữ (nếu không → cột mất khỏi TGLMT_FIn,
+                // Metal "undeclared identifier"). ins đã expand trước đó nên
+                // nhận diện qua matVaryTypes, không còn mslType ma trận.
+                if (a.mslType.find('x') != std::string::npos) { active.push_back(a); continue; }
+                bool matCol = false;
+                for (auto& mt : matVaryTypes) {
+                    std::string pre = mt.first + "_c";
+                    if (a.name.size() == pre.size() + 1 && a.name.compare(0, pre.size(), pre) == 0) {
+                        matCol = true;
+                        break;
+                    }
+                }
+                if (matCol) { active.push_back(a); continue; }
+                if (usedIn(a.name) || usedInHelper(a.name)) active.push_back(a);
+            }
+            ins.swap(active);
+            R.inputs = ins; // conv mang đi link dùng bản đã strip (struct MSL dưới cũng dùng ins)
+        }
     }
     // Iris ENTITY format bind `iris_Entity` = GL_UNSIGNED_SHORT×4 (UShort4;
     // IrisVertexFormats.ENTITY_ID_ELEMENT) nhưng EntityPatcher khai
@@ -9250,6 +9401,9 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             PromoteIntVecArith(body, iv, uniforms, blocks);
             PromoteIntVecCastsInFloatArith(body, uniforms, iv);
             FloatifyNumericLiteralArgsInCall(body, "smoothstep");
+            // Gán int-family → float-family (1.21.11 `texCoord2 = UV2;`).
+            // SAU CoerceIntArgsInFloatCtors để không bọc lặp float2(float2(x)).
+            CoerceIntAssignToFloat(body, ins, outs);
             SizeArrayDeclarators(body);
             ResolveArrayLengths(body, src);
         }
