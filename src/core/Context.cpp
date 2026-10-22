@@ -181,9 +181,10 @@ void Context::FlushPendingEncoder() {
     pendingKeep.clear();
     pendingUsedBuffers.clear();
     pendingUsedTextures.clear();
-    // uniformCache giữ (bytes so sánh vẫn đúng sau flush).
+    // uniformCache giữ trong cùng frame (bytes so sánh vẫn đúng sau flush).
     // Ring buffers giữ sống (triple-buffer, xoay theo frame chứ không theo flush
-    // để GPU async vẫn đọc an toàn). Cursor không reset ở đây.
+    // để GPU async vẫn đọc an toàn). Cursor không reset ở đây. Cache bị
+    // invalidate ở NextFrame vì buffer+offset thuộc ring của frame cũ.
 }
 void Context::InvalidatePendingOnTargetChange() {
     // Gọi khi FBO bind đổi: nếu target GPU khác target đang encode → flush.
@@ -442,6 +443,13 @@ std::pair<metal::IBuffer*, size_t> Context::RingAlloc(size_t n, size_t align) {
 }
 void Context::NextFrame() {
     ++frameSeq;
+    // uniformCache chỉ an toàn TRONG một frame: buffer+offset trỏ vào ring của
+    // frame trước, ring đó sẽ bị reset/tái sử dụng sau kRingFrames → shader đọc
+    // dữ liệu của draw khác (tint cyan 1.21: GUI tĩnh cache hit mãi, ring slot bị
+    // ghi đè bằng uniform fog của world). Invalidate mỗi frame, giữ reuse trong frame.
+    uniformCache.valid = false;
+    uniformCache.vsBuf.reset();
+    uniformCache.fsBuf.reset();
     uint64_t slot = frameSeq % kRingFrames;
     // p6: chỉ tái dùng slot khi GPU đã execute xong frame đã dùng nó. Trước đây
     // cứ reset theo giả định "3 slot = 2 frame đang bay" — vô hiệu khi

@@ -1312,11 +1312,16 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             // đưa vào FS buffer — kể cả loc<0/chưa set (in "unset").
             if (dgPhase && !e.isVS && e.name == "ColorModulator") {
                 static int nTintDraw = 0;
-                if (++nTintDraw <= 120) {
-                    auto tu = (e.loc < 0) ? pr.uniforms.end() : pr.uniforms.find(e.loc);
-                    if (tu != pr.uniforms.end() && tu->second.size() >= 16) {
-                        float f[4] = {0, 0, 0, 0};
-                        memcpy(f, tu->second.data(), 16);
+                static GLuint lastTintProg = 0;
+                static float lastTintVal[4] = {0, 0, 0, 0};
+                auto tu = (e.loc < 0) ? pr.uniforms.end() : pr.uniforms.find(e.loc);
+                float f[4] = {0, 0, 0, 0};
+                bool have = tu != pr.uniforms.end() && tu->second.size() >= 16;
+                if (have) memcpy(f, tu->second.data(), 16);
+                bool same = have && prog == lastTintProg &&
+                            memcmp(f, lastTintVal, 16) == 0;
+                if (!same && ++nTintDraw <= 2000) {
+                    if (have) {
                         fprintf(stderr,
                                 "[TGLMT] tintdraw#%d prog=%u off=%zu loc=%d val=%.4f %.4f %.4f "
                                 "%.4f\n",
@@ -1326,6 +1331,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                                 "[TGLMT] tintdraw#%d prog=%u off=%zu loc=%d unset\n", nTintDraw,
                                 prog, e.offset, e.loc);
                     }
+                    lastTintProg = prog;
+                    memcpy(lastTintVal, f, 16);
                     fflush(stderr);
                 }
             }
