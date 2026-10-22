@@ -9485,6 +9485,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
                       (rest.find("tglmt_mat4_ctor") != std::string::npos);
         bool useM3C = (body.find("tglmt_mat3_ctor") != std::string::npos) ||
                       (rest.find("tglmt_mat3_ctor") != std::string::npos);
+        bool useM2C = (body.find("tglmt_mat2_ctor") != std::string::npos) ||
+                      (rest.find("tglmt_mat2_ctor") != std::string::npos);
+        // inverse() mất kiểu ở call site (`tglmt_inverse(m)`) → phát cả bộ khi
+        // có dùng (overload khác nhau, không trùng).
+        bool useInv = (body.find("tglmt_inverse(") != std::string::npos) ||
+                      (rest.find("tglmt_inverse(") != std::string::npos);
         bool useMod = (body.find("tglmt_mod") != std::string::npos) ||
                       (rest.find("tglmt_mod") != std::string::npos);
         bool useFLSB = (body.find("tglmt_findLSB") != std::string::npos) ||
@@ -9509,10 +9515,14 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage) {
             msl_out << "float3x3 tglmt_mat3_ctor(float s) { return float3x3(s); }\n";
             msl_out << "float3x3 tglmt_mat3_ctor(float3x3 m) { return m; }\n";
             msl_out << "float3x3 tglmt_mat3_ctor(float4x4 m) { return float3x3(m[0].xyz, m[1].xyz, m[2].xyz); }\n";
+        }
+        if (useM2C) {
             msl_out << "float2x2 tglmt_mat2_ctor(float s) { return float2x2(s); }\n";
             msl_out << "float2x2 tglmt_mat2_ctor(float2x2 m) { return m; }\n";
             msl_out << "float2x2 tglmt_mat2_ctor(float3x3 m) { return float2x2(m[0].xy, m[1].xy); }\n";
             msl_out << "float2x2 tglmt_mat2_ctor(float4x4 m) { return float2x2(m[0].xy, m[1].xy); }\n";
+        }
+        if (useInv) {
             msl_out << "inline float2x2 tglmt_inverse(float2x2 m) { float d = m[0][0]*m[1][1] - m[1][0]*m[0][1];"
                        " return float2x2(float2(m[1][1], -m[1][0]), float2(-m[0][1], m[0][0])) * (1.0/d); }\n";
             msl_out << "inline float3x3 tglmt_inverse(float3x3 m) { float3 c0 = cross(m[1], m[2]);"
