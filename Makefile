@@ -159,6 +159,10 @@ probe:
 	@cmake --build build --target truth_probe -j8 >/dev/null
 	@./build/truth_probe
 
+# Triage list of explicit "unsupported / skipped / shadow-only" paths.
+scan-gaps:
+	@python3 tools/scan_behavior_gaps.py --json build/behavior_gaps.json
+
 # Regenerate the generated truth docs from the current build. Review the diff.
 truth:
 	@test -f "$(LIB_AUDIT)" || { echo "Thiếu $(LIB_AUDIT) — chạy 'make test' hoặc build trước"; exit 1; }

@@ -34,8 +34,6 @@ KNOWN_BAD = {
         "glSpecializeShader recompiles GLSL; glShaderBinary is a no-op",
     "GL_EXT_provoking_vertex":
         "glProvokingVertex only stores shadow state; the draw path ignores it",
-    "GL_ARB_copy_image":
-        "glCopyImageSubData ignores level>0 and depth",
     "GL_OES_texture_storage_multisample_2d_array":
         "glTexStorage3DMultisampleOES forwards to a no-op core function",
 }
