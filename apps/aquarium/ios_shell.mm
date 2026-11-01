@@ -326,6 +326,14 @@ static void LogF(const char* fmt, ...) {
         if ([[NSFileManager defaultManager] fileExistsAtPath:path])
             [urls addObject:[NSURL fileURLWithPath:path]];
     }
+    // Kèm frame RAW để đối chiếu màn hình xanh (nếu đã có).
+    NSArray* files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:docs[0] error:nil];
+    for (NSString* name in files) {
+        if ([name hasPrefix:@"frame"] && [name hasSuffix:@".rgba"]) {
+            NSString* path = [docs[0] stringByAppendingPathComponent:name];
+            [urls addObject:[NSURL fileURLWithPath:path]];
+        }
+    }
     if (urls.count == 0) {
         self->testStatus.text = @"Không tìm thấy file log trong Documents";
         return;
