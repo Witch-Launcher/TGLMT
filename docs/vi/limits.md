@@ -25,7 +25,7 @@ mipmap, roundtrip `ReadPixels`/`GetTexImage`.
 | Stencil test | GPU: encode vào depth-stencil state; Metal dùng một ref chung cho hai mặt |
 | `glColorMask` | Đã bake write-mask attachment 0 (`AppleMetalBridge.mm` writeMask, kiểm bởi `test_water_translucent_apple` case4); MRT > 0 chưa |
 | Blend attachment > 0, `ClearBuffer` MRT > 0 | Chỉ single-target |
-| Texture compressed / 3D / multisample storage | Compressed và MSAA 3D/array bị từ chối; MSAA 2D, texture 3D và mip chain đã có |
+| Texture compressed / 3D / array / multisample storage | Compressed và MSAA 3D/array bị từ chối; MSAA 2D, texture 3D, texture 2D array và mip chain đã có. FBO attach layer chạy cho 2D array, không chạy cho slice 3D (Metal không cho view 3D thành 2D). |
 | `ReadPixels` | Chỉ RGBA/BGRA + `UNSIGNED_BYTE` |
 | Blend dual-source | Rơi về ONE/ADD |
 | `baseInstance != 0` | GPU qua `drawIndexedBaseInstance` / `drawPrimitivesBaseInstance` |

@@ -50,7 +50,8 @@ void glBindFramebuffer(GLenum t, GLuint f) {
     if (f && !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
     c.state.BindFBO(t, f);
 }
-static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex, GLint level);
+static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex,
+                        GLint level, GLint layer = -1);
 static GLuint ResolveFBOForTarget(Context& c, GLenum t);
 
 static bool SupportedRenderbufferFormat(GLenum inf) {
@@ -201,62 +202,44 @@ static GLuint ResolveFBOForTarget(Context& c, GLenum t) {
 }
 void glFramebufferTexture2D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l) {
     Context& c = Context::Current();
-    GLuint fbo = ResolveFBOForTarget(c, t);
-    if (fbo == 0) { c.errors.Record(0x0502); return; } // INVALID_OPERATION trên default FB
-    auto it = c.fbos.find(fbo);
-    if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
-    if (l < 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE (spec §9.2)
-    auto& f = it->second;
-    if (a == 0x8CE0) { f.colorTex[0] = x; f.colorLevel[0] = l; } // COLOR_ATTACHMENT0
-    else if (a >= 0x8CE0 && a <= 0x8CE7) { f.colorTex[a - 0x8CE0] = x; f.colorLevel[a - 0x8CE0] = l; } // COLOR_ATTACHMENTn
-    else if (a == 0x8D00) { f.depthTex = x; f.depthLevel = l; }
-    else if (a == 0x8D20) { f.stencilTex = x; f.stencilLevel = l; }
-    else if (a == 0x821A || a == 0x84F9) { // DEPTH_STENCIL_ATTACHMENT (0x84F9 alias GL_DEPTH_STENCIL_ATTACHMENT): draw path reads depthTex
-        f.depthStencilTex = x; f.depthStencilLevel = l;
-        f.depthTex = x; f.depthLevel = l;
-        f.stencilTex = x; f.stencilLevel = l;
-    }
-    else { c.errors.Record(0x0500); return; }
-    auto txt = c.textures.find(x);
-    // Size FBO theo mip thật (w>>l): blit bounds + viewport mip bake đúng.
-    // wasRT chỉ cho level 0 (level>0 của texture 1-level không có storage GPU).
-    if (txt != c.textures.end()) {
-        GLint lw = (GLint)txt->second.w >> l, lh = (GLint)txt->second.h >> l;
-        f.w = lw > 0 ? lw : 1; f.h = lh > 0 ? lh : 1;
-        if (x && l == 0) txt->second.wasRT = true;
-    }
-    (void)t; (void)tx;
+    AttachToFBO(c, ResolveFBOForTarget(c, t), a, x, l, -1);
+    (void)tx;
 }
 void glFramebufferTexture3D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l, GLint z) {
-    (void)z; // TGLMT FBO model 2D: layer/z không phân biệt, attach như 2D.
-    glFramebufferTexture2D(t, a, tx, x, l);
+    Context& c = Context::Current();
+    AttachToFBO(c, ResolveFBOForTarget(c, t), a, x, l, z);
+    (void)tx;
 }
 void glFramebufferTextureLayer(GLenum t, GLenum a, GLuint x, GLint l, GLint layer) {
-    (void)layer; // như trên.
-    glFramebufferTexture2D(t, a, 0x0DE1 /*TEXTURE_2D*/, x, l);
+    Context& c = Context::Current();
+    AttachToFBO(c, ResolveFBOForTarget(c, t), a, x, l, layer);
 }
 // P8 ARB_geometry_shader4 (base cho glFramebufferTextureFaceARB alias):
 // Attach 1 face của cube map (hoặc layer của array) vào FBO.
-// TGLMT FBO model 2D (không phân biệt face/layer) → attach như 2D.
 void glFramebufferTextureFace(GLenum t, GLenum a, GLuint x, GLint l, GLenum face) {
-    (void)face; // cube face / array layer — TGLMT không track riêng, attach base texture.
-    glFramebufferTexture2D(t, a, 0x0DE1 /*TEXTURE_2D*/, x, l);
+    Context& c = Context::Current();
+    GLint layer = (face >= 0x8515 && face <= 0x851A) ? (GLint)(face - 0x8515) : -1;
+    AttachToFBO(c, ResolveFBOForTarget(c, t), a, x, l, layer);
 }
 // Helper attach tôn trọng fbo chỉ định (fix bug bỏ qua `f` ở Named variants).
-static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex, GLint level) {
+static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex,
+                        GLint level, GLint layer) {
     if (fbo == 0) { c.errors.Record(0x0502); return false; } // default FB không attach
     auto it = c.fbos.find(fbo);
     if (it == c.fbos.end()) { c.errors.Record(0x0502); return false; }
     if (level < 0) { c.errors.Record(0x0501); return false; }
     auto& f = it->second;
-    if (attach == 0x8CE0) { f.colorTex[0] = tex; f.colorLevel[0] = level; }
-    else if (attach >= 0x8CE0 && attach <= 0x8CE7) { f.colorTex[attach - 0x8CE0] = tex; f.colorLevel[attach - 0x8CE0] = level; }
-    else if (attach == 0x8D00) { f.depthTex = tex; f.depthLevel = level; }
-    else if (attach == 0x8D20) { f.stencilTex = tex; f.stencilLevel = level; }
-    else if (attach == 0x821A) { // draw path reads depthTex; keep all aliases in sync
-        f.depthStencilTex = tex; f.depthStencilLevel = level;
-        f.depthTex = tex; f.depthLevel = level;
-        f.stencilTex = tex; f.stencilLevel = level;
+    if (attach == 0x8CE0) { f.colorTex[0] = tex; f.colorLevel[0] = level; f.colorLayer[0] = layer; }
+    else if (attach >= 0x8CE0 && attach <= 0x8CE7) {
+        f.colorTex[attach - 0x8CE0] = tex; f.colorLevel[attach - 0x8CE0] = level;
+        f.colorLayer[attach - 0x8CE0] = layer;
+    }
+    else if (attach == 0x8D00) { f.depthTex = tex; f.depthLevel = level; f.depthLayer = layer; }
+    else if (attach == 0x8D20) { f.stencilTex = tex; f.stencilLevel = level; f.stencilLayer = layer; }
+    else if (attach == 0x821A || attach == 0x84F9) { // DEPTH_STENCIL_ATTACHMENT aliases; draw path reads depthTex
+        f.depthStencilTex = tex; f.depthStencilLevel = level; f.depthStencilLayer = layer;
+        f.depthTex = tex; f.depthLevel = level; f.depthLayer = layer;
+        f.stencilTex = tex; f.stencilLevel = level; f.stencilLayer = layer;
     }
     else { c.errors.Record(0x0500); return false; }
     auto txt = c.textures.find(tex);
@@ -269,10 +252,7 @@ static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex, GLint
 }
 void glNamedFramebufferTexture(GLuint f, GLenum a, GLuint x, GLint l) { AttachToFBO(Context::Current(), f, a, x, l); }
 void glNamedFramebufferTextureLayer(GLuint f, GLenum a, GLuint x, GLint l, GLint layer) {
-    // TGLMT FBO model 2D: layer không phân biệt, attach như 2D NHƯNG tôn trọng
-    // f/a/x/l (bản cũ nuốt toàn bộ lệnh → attach sai câm).
-    (void)layer;
-    AttachToFBO(Context::Current(), f, a, x, l);
+    AttachToFBO(Context::Current(), f, a, x, l, layer);
 }
 void glFramebufferParameteri(GLenum t, GLenum p, GLint v) {
     // P10 ARB_framebuffer_no_attachments: defaults cho FBO không attachment.

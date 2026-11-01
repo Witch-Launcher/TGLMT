@@ -199,6 +199,10 @@ public:
         (void)fmt; (void)baseLevel; (void)levelCount; (void)baseSlice; (void)sliceCount;
         return nullptr;
     }
+    // View 2D của một layer/face/slice (FBO glFramebufferTextureLayer).
+    virtual std::shared_ptr<ITexture> textureLayerView(uint32_t level, uint32_t layer) {
+        (void)level; (void)layer; return nullptr;
+    }
     // Đánh dấu depth texture đã có nội dung hợp lệ (GPU blit/full-define vào).
     // Backend có cơ chế "first-attach clear" cho depth Private (Apple: takeDepthInit)
     // phải gọi khi texture được ghi nội dung trước lần dùng làm depth attachment
@@ -657,6 +661,11 @@ public:
     // fallback 2D (Null backend test vẫn chạy); Apple tạo MTLTextureType3D.
     virtual std::shared_ptr<ITexture> newTexture3D(uint32_t w, uint32_t h, uint32_t d, PixelFormat f) {
         (void)d; return newTexture(w, h, f);
+    }
+    // Texture 2D array (GL_TEXTURE_2D_ARRAY): default fallback 2D cho Null.
+    virtual std::shared_ptr<ITexture> newTexture2DArray(uint32_t w, uint32_t h,
+                                                        uint32_t layers, PixelFormat f) {
+        return newTexture3D(w, h, layers, f);
     }
     // Upload MỘT slice z của texture 3D (glTexSubImage3D lặp per-slice).
     virtual bool updateTexture3D(ITexture* tex, uint32_t z, uint32_t x, uint32_t y,

@@ -25,7 +25,7 @@ CPU), mipmap generation, `ReadPixels`/`GetTexImage` roundtrip.
 | Stencil test | GPU: encoded in depth-stencil state; a single Metal reference value is shared by front/back faces |
 | `glColorMask` | No-op (no write-mask bake) |
 | Per-attachment blend beyond 0, `ClearBuffer` on MRT > 0 | Single-target only |
-| Compressed / 3D / multisample texture storage | Compressed and MSAA 3D/array rejected; 2D MSAA, 3D textures and mip chains implemented |
+| Compressed / 3D / array / multisample texture storage | Compressed and MSAA 3D/array rejected; 2D MSAA, 3D textures, 2D array textures and mip chains implemented. FBO layer attach works for 2D arrays, not 3D slices (Metal cannot view 3D as 2D). |
 | `ReadPixels` | RGBA/BGRA + `UNSIGNED_BYTE` only |
 | Dual-source blend factors | Fall back to ONE/ADD |
 | `baseInstance != 0` | GPU via `drawIndexedBaseInstance` / `drawPrimitivesBaseInstance` |

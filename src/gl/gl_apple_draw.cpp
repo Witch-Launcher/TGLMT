@@ -283,14 +283,26 @@ static metal::ITexture* SwzOrBase(const TextureObject& tx,
 // (GL_NONE/chưa attach → no-op đúng spec); slotRGBA = màu riêng slot, nullptr →
 // c.clearColor (glClear dùng 1 màu chung cho mọi buffer enabled).
 // View một mip level của texture (FBO attach level>0). Cache sống trong texture.
-static metal::ITexture* LevelView(TextureObject& tx, GLint level) {
-    if (level <= 0 || !tx.gpu) return tx.gpu.get();
-    if (tx.gpu->levelCount() <= (uint32_t)level) return nullptr;
-    auto it = tx.levelViews.find(level);
-    if (it != tx.levelViews.end()) return it->second.get();
-    auto v = tx.gpu->textureView(tx.gpu->pixelFormat(), (uint32_t)level, 1, 0, 1);
+static metal::ITexture* LevelView(TextureObject& tx, GLint level, GLint layer = -1) {
+    if (!tx.gpu) return nullptr;
+    if (level < 0) level = 0;
+    if (layer < 0) {
+        if (level == 0) return tx.gpu.get();
+        if (tx.gpu->levelCount() <= (uint32_t)level) return nullptr;
+        auto it = tx.levelViews.find(level);
+        if (it != tx.levelViews.end()) return it->second.get();
+        auto v = tx.gpu->textureView(tx.gpu->pixelFormat(), (uint32_t)level, 1, 0, 1);
+        if (!v) return nullptr;
+        tx.levelViews[level] = v;
+        return v.get();
+    }
+    auto key = std::make_pair(level, layer);
+    auto it = tx.layerViews.find(key);
+    if (it != tx.layerViews.end()) return it->second.get();
+    if (level > 0 && tx.gpu->levelCount() <= (uint32_t)level) return nullptr;
+    auto v = tx.gpu->textureLayerView((uint32_t)level, (uint32_t)layer);
     if (!v) return nullptr;
-    tx.levelViews[level] = v;
+    tx.layerViews[key] = v;
     return v.get();
 }
 static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
@@ -322,17 +334,15 @@ static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
             // no-op (tránh clear NHẦM level 0 = wipe atlas). Tiêu thụ deferred.
             auto lit = fit->second.colorLevel.find((GLint)(db - 0x8CE0));
             GLint fboLevel = (lit == fit->second.colorLevel.end()) ? 0 : lit->second;
-            if (fboLevel > 0) {
-                metal::ITexture* lv = LevelView(tit->second, fboLevel);
-                if (!lv) {
-                    ++c.appleStats.mipLevelSkipped;
-                    ConsumeDeferredClear(c);
-                    return true;
-                }
-                colPtrs[s] = lv;
-            } else {
-                colPtrs[s] = tit->second.gpu.get();
+            auto layit = fit->second.colorLayer.find((GLint)(db - 0x8CE0));
+            GLint fboLayer = (layit == fit->second.colorLayer.end()) ? -1 : layit->second;
+            metal::ITexture* lv = LevelView(tit->second, fboLevel, fboLayer);
+            if (!lv) {
+                ++c.appleStats.mipLevelSkipped;
+                ConsumeDeferredClear(c);
+                return true;
             }
+            colPtrs[s] = lv;
         }
         if (slotOnly >= 0 && !colPtrs[slotOnly]) {
             // d trỏ vào GL_NONE/chưa attach: GL spec — không clear gì.
@@ -342,7 +352,8 @@ static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
         metal::ITexture* dep = nullptr;
         if (slotOnly < 0 && fit->second.depthTex) {
             auto dit = c.textures.find(fit->second.depthTex);
-            if (dit != c.textures.end() && dit->second.gpu) dep = dit->second.gpu.get();
+            if (dit != c.textures.end() && dit->second.gpu)
+                dep = LevelView(dit->second, fit->second.depthLevel, fit->second.depthLayer);
         }
         bool anyCol = false;
         for (uint32_t s = 0; s < nSlots; ++s) if (colPtrs[s]) { anyCol = true; break; }
@@ -891,10 +902,12 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             if (tit == c.textures.end() || !tit->second.gpu) continue;
             auto lit = fit->second.colorLevel.find((GLint)(db - 0x8CE0));
             GLint fboLevel = (lit == fit->second.colorLevel.end()) ? 0 : lit->second;
-            metal::ITexture* dstTex = LevelView(tit->second, fboLevel);
-            if (!dstTex && fboLevel > 0) {
+            auto layit = fit->second.colorLayer.find((GLint)(db - 0x8CE0));
+            GLint fboLayer = (layit == fit->second.colorLayer.end()) ? -1 : layit->second;
+            metal::ITexture* dstTex = LevelView(tit->second, fboLevel, fboLayer);
+            if (!dstTex) {
                 ++c.appleStats.mipLevelSkipped;
-                return true; // texture 1 level: không alias level 0
+                return true;
             }
             colPtrs[s] = dstTex;
             colIds[s] = cit->second;
@@ -905,8 +918,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         if (fit->second.depthTex) {
             auto dit = c.textures.find(fit->second.depthTex);
             if (dit != c.textures.end() && dit->second.gpu) {
-                dep = dit->second.gpu.get();
-                hasDepthTex = true;
+                dep = LevelView(dit->second, fit->second.depthLevel, fit->second.depthLayer);
+                hasDepthTex = dep != nullptr;
             }
         }
         anyColor = false;
@@ -1827,8 +1840,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     auto kindOk = [&](const std::string& name, GLenum target) {
         auto kit = pr.samplerKind.find(name);
         char kind = (kit == pr.samplerKind.end()) ? '2' : kit->second;
-        // Array: chưa có GPU texture đúng loại → đen an toàn (giữ skip).
-        if (kind == 'A') return false;
+        // Array: cần object target TEXTURE_2D_ARRAY (target==0 = DSA bind chưa rõ).
+        if (kind == 'A') return target == 0x8C1A || target == 0;
         // Cube: chỉ khi target là CUBE (GPU luôn là cube thật sau fix).
         if (kind == 'C') return target == 0x8513;
         // target==0: DSA bind (glBindTextureUnit) không ghi target → tin tưởng.

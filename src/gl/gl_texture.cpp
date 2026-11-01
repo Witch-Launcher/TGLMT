@@ -601,6 +601,7 @@ static bool PromoteGpuMipChain(Context& c, TextureObject& t, uint32_t want) {
     if (!ok) return false;
     t.gpu = ng;
     t.levelViews.clear();
+    t.layerViews.clear();
     return true;
 }
 
@@ -861,8 +862,8 @@ void glTexImage1D(GLenum t, GLint l, GLint inf, GLsizei w, GLint b, GLenum f, GL
 void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, GLsizei d, GLint b, GLenum f, GLenum ty, const void* p) {
     if (target == 0x8070 || target == 0x8C19) return; // PROXY_3D/PROXY_2D_ARRAY: probe, no-op
     Context& c = Context::Current();
-    if (target != 0x806F) { // TEXTURE_2D_ARRAY/CUBE_MAP_ARRAY: chưa hỗ trợ (M3 array)
-        c.LogDebug(0,0,0,0,"glTexImage3D: target != TEXTURE_3D chưa hỗ trợ");
+    if (target != 0x806F && target != 0x8C1A) { // 3D hoặc 2D_ARRAY; CUBE_MAP_ARRAY chưa hỗ trợ
+        c.LogDebug(0,0,0,0,"glTexImage3D: target chưa hỗ trợ (chỉ 3D/2D_ARRAY)");
         return;
     }
     if (w < 0 || h < 0 || d < 0) { c.errors.Record(0x0501); return; }
@@ -912,6 +913,8 @@ void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, G
     tx.isCube = false;
     tx.w = w; tx.h = h; tx.d = (uint32_t)d; tx.internalFormat = inf; tx.levels = level + 1;
     tx.mipData.clear();
+    tx.levelViews.clear();
+    tx.layerViews.clear();
     tx.wasRT = false;
     // Unpack tight toàn bộ (z-major, mỗi slice h rows) — như 2D nhưng × d slice.
     size_t n = (size_t)w * h * d * BppTyped3D(f, ty);
@@ -927,7 +930,9 @@ void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, G
                 memcpy(unpacked.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
                        src + ((size_t)z * h + r) * rowLen, (size_t)w * bpp);
     }
-    tx.gpu = c.device->newTexture3D((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf));
+    tx.gpu = (target == 0x8C1A)
+        ? c.device->newTexture2DArray((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf))
+        : c.device->newTexture3D((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf));
     c.pendingTexRegions.erase(tp->id);
     // Format/type có đường upload: UBYTE tight (RGBA/RED/RG) hoặc FLOAT (RED/RGBA).
     // Layout pixel khớp thẳng Metal format (R8/RG8/RGBA8/R32F/RGBA32F) → raw upload.
@@ -1150,8 +1155,8 @@ static void TexSubImage3DCore(Context& c, TextureObject& t, GLint level,
 void glTexSubImage3D(GLenum target, GLint level, GLint xoff, GLint yoff, GLint zoff,
         GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type, const void* pixels) {
     Context& c = Context::Current();
-    if (target != 0x806F) { // 2D_ARRAY/CUBE_MAP_ARRAY chưa hỗ trợ
-        c.LogDebug(0, 0, 0, 0, "glTexSubImage3D: target != TEXTURE_3D chưa hỗ trợ");
+    if (target != 0x806F && target != 0x8C1A) { // CUBE_MAP_ARRAY chưa hỗ trợ
+        c.LogDebug(0, 0, 0, 0, "glTexSubImage3D: target chưa hỗ trợ (chỉ 3D/2D_ARRAY)");
         return;
     }
     TextureObject* tp = BoundTex(c, target);
@@ -2005,6 +2010,7 @@ void glTextureStorage2D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h) {
     it->second.wasRT = false;
     c.pendingTexRegions.erase(t);
     it->second.levelViews.clear();
+    it->second.layerViews.clear();
     it->second.gpu = c.device->newTextureLevels(
         (uint32_t)w, (uint32_t)h, ToMetalFormat(it->second.internalFormat), (uint32_t)l);
     // P1: storage chỉ cấp chỗ → shadow toàn số 0, không thông tin. Cùng luật với
@@ -2024,8 +2030,12 @@ void glTextureStorage3D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h, G
     it->second.internalFormat = inf; it->second.levels = l;
     it->second.isCube = false;
     it->second.wasRT = false;
+    it->second.levelViews.clear();
+    it->second.layerViews.clear();
     c.pendingTexRegions.erase(t);
-    it->second.gpu = c.device->newTexture3D((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf));
+    it->second.gpu = (it->second.target == 0x8C1A)
+        ? c.device->newTexture2DArray((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf))
+        : c.device->newTexture3D((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf));
     // Cùng luật shadow với glTextureStorage2D: chỉ giữ khi Null / không gpu /
     // format không đọc được từ GPU.
     if (c.device->isNull() || !it->second.gpu || !TexReadableFromGPU(it->second))

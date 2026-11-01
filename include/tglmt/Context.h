@@ -143,6 +143,8 @@ struct TextureObject {
     std::shared_ptr<metal::ITexture> gpu;
     // FBO attach mip level>0: view Metal (baseLevel=level, count=1) cache theo level.
     std::unordered_map<GLint, std::shared_ptr<metal::ITexture>> levelViews;
+    // FBO attach layer/face/slice: view 2D của (level, layer) cache theo cặp.
+    std::map<std::pair<GLint, GLint>, std::shared_ptr<metal::ITexture>> layerViews;
     // MSAA texture: target gồm multisample + resolve; gpu trỏ resolve texture.
     GLsizei samples = 1;
     std::shared_ptr<metal::IRenderTarget> msaaTarget;
@@ -374,8 +376,10 @@ struct FramebufferObject {
     // GlTextureView(texture, baseMipLevel, 1) + bindFrameBufferTextures(..., level)).
     // Bỏ qua level (luôn 0) làm mọi mip bake alias level 0 → smear atlas.
     std::unordered_map<GLenum, GLint> colorLevel; // attachment -> mip level (mặc định 0)
+    std::unordered_map<GLenum, GLint> colorLayer; // attachment -> layer (-1 = toàn texture)
     GLuint depthTex = 0, stencilTex = 0, depthStencilTex = 0;
     GLint depthLevel = 0, stencilLevel = 0, depthStencilLevel = 0;
+    GLint depthLayer = -1, stencilLayer = -1, depthStencilLayer = -1;
     GLsizei w = 0, h = 0;
     std::vector<GLenum> drawBuffers = {0x8CE0}; // GL_COLOR_ATTACHMENT0
     // P10 ARB_framebuffer_no_attachments: defaults cho FBO không attachment.

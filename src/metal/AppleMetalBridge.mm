@@ -289,6 +289,32 @@ private:
             return nullptr; // format incompatible → caller fallback share base
         }
     }
+    // View 2D của một layer/face/slice cho FBO attachment. Chỉ texture 3D,
+    // 2D array/cube mới có layer; 2D thường trả nullptr (dùng base).
+    std::shared_ptr<ITexture> textureLayerView(uint32_t level, uint32_t layer) override {
+        if (!tex_) return nullptr;
+        @try {
+            MTLTextureType src = [tex_ textureType];
+            // Metal không cho view 3D → 2D/2DArray (validation assert trên macOS
+            // 26), nên FBO attach slice 3D chưa hỗ trợ; array/cube thì được.
+            if (src != MTLTextureType2DArray &&
+                src != MTLTextureTypeCube && src != MTLTextureTypeCubeArray)
+                return nullptr;
+            id<MTLTexture> v =
+                [tex_ newTextureViewWithPixelFormat:[tex_ pixelFormat]
+                                       textureType:MTLTextureType2D
+                                            levels:NSMakeRange(level, 1)
+                                            slices:NSMakeRange(layer, 1)];
+            if (!v) return nullptr;
+            uint32_t vw = w_ >> level, vh = h_ >> level;
+            if (!vw) vw = 1; if (!vh) vh = 1;
+            auto p = std::make_shared<AppleTexture>(v, vw, vh, f_);
+            p->trackDepthInit(depthInitSet_);
+            return p;
+        } @catch (NSException*) {
+            return nullptr;
+        }
+    }
 };
 
 class AppleLibrary : public ILibrary {
@@ -954,16 +980,41 @@ public:
         if (!t) return nullptr;
         return std::make_shared<AppleTexture>(t, w, h, f, d);
     }
+    std::shared_ptr<ITexture> newTexture2DArray(uint32_t w, uint32_t h,
+                                                uint32_t layers, PixelFormat f) override {
+        if (!w || !h || !layers) return nullptr;
+        MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+        td.textureType = MTLTextureType2DArray;
+        td.pixelFormat = ToMTL(f);
+        td.width = w;
+        td.height = h;
+        td.arrayLength = layers;
+        td.mipmapLevelCount = 1;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        td.storageMode = MTLStorageModeShared;
+        id<MTLTexture> t = nil;
+        @try { t = [dev_ newTextureWithDescriptor:td]; } @catch (NSException*) { return nullptr; }
+        if (!t) return nullptr;
+        return std::make_shared<AppleTexture>(t, w, h, f, layers);
+    }
     bool updateTexture3D(ITexture* tex, uint32_t z, uint32_t x, uint32_t y,
             uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) override {
         AppleTexture* a = dynamic_cast<AppleTexture*>(tex);
         if (!a || !data || !w || !h) return false;
         @try {
-            if ([a->get() textureType] != MTLTextureType3D) return false;
-            // API 3D: slice = 0 (z nằm trong region origin), bytesPerImage = 1 slice.
-            [a->get() replaceRegion:MTLRegionMake3D(x, y, z, w, h, 1) mipmapLevel:0
-                              slice:0 withBytes:data bytesPerRow:bytesPerRow
-                       bytesPerImage:bytesPerRow * h];
+            MTLTextureType type = [a->get() textureType];
+            if (type == MTLTextureType3D) {
+                // API 3D: slice = 0 (z nằm trong region origin).
+                [a->get() replaceRegion:MTLRegionMake3D(x, y, z, w, h, 1) mipmapLevel:0
+                                  slice:0 withBytes:data bytesPerRow:bytesPerRow
+                           bytesPerImage:bytesPerRow * h];
+            } else if (type == MTLTextureType2DArray) {
+                [a->get() replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:0
+                                  slice:(NSUInteger)z withBytes:data
+                              bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * h];
+            } else {
+                return false;
+            }
             return true;
         } @catch (NSException*) { return false; }
     }

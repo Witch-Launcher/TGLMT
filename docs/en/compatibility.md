@@ -53,7 +53,7 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | Mip filtering on a single-level texture | CPU emulated | falls back to the base level and counts `mipBase` |
 | Drawing or clearing into mip level greater than 0 of a single-level texture | Trace only | skipped and counted as `mipLevelSkipped` |
 | Cubemaps, `samplerCube` | GPU | faces are uploaded immediately rather than staged |
-| `sampler2DArray` | GPU | mapped to `texture2d_array` |
+| `sampler2DArray` | GPU | `GL_TEXTURE_2D_ARRAY` storage (`glTexImage3D`/`glTexStorage3D`/`glTexSubImage3D`) uses a real `MTLTextureType2DArray`; sampler maps to `texture2d_array`. MSAA 2D array is rejected. Verified by `test_texture_array_apple`. |
 | `glTexBuffer` / `samplerBuffer` | CPU emulated, GPU read | `glTexBuffer` materialises the buffer into a texture when it is bound (`BindBufTex`); the shader then reads it with `.read()` on the GPU |
 | Compressed texture upload (`glCompressedTexImage*`) | No-op accepted | no decompression, no error |
 | `glCopyImageSubData` | GPU | 2D copy between textures, including source/destination mip levels via texture views, plus 3D/array multi-slice copies through `blitCopySlices` (3D uses origin.z, arrays use slices). Same-format GPU blit, otherwise CPU shadow fallback for level-0 2D. |
