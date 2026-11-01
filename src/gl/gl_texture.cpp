@@ -1271,6 +1271,56 @@ void glCopyTexSubImage1D(GLenum target, GLint level, GLint xoff,
                          GLint x, GLint y, GLsizei width) {
     glCopyTexSubImage2D(target, level, xoff, 0, x, y, width, 1);
 }
+static bool ReadFBRegionRGBA(Context& c, GLuint readFbo, GLint x, GLint y,
+                             GLsizei w, GLsizei h, std::vector<uint8_t>& out);
+// Copy framebuffer → MỘT mip level > 0. Metal render target không ghi trực tiếp
+// vào mip view qua readback path; đọc vùng RGBA rồi upload bằng
+// updateTextureLevel (rare: mip copy, không phải hot path). Chỉ RGBA8/sRGB
+// 4B/px; format khác giữ base (log trung thực, không ghi rác).
+static void CopyFBToTextureMip(Context& c, TextureObject& dst, GLint level,
+                               GLint xoff, GLint yoff, GLint x, GLint y,
+                               GLsizei w, GLsizei h) {
+    if (level < 0) { c.errors.Record(0x0501); return; }
+    if (dst.levels > 0 && level >= (GLint)dst.levels) {
+        c.errors.Record(0x0501); return;
+    }
+    if (w <= 0 || h <= 0) { c.errors.Record(0x0501); return; }
+    uint32_t lw = dst.w >> level, lh = dst.h >> level;
+    if (!lw) lw = 1;
+    if (!lh) lh = 1;
+    if (xoff < 0 || yoff < 0 || x < 0 || y < 0 ||
+        (size_t)(xoff + w) > lw || (size_t)(yoff + h) > lh) {
+        c.errors.Record(0x0501); return;
+    }
+    if (!dst.gpu) { c.errors.Record(0x0502); return; }
+    auto fmt = dst.gpu->pixelFormat();
+    std::vector<uint8_t> reg;
+    if (!ReadFBRegionRGBA(c, c.state.BoundReadFBO(), x, y, w, h, reg)) {
+        c.LogDebug(0, 0, 0, 0, "glCopyTexSubImage: mip source readback fail");
+        return;
+    }
+    if (fmt == metal::PixelFormat::RGBA8Unorm ||
+        fmt == metal::PixelFormat::RGBA8Unorm_sRGB) {
+        if (dst.gpu->levelCount() > (uint32_t)level) {
+            if (!c.device->updateTextureLevel(dst.gpu.get(), (uint32_t)level,
+                                              (uint32_t)xoff, (uint32_t)yoff,
+                                              (uint32_t)w, (uint32_t)h,
+                                              reg.data(), (size_t)w * 4))
+                c.LogDebug(0, 0, 0, 0, "glCopyTexSubImage: mip upload fail");
+        } else {
+            // Legacy texture chỉ có base trên GPU: giữ mip shadow per-level.
+            auto& ml = dst.mipData[level];
+            ml.w = lw; ml.h = lh; ml.d = 1;
+            ml.pixels.assign((size_t)lw * lh * 4, 0);
+            for (GLsizei r = 0; r < h; ++r)
+                memcpy(ml.pixels.data() + ((size_t)(yoff + r) * lw + (size_t)xoff) * 4,
+                       reg.data() + (size_t)r * (size_t)w * 4, (size_t)w * 4);
+        }
+    } else {
+        c.LogDebug(0, 0, 0, 0,
+                   "glCopyTexSubImage: mip level>0 chỉ hỗ trợ RGBA8 (giữ base)");
+    }
+}
 // Copy framebuffer (READ) → texture (blur/post-chain, menu loading đen nếu stub).
 // Quy ước GL-order (hàng 0 = đáy GL) cho cả 2 đầu → copy raw GPU→GPU không flip,
 // rồi sync shadow từ GPU để GetTexImage/ReadPixels sau đó thấy mới.
@@ -1278,7 +1328,7 @@ static void CopyFBToTexture(Context& c, TextureObject& dst, GLint level,
                             GLint xoff, GLint yoff, GLint x, GLint y,
                             GLsizei w, GLsizei h) {
     if (level != 0) {
-        c.LogDebug(0, 0, 0, 0, "glCopyTexSubImage: level>0 bỏ qua (GPU base-level)");
+        CopyFBToTextureMip(c, dst, level, xoff, yoff, x, y, w, h);
         return;
     }
     if (w <= 0 || h <= 0) { c.errors.Record(0x0501); return; }

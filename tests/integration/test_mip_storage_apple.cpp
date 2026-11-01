@@ -56,6 +56,18 @@ int main(){
  ctx.FlushPendingEncoder(); ctx.CommitAndWait();
  glReadPixels(4,4,1,1,0x1908,0x1401,px);
  Check(px[2]>200 && px[0]<50,"render into mip level 1 isolated from base");
+ // glCopyTexSubImage2D level>0: đọc FBO đỏ → upload mip level 1 của tex.
+ glBindFramebuffer(0x8D40,fbo);
+ glFramebufferTexture2D(0x8D40,0x8CE0,0x0DE1,rt,0);
+ glViewport(0,0,8,8); glClearColor(1,0,0,1); glClear(0x4000);
+ glActiveTexture(0x84C0); glBindTexture(0x0DE1,tex);
+ glCopyTexSubImage2D(0x0DE1,1,0,0,0,0,4,4);
+ Check(glGetError()==GL_NO_ERROR,"glCopyTexSubImage2D mip no error");
+ glBindTextureUnit(0,tex);
+ glDrawArrays(0x0004,0,3);
+ ctx.FlushPendingEncoder(); ctx.CommitAndWait();
+ glReadPixels(4,4,1,1,0x1908,0x1401,px);
+ Check(px[0]>200 && px[2]<50,"CopyTexSubImage level 1 samples red");
  // glCopyImageSubData level: copy base level 0 (red) → level 1 của texture khác.
  GLuint dstTex=0; glCreateTextures(0x0DE1,1,&dstTex);
  glTextureStorage2D(dstTex,4,0x8058,8,8);

@@ -57,7 +57,7 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | `glTexBuffer` / `samplerBuffer` | CPU emulated, GPU read | `glTexBuffer` materialises the buffer into a texture when it is bound (`BindBufTex`); the shader then reads it with `.read()` on the GPU |
 | Compressed texture upload (`glCompressedTexImage*`) | No-op accepted | no decompression, no error |
 | `glCopyImageSubData` | GPU | 2D copy between textures, including source/destination mip levels via texture views, plus 3D/array multi-slice copies through `blitCopySlices` (3D uses origin.z, arrays use slices). Same-format GPU blit, otherwise CPU shadow fallback for level-0 2D. |
-| `glCopyTexSubImage2D` / `glCopyTextureSubImage2D` | GPU | read framebuffer → texture copy, then the shadow is refreshed from the GPU |
+| `glCopyTexSubImage2D` / `glCopyTextureSubImage2D` | GPU | read framebuffer → texture copy, then the shadow is refreshed from the GPU. Level 0 uses a GPU blit; level > 0 reads the source region and uploads that mip (RGBA8/sRGB) through `updateTextureLevel`. |
 | `glCopyTexImage*`, `glCopyTexSubImage1D`, `glCopyTexSubImage3D` | No-op accepted | |
 | `glPixelStorei` pack/unpack row length, skip, alignment | CPU emulated | exact spec enums; applied at upload and readback |
 | PBO unpack and pack as byte offsets | CPU emulated | `GL_PIXEL_UNPACK_BUFFER` / `GL_PIXEL_PACK_BUFFER` offsets are honoured |
