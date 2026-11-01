@@ -29,7 +29,7 @@ endif()
 message(STATUS "TGLMT include: ${TGLMT_INCLUDE_DIR}")
 message(STATUS "TGLMT lib (built artifact): ${TGLMT_LIB}")
 
-add_library(aquarium_core STATIC aquarium.cpp)
+add_library(aquarium_core STATIC aquarium.cpp device_tests.cpp)
 target_include_directories(aquarium_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${TGLMT_INCLUDE_DIR})
 
 if(APPLE AND NOT IOS)

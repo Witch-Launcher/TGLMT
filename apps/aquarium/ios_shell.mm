@@ -6,10 +6,12 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #include "aquarium.h"
+#include "device_tests.h"
 #include "tglmt/Context.h"
 #include "tglmt/MetalInterface.h"
 #include "tglmt/gl46.h"
 #include <chrono>
+#include <unistd.h>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
@@ -43,6 +45,12 @@ static void InitLogFile() {
     NSArray* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString* path = [docs[0] stringByAppendingPathComponent:@"aquarium.log"];
     gLogFile = fopen([path UTF8String], "w");
+    if (gLogFile) {
+        setvbuf(gLogFile, nullptr, _IONBF, 0);
+        // TGLMT/Metal ghi chẩn đoán qua stderr; TrollStore không có console nên
+        // đưa luôn stderr vào file để log gửi về đủ.
+        dup2(fileno(gLogFile), STDERR_FILENO);
+    }
 }
 static void LogF(const char* fmt, ...) {
     char buf[1024];
@@ -86,6 +94,32 @@ static void LogF(const char* fmt, ...) {
         self->vh = (int)h;
         self->ctx = new tglmt::Context("apple");
         tglmt::Context::MakeCurrent(self->ctx);
+        // Device acceptance suite: chạy trước benchmark, ghi file riêng để gửi về.
+        {
+            NSArray* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                               NSUserDomainMask, YES);
+            NSString* tpath = [docs[0] stringByAppendingPathComponent:@"tglmt-device-tests.log"];
+            FILE* tf = fopen([tpath UTF8String], "w");
+            if (tf) {
+                UIDevice* ud = [UIDevice currentDevice];
+                fprintf(tf, "device=%s model=%s iOS=%s\n",
+                        [[ud name] UTF8String], [[ud model] UTF8String],
+                        [[ud systemVersion] UTF8String]);
+                fflush(tf);
+                auto sink = [tf](const char* line) {
+                    fprintf(tf, "%s\n", line);
+                    fflush(tf);
+                    LogF("[test] %s", line);
+                };
+                std::string summary = RunDeviceTests(*self->ctx, sink);
+                fprintf(tf, "%s\n", summary.c_str());
+                fflush(tf);
+                fclose(tf);
+                LogF("[test] wrote %s", [tpath UTF8String]);
+            } else {
+                LogF("[test] FAIL fopen %s", [tpath UTF8String]);
+            }
+        }
         // Resolve shader dir robust: chuẩn (name+ofType) trước, rồi các fallback.
         // (IPA thủ công cũ đặt Resources/shaders, CMake mới đặt shaders/).
         NSString* shDir = [[NSBundle mainBundle] pathForResource:@"fish"

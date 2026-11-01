@@ -62,3 +62,18 @@ open apps/aquarium/build-ios/AquariumBench.xcodeproj
 - App link tay thành công ra binary arm64 (chỉ thiếu chữ ký).
 - Render đúng đã chứng minh trên macOS (screenshot `docs/aquarium-shot.png`
   nếu có) + 21/21 tests trên `build-apple` (7 test GPU thật).
+
+## Device acceptance suite + log (TrollStore)
+
+Bản IPA hiện chạy một bộ test thiết bị ngay khi mở app, trước benchmark:
+FBO, 2D array, depth array, 3D texture, copy mip, MSAA resolve, stencil,
+compressed contract, geometry-shader contract, transform-feedback state,
+indirect draw, compute SSBO và fence.
+
+Log nằm trong `Documents` của app (Files app → On My iPhone → AquariumBench,
+hoặc Finder → iPhone → Files → AquariumBench):
+
+- `tglmt-device-tests.log` — PASS/FAIL từng test + SUMMARY.
+- `aquarium.log` — log app, TGLMT và stderr/Metal chẩn đoán.
+
+Mở app, đợi test chạy xong (vài giây), thoát app rồi gửi cả hai file.

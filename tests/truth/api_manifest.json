@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "generated_by": "tools/truth_manifest.py",
-  "git": "9d25111+dirty",
+  "git": "92d98f4+dirty",
   "library": "build/libtglmt.dylib",
   "summary": {
     "core_functions": 698,
