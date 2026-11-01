@@ -37,12 +37,14 @@
     UIProgressView* testProgress;
     UITextView* testLogView;
     UIButton* testClose;
+    UIButton* testShare;
     BOOL testing;
 }
 - (void)startLoop;
 - (void)tick;
 - (void)runDeviceTests;
 - (void)hideTestOverlay;
+- (void)shareLogs;
 @end
 
 // Log file Documents/aquarium.log (lấy qua Files app → gửi chẩn đoán).
@@ -222,6 +224,12 @@ static void LogF(const char* fmt, ...) {
         self->testLogView.selectable = YES;
         self->testLogView.text = @"";
         [self->testOverlay addSubview:self->testLogView];
+        self->testShare = [UIButton buttonWithType:UIButtonTypeSystem];
+        self->testShare.frame = CGRectMake(self.bounds.size.width - 250, self.bounds.size.height - 40, 130, 30);
+        [self->testShare setTitle:@"Chia sẻ log" forState:UIControlStateNormal];
+        [self->testShare addTarget:self action:@selector(shareLogs) forControlEvents:UIControlEventTouchUpInside];
+        self->testShare.hidden = YES;
+        [self->testOverlay addSubview:self->testShare];
         self->testClose = [UIButton buttonWithType:UIButtonTypeSystem];
         self->testClose.frame = CGRectMake(self.bounds.size.width - 110, self.bounds.size.height - 40, 92, 30);
         [self->testClose setTitle:@"Đóng" forState:UIControlStateNormal];
@@ -309,6 +317,31 @@ static void LogF(const char* fmt, ...) {
     self->testOverlay.hidden = YES;
 }
 
+- (void)shareLogs {
+    NSArray* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                       NSUserDomainMask, YES);
+    NSMutableArray* urls = [NSMutableArray array];
+    for (NSString* name in @[@"tglmt-device-tests.log", @"aquarium.log"]) {
+        NSString* path = [docs[0] stringByAppendingPathComponent:name];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path])
+            [urls addObject:[NSURL fileURLWithPath:path]];
+    }
+    if (urls.count == 0) {
+        self->testStatus.text = @"Không tìm thấy file log trong Documents";
+        return;
+    }
+    UIActivityViewController* av = [[UIActivityViewController alloc]
+        initWithActivityItems:urls applicationActivities:nil];
+    av.popoverPresentationController.sourceView = self;
+    av.popoverPresentationController.sourceRect = self->testShare.frame;
+    UIViewController* vc = self.window.rootViewController;
+    if (!vc) {
+        self->testStatus.text = @"Không mở được share sheet";
+        return;
+    }
+    [vc presentViewController:av animated:YES completion:nil];
+}
+
 - (void)appendTestLine:(NSString*)line progress:(float)progress done:(BOOL)done summary:(NSString*)summary {
     if (line.length) {
         NSString* old = self->testLogView.text ?: @"";
@@ -320,6 +353,7 @@ static void LogF(const char* fmt, ...) {
     if (done) {
         self->testStatus.text = summary.length ? summary : @"TEST XONG — gửi file log";
         self->testClose.hidden = NO;
+        self->testShare.hidden = NO;
     }
 }
 
@@ -379,6 +413,7 @@ static void LogF(const char* fmt, ...) {
                     @"XONG (%d fail) — gửi tglmt-device-tests.log + aquarium.log", finalFails];
                 me->testProgress.progress = 1.0f;
                 me->testClose.hidden = NO;
+                me->testShare.hidden = NO;
                 LogF("[test] wrote %s", [tpath UTF8String]);
             });
         }

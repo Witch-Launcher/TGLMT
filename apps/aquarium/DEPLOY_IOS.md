@@ -76,4 +76,10 @@ hoặc Finder → iPhone → Files → AquariumBench):
 - `tglmt-device-tests.log` — PASS/FAIL từng test + SUMMARY.
 - `aquarium.log` — log app, TGLMT và stderr/Metal chẩn đoán.
 
-Mở app, đợi test chạy xong (vài giây), thoát app rồi gửi cả hai file.
+Mở app, đợi test chạy xong (vài giây). Trên overlay bấm **Chia sẻ log** →
+**Lưu vào Tệp** → chọn thư mục iCloud Drive `logTGLMT`, hoặc gửi trực tiếp.
+
+Nếu muốn lấy qua Files: **Duyệt → Vị trí → Trên iPhone của tôi →
+AquariumBench** (đã bật `UIFileSharingEnabled` +
+`LSSupportsOpeningDocumentsInPlace`). Nếu mục này vẫn ẩn, dùng nút
+**Chia sẻ log** — không cần entitlement iCloud.
