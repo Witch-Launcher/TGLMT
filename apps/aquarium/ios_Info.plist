@@ -70,6 +70,7 @@
     <key>MinimumOSVersion</key><string>16.0</string>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>UIFileSharingEnabled</key><true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key><true/>
     <!-- UIDeviceFamily cố ý KHÔNG khai ở đây: Xcode ghi đè từ build setting
          TARGETED_DEVICE_FAMILY (1,2) và sẽ cảnh báo nếu plist tự khai.
          Script đóng gói chèn lại key này khi build tay (ngoài Xcode). -->
