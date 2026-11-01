@@ -32,9 +32,17 @@
     std::chrono::steady_clock::time_point t0;
     BOOL doSelftest;
     BOOL selftestDone;
+    UIView* testOverlay;
+    UILabel* testStatus;
+    UIProgressView* testProgress;
+    UITextView* testLogView;
+    UIButton* testClose;
+    BOOL testing;
 }
 - (void)startLoop;
 - (void)tick;
+- (void)runDeviceTests;
+- (void)hideTestOverlay;
 @end
 
 // Log file Documents/aquarium.log (lấy qua Files app → gửi chẩn đoán).
@@ -94,32 +102,6 @@ static void LogF(const char* fmt, ...) {
         self->vh = (int)h;
         self->ctx = new tglmt::Context("apple");
         tglmt::Context::MakeCurrent(self->ctx);
-        // Device acceptance suite: chạy trước benchmark, ghi file riêng để gửi về.
-        {
-            NSArray* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
-                                                               NSUserDomainMask, YES);
-            NSString* tpath = [docs[0] stringByAppendingPathComponent:@"tglmt-device-tests.log"];
-            FILE* tf = fopen([tpath UTF8String], "w");
-            if (tf) {
-                UIDevice* ud = [UIDevice currentDevice];
-                fprintf(tf, "device=%s model=%s iOS=%s\n",
-                        [[ud name] UTF8String], [[ud model] UTF8String],
-                        [[ud systemVersion] UTF8String]);
-                fflush(tf);
-                auto sink = [tf](const char* line) {
-                    fprintf(tf, "%s\n", line);
-                    fflush(tf);
-                    LogF("[test] %s", line);
-                };
-                std::string summary = RunDeviceTests(*self->ctx, sink);
-                fprintf(tf, "%s\n", summary.c_str());
-                fflush(tf);
-                fclose(tf);
-                LogF("[test] wrote %s", [tpath UTF8String]);
-            } else {
-                LogF("[test] FAIL fopen %s", [tpath UTF8String]);
-            }
-        }
         // Resolve shader dir robust: chuẩn (name+ofType) trước, rồi các fallback.
         // (IPA thủ công cũ đặt Resources/shaders, CMake mới đặt shaders/).
         NSString* shDir = [[NSBundle mainBundle] pathForResource:@"fish"
@@ -210,15 +192,54 @@ static void LogF(const char* fmt, ...) {
         self->lastT = CACurrentMediaTime();
         self->frames = 0;
         self->t0 = std::chrono::steady_clock::now();
+        self->testing = NO;
+
+        // Overlay test: hiện tiến trình + log ngay trên màn hình, không phụ thuộc Metal.
+        self->testOverlay = [[UIView alloc] initWithFrame:self.bounds];
+        self->testOverlay.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+                                             UIViewAutoresizingFlexibleHeight;
+        self->testOverlay.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.78];
+        UILabel* title = [[UILabel alloc] initWithFrame:CGRectMake(18, 26, self.bounds.size.width - 36, 28)];
+        title.text = @"TGLMT device tests";
+        title.textColor = [UIColor whiteColor];
+        title.font = [UIFont boldSystemFontOfSize:18];
+        [self->testOverlay addSubview:title];
+        self->testStatus = [[UILabel alloc] initWithFrame:CGRectMake(18, 58, self.bounds.size.width - 36, 24)];
+        self->testStatus.text = @"Đang chờ bắt đầu...";
+        self->testStatus.textColor = [UIColor colorWithWhite:0.85 alpha:1.0];
+        self->testStatus.font = [UIFont systemFontOfSize:13];
+        [self->testOverlay addSubview:self->testStatus];
+        self->testProgress = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+        self->testProgress.frame = CGRectMake(18, 90, self.bounds.size.width - 36, 4);
+        self->testProgress.progress = 0.0f;
+        [self->testOverlay addSubview:self->testProgress];
+        self->testLogView = [[UITextView alloc] initWithFrame:CGRectMake(12, 108, self.bounds.size.width - 24, self.bounds.size.height - 156)];
+        self->testLogView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self->testLogView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
+        self->testLogView.textColor = [UIColor colorWithWhite:0.92 alpha:1.0];
+        self->testLogView.font = [UIFont fontWithName:@"Menlo" size:9.0];
+        self->testLogView.editable = NO;
+        self->testLogView.selectable = YES;
+        self->testLogView.text = @"";
+        [self->testOverlay addSubview:self->testLogView];
+        self->testClose = [UIButton buttonWithType:UIButtonTypeSystem];
+        self->testClose.frame = CGRectMake(self.bounds.size.width - 110, self.bounds.size.height - 40, 92, 30);
+        [self->testClose setTitle:@"Đóng" forState:UIControlStateNormal];
+        [self->testClose addTarget:self action:@selector(hideTestOverlay) forControlEvents:UIControlEventTouchUpInside];
+        self->testClose.hidden = YES;
+        [self->testOverlay addSubview:self->testClose];
+        [self addSubview:self->testOverlay];
     }
     return self;
 }
 - (void)startLoop {
     self->link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
     [self->link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
+    [self runDeviceTests];
 }
 - (void)tick {
     double now = CACurrentMediaTime();
+    if (self->testing) { self->lastT = now; return; }
     double dt = now - self->lastT;
     self->lastT = now;
     if (dt <= 0 || dt > 0.25) dt = 1.0 / 60;
@@ -282,6 +303,86 @@ static void LogF(const char* fmt, ...) {
              (unsigned long long)st.noPipeline, (unsigned long long)st.noTarget,
              (unsigned long long)st.miscFail, aquarium::ProgStatsString());
     }
+}
+
+- (void)hideTestOverlay {
+    self->testOverlay.hidden = YES;
+}
+
+- (void)appendTestLine:(NSString*)line progress:(float)progress done:(BOOL)done summary:(NSString*)summary {
+    if (line.length) {
+        NSString* old = self->testLogView.text ?: @"";
+        self->testLogView.text = [old stringByAppendingFormat:@"%@\n", line];
+        NSRange end = NSMakeRange(self->testLogView.text.length, 0);
+        [self->testLogView scrollRangeToVisible:end];
+    }
+    self->testProgress.progress = progress;
+    if (done) {
+        self->testStatus.text = summary.length ? summary : @"TEST XONG — gửi file log";
+        self->testClose.hidden = NO;
+    }
+}
+
+- (void)runDeviceTests {
+    self->testing = YES;
+    __weak AquariumView* weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            NSArray* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                               NSUserDomainMask, YES);
+            NSString* tpath = [docs[0] stringByAppendingPathComponent:@"tglmt-device-tests.log"];
+            FILE* tf = fopen([tpath UTF8String], "w");
+            UIDevice* ud = [UIDevice currentDevice];
+            if (tf) {
+                fprintf(tf, "device=%s model=%s iOS=%s\n",
+                        [[ud name] UTF8String], [[ud model] UTF8String],
+                        [[ud systemVersion] UTF8String]);
+                fflush(tf);
+            }
+            int checks = 0;
+            int fails = 0;
+            auto sink = [tf, weakSelf, &checks, &fails](const char* raw) {
+                NSString* line = [NSString stringWithUTF8String:raw ? raw : ""];
+                if ([line hasPrefix:@"PASS "] || [line hasPrefix:@"FAIL "] ||
+                    [line hasPrefix:@"SKIP "]) {
+                    ++checks;
+                    if ([line hasPrefix:@"FAIL "]) ++fails;
+                }
+                if (tf) { fprintf(tf, "%s\n", raw ? raw : ""); fflush(tf); }
+                BOOL done = [line hasPrefix:@"=== SUMMARY"];
+                float p = done ? 1.0f : MIN(1.0f, (float)checks / 30.0f);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    AquariumView* me = weakSelf;
+                    if (!me) return;
+                    LogF("[test] %s", raw ? raw : "");
+                    [me appendTestLine:line progress:p done:done summary:line];
+                });
+            };
+            std::string summary;
+            tglmt::Context* tc = new tglmt::Context("apple");
+            if (!tc || tc->device->isNull()) {
+                summary = "SKIP no Metal device";
+                sink("SKIP no Metal device");
+            } else {
+                tglmt::Context::MakeCurrent(tc);
+                summary = RunDeviceTests(*tc, sink);
+                tglmt::Context::MakeCurrent(nullptr);
+            }
+            delete tc;
+            if (tf) { fprintf(tf, "%s\n", summary.c_str()); fflush(tf); fclose(tf); }
+            int finalFails = fails;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AquariumView* me = weakSelf;
+                if (!me) return;
+                me->testing = NO;
+                me->testStatus.text = [NSString stringWithFormat:
+                    @"XONG (%d fail) — gửi tglmt-device-tests.log + aquarium.log", finalFails];
+                me->testProgress.progress = 1.0f;
+                me->testClose.hidden = NO;
+                LogF("[test] wrote %s", [tpath UTF8String]);
+            });
+        }
+    });
 }
 @end
 
