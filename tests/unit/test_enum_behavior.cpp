@@ -39,7 +39,7 @@ static const char* kBatch7[] = {"GL_ARB_get_program_binary"};
 static const char* kBatch8[] = {
     "GL_ARB_texture_mirror_clamp_to_edge", "GL_EXT_texture_mirror_clamp_to_edge",
     "GL_ARB_texture_swizzle",
-    "GL_ARB_draw_elements_base_vertex", "GL_ARB_copy_image",
+    "GL_ARB_draw_elements_base_vertex",
     "GL_ARB_get_texture_sub_image", "GL_ARB_multi_draw_indirect",
     "GL_ARB_texture_buffer_range", "GL_ARB_vertex_attrib_binding",
     "GL_ARB_sync", "GL_ARB_timer_query", "GL_NV_polygon_mode",
@@ -132,7 +132,7 @@ int main() {
         glVertexAttribPointer(0, 4, t.type, GL_TRUE, 0, nullptr);
         Check(glGetError() == 0, "attrib type không INVALID_ENUM");
         GLenum got = 0;
-        glGetVertexAttribiv(0, 0x8626 /*ARRAY_TYPE*/, (GLint*)&got);
+        glGetVertexAttribiv(0, 0x8625 /*VERTEX_ATTRIB_ARRAY_TYPE*/, (GLint*)&got);
         Check(got == t.want, "attrib type store đúng");
     }
     glBindVertexArray(0); glDeleteVertexArrays(1, &vao);
@@ -287,23 +287,30 @@ int main() {
 
         // 8b. GL_ARB_sync: fence object thật + glGetSynciv.
         while (glGetError() != 0) {}
-        GLsync sync = glFenceSync(0x911E /*SYNC_GPU_COMMANDS_COMPLETE*/, 0);
+        GLsync sync = glFenceSync(0x9117 /*SYNC_GPU_COMMANDS_COMPLETE*/, 0);
         Check(sync != nullptr && glIsSync(sync) == GL_TRUE, "glFenceSync tạo object thật");
         Check(glGetError() == 0, "glFenceSync không lỗi");
-        GLint64 timeoutVal = 0;
         GLsizei len = 0;
-        glGetSynciv(sync, 0x9116 /*SYNC_STATUS*/, 1, &len, (GLint*)&timeoutVal);
-        Check(glGetSynciv != nullptr, "glGetSynciv resolvable");
+        GLint objType = 0, condition = 0, status = 0, flags = 1;
+        glGetSynciv(sync, 0x9112 /*OBJECT_TYPE*/, 1, &len, &objType);
+        Check(len == 1 && objType == 0x9116 /*SYNC_FENCE*/, "glGetSynciv OBJECT_TYPE");
+        glGetSynciv(sync, 0x9113 /*SYNC_CONDITION*/, 1, &len, &condition);
+        Check(condition == 0x9117 /*SYNC_GPU_COMMANDS_COMPLETE*/, "glGetSynciv SYNC_CONDITION");
+        glGetSynciv(sync, 0x9114 /*SYNC_STATUS*/, 1, &len, &status);
+        Check(status == 0x9119 /*SIGNALED*/, "glGetSynciv SYNC_STATUS poll");
+        glGetSynciv(sync, 0x9115 /*SYNC_FLAGS*/, 1, &len, &flags);
+        Check(flags == 0, "glGetSynciv SYNC_FLAGS");
+        Check(glGetError() == 0, "glGetSynciv không lỗi");
         glDeleteSync(sync);
 
         // 8c. GL_ARB_timer_query: glQueryCounter thật (timestamp CPU).
         while (glGetError() != 0) {}
         GLuint q = 0;
         glGenQueries(1, &q);
-        glQueryCounter(q, 0x8E56 /*TIMESTAMP*/);
+        glQueryCounter(q, 0x8E28 /*TIMESTAMP*/);
         Check(glGetError() == 0, "glQueryCounter TIMESTAMP không lỗi");
         GLint64 ts = 0;
-        glGetQueryObjecti64v(q, 0x88BF /*QUERY_RESULT*/, &ts);
+        glGetQueryObjecti64v(q, 0x8866 /*QUERY_RESULT*/, &ts);
         Check(glGetError() == 0, "glGetQueryObjecti64v TIMESTAMP không lỗi");
         glDeleteQueries(1, &q);
 

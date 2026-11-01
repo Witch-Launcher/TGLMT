@@ -143,22 +143,70 @@ void glReadnPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, 
 // --- misc state ---
 void glClampColor(GLenum t, GLenum cl) { Context::Current().state.SetShadow(t, &cl, 4); }
 void glProvokingVertex(GLenum m) { Context::Current().state.SetShadow(0x8E4F /*PROVOKING_VERTEX*/, &m, 4); }
-void glTextureBarrier() {} // Metal: encoder barrier — Null: no-op (đúng vì không có hazard CPU)
+void glTextureBarrier() {
+    Context& c = Context::Current();
+    // Metal không có lệnh barrier cấp texture như GL. Đóng encoder hiện tại
+    // (end + commitNoWait) là điểm thứ tự đủ mạnh: command buffer cùng queue
+    // chạy in-order và Metal hazard-track resource, nên draw/read sau barrier
+    // thấy write trước barrier. Null backend không có hazard GPU → no-op.
+    if (c.device && !c.device->isNull()) c.FlushPendingEncoder();
+}
 void glReleaseShaderCompiler() {}
 void glShaderBinary(GLsizei n, const GLuint* s, GLenum f, const void* b, GLsizei l) {
     (void)n;(void)s;(void)f;(void)b;(void)l;
     Context::Current().LogDebug(0,0,0,0,"glShaderBinary: binary format lạ → dùng glShaderSource thay thế");
 }
-void glTexImage2DMultisample(GLenum t, GLsizei s, GLenum inf, GLsizei w, GLsizei h, GLboolean f) {
-    (void)t;(void)s;(void)inf;(void)w;(void)h;(void)f;
+static GLuint PipeStage(const ProgramPipelineObject& pp, GLenum q) {
+    GLbitfield bit = 0;
+    switch (q) {
+        case 0x8B31: bit = 0x1; break;  // VERTEX_SHADER
+        case 0x8B30: bit = 0x2; break;  // FRAGMENT_SHADER
+        case 0x8DD9: bit = 0x4; break;  // GEOMETRY_SHADER
+        case 0x8E88: bit = 0x8; break;  // TESS_CONTROL_SHADER
+        case 0x8E87: bit = 0x10; break; // TESS_EVALUATION_SHADER
+        case 0x91B9: bit = 0x20; break; // COMPUTE_SHADER
+        default: return 0;
+    }
+    auto it = pp.stagePrograms.find(bit);
+    return it == pp.stagePrograms.end() ? 0 : it->second;
 }
-void glTexImage3DMultisample(GLenum t, GLsizei s, GLenum inf, GLsizei w, GLsizei h, GLsizei d, GLboolean f) {
-    (void)t;(void)s;(void)inf;(void)w;(void)h;(void)d;(void)f;
+void glValidateProgramPipeline(GLuint p) {
+    Context& c = Context::Current();
+    auto it = c.pipelines.find(p);
+    if (it == c.pipelines.end()) { c.errors.Record(0x0502); return; }
+    bool ok = true;
+    for (GLbitfield bit : {0x1u, 0x2u}) {
+        auto st = it->second.stagePrograms.find(bit);
+        if (st == it->second.stagePrograms.end() || st->second == 0) { ok = false; break; }
+        auto pit = c.programs.find(st->second);
+        if (pit == c.programs.end() || !pit->second.linked) { ok = false; break; }
+    }
+    it->second.validateStatus = ok ? 1 : 0;
+    it->second.infoLog = ok ? "" : "error: pipeline requires linked vertex and fragment stages";
 }
-void glValidateProgramPipeline(GLuint p) { (void)p; }
-void glGetProgramPipelineiv(GLuint p, GLenum q, GLint* v) { (void)p;(void)q; *v=0; }
+void glGetProgramPipelineiv(GLuint p, GLenum q, GLint* v) {
+    Context& c = Context::Current();
+    auto it = c.pipelines.find(p);
+    if (it == c.pipelines.end()) { c.errors.Record(0x0502); return; }
+    if (!v) return;
+    switch (q) {
+        case 0x8259: *v = (GLint)it->second.activeProgram; break; // ACTIVE_PROGRAM
+        case 0x8B31: case 0x8B30: case 0x8DD9:
+        case 0x8E88: case 0x8E87: case 0x91B9:
+            *v = (GLint)PipeStage(it->second, q); break;
+        case 0x8B83: *v = (GLint)it->second.validateStatus; break; // VALIDATE_STATUS
+        case 0x8B84: *v = (GLint)it->second.infoLog.size() + 1; break; // INFO_LOG_LENGTH
+        default: c.errors.Record(0x0500); break;
+    }
+}
 void glGetProgramPipelineInfoLog(GLuint p, GLsizei n, GLsizei* l, GLchar* log) {
-    (void)p; if(l)*l=0; if(log&&n>0)log[0]=0;
+    Context& c = Context::Current();
+    auto it = c.pipelines.find(p);
+    if (it == c.pipelines.end()) { c.errors.Record(0x0502); if (l) *l = 0; return; }
+    GLsizei k = (n > 0) ? std::min<GLsizei>(n - 1, (GLsizei)it->second.infoLog.size()) : 0;
+    if (log && k > 0) memcpy(log, it->second.infoLog.data(), (size_t)k);
+    if (log && n > 0) log[k] = 0;
+    if (l) *l = k;
 }
 // --- buffer textures: Metal buffer-backed texture (newTextureWithBuffer) ---
 static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {

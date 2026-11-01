@@ -22,13 +22,13 @@ CPU), mipmap generation, `ReadPixels`/`GetTexImage` roundtrip.
 | Compute stage | ✅ Works (P6f): kernel, SSBO, image, dispatch — ARB_compute_shader |
 | Transform feedback | State machine + draw count only, no varying capture |
 | `glLogicOp` | Shadow only (compute-ROP shader exists but is not wired to draws) |
-| Stencil test | Tracked, not encoded |
+| Stencil test | GPU: encoded in depth-stencil state; a single Metal reference value is shared by front/back faces |
 | `glColorMask` | No-op (no write-mask bake) |
 | Per-attachment blend beyond 0, `ClearBuffer` on MRT > 0 | Single-target only |
-| Compressed / 3D / multisample texture storage | No-op or RGBA8 fallback with log |
+| Compressed / 3D / multisample texture storage | Compressed and MSAA 3D/array rejected; 2D MSAA, 3D textures and mip chains implemented |
 | `ReadPixels` | RGBA/BGRA + `UNSIGNED_BYTE` only |
 | Dual-source blend factors | Fall back to ONE/ADD |
-| `baseInstance != 0` | Trace-only |
+| `baseInstance != 0` | GPU via `drawIndexedBaseInstance` / `drawPrimitivesBaseInstance` |
 | `UNSIGNED_INT_10F_11F_11F_REV` packed vertex | Normalized approximation, logged |
 
 ## Device notes (A11 baseline)

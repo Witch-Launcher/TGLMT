@@ -10,7 +10,13 @@
 using namespace tglmt;
 
 static ProgramObject* CurProg(Context& c) {
-    GLuint p = c.state.BoundProgram();
+    GLuint p = 0;
+    GLuint pl = 0;
+    if (c.state.GetShadow(0x8254 /*PROGRAM_PIPELINE_BINDING*/, &pl, 4) && pl) {
+        auto pit = c.pipelines.find(pl);
+        if (pit != c.pipelines.end()) p = pit->second.activeProgram;
+    }
+    if (!p) p = c.state.BoundProgram(); // tương thích app SSO dùng glUseProgram
     if (!p) { c.errors.Record(0x0502); return nullptr; }
     auto it = c.programs.find(p);
     if (it == c.programs.end()) { c.errors.Record(0x0502); return nullptr; }
@@ -226,7 +232,40 @@ void glUniformMatrix4x2fv(GLint l, GLsizei n, GLboolean t, const GLfloat* v) { (
 void glUniformMatrix4x2dv(GLint l, GLsizei n, GLboolean t, const GLdouble* v) { (void)t; Context& c=Context::Current(); if(auto* pr=CurProg(c)) SetU(*pr,l,v,(size_t)n*64); }
 void glUniformMatrix4x3fv(GLint l, GLsizei n, GLboolean t, const GLfloat* v) { (void)t; Context& c=Context::Current(); if(auto* pr=CurProg(c)) SetU(*pr,l,v,(size_t)n*48); }
 void glUniformMatrix4x3dv(GLint l, GLsizei n, GLboolean t, const GLdouble* v) { (void)t; Context& c=Context::Current(); if(auto* pr=CurProg(c)) SetU(*pr,l,v,(size_t)n*96); }
-void glUniformSubroutinesuiv(GLenum a, GLsizei b, const GLuint* c_) { (void)a;(void)b;(void)c_; }
+void glUniformSubroutinesuiv(GLenum a, GLsizei b, const GLuint* c_) {
+    Context& c = Context::Current();
+    if (!(a == 0x8B31 || a == 0x8B30 || a == 0x8DD9 || a == 0x8E88 || a == 0x8E87)) {
+        c.errors.Record(0x0500); return; // INVALID_ENUM
+    }
+    ProgramObject* pr = CurProg(c);
+    if (!pr) return;
+    auto si = pr->subroutines.find(a);
+    if (si == pr->subroutines.end()) { c.errors.Record(0x0502); return; }
+    auto& info = si->second;
+    if (b != (GLsizei)info.uniforms.size() || (b > 0 && !c_)) {
+        c.errors.Record(0x0501); return; // count phải bằng số active subroutine uniform
+    }
+    // Validate toàn bộ trước khi ghi (tránh nửa state khi index sai).
+    std::vector<GLint> ordinals((size_t)b);
+    for (GLsizei i = 0; i < b; ++i) {
+        if (c_[i] >= info.impls.size()) { c.errors.Record(0x0501); return; }
+        auto& ty = info.uniforms[(size_t)i].second;
+        auto ti = info.typeImpls.find(ty);
+        if (ti == info.typeImpls.end()) { c.errors.Record(0x0502); return; }
+        const std::string& fn = info.impls[c_[i]];
+        int ord = -1;
+        for (size_t k = 0; k < ti->second.size(); ++k)
+            if (ti->second[k] == fn) { ord = (int)k; break; }
+        if (ord < 0) { c.errors.Record(0x0502); return; } // index khác type
+        ordinals[(size_t)i] = ord;
+    }
+    for (GLsizei i = 0; i < b; ++i) {
+        auto li = pr->uniformLoc.find(info.uniforms[(size_t)i].first);
+        if (li == pr->uniformLoc.end()) continue;
+        pr->uniforms[li->second].assign((const uint8_t*)&ordinals[(size_t)i],
+                                              (const uint8_t*)&ordinals[(size_t)i] + 4);
+    }
+}
 // ProgramUniform DSA — cập nhật program không cần bind
 #define PU1(func, T, N) void func(GLuint p, GLint l, T v) { Context& c=Context::Current(); auto it=c.programs.find(p); if(it==c.programs.end()){c.errors.Record(0x0502);return;} SetU(it->second,l,&v,sizeof(v)); if constexpr (std::is_same<T,GLint>::value) TrackSamplerUnit(it->second,l,v); (void)N; }
 PU1(glProgramUniform1f, GLfloat, 1) PU1(glProgramUniform1i, GLint, 1)

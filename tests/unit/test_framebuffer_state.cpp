@@ -25,7 +25,7 @@ int main() {
     glPolygonOffsetClamp(1.0f, 1.0f, 0.5f); // GL 4.6 mới
     glClipControl(0x8CA0, 0x8CA1);
     // sync + query
-    tglmt::GLsync s = glFenceSync(0x9116, 0);
+    tglmt::GLsync s = glFenceSync(0x9117, 0); // SYNC_GPU_COMMANDS_COMPLETE
     assert(glIsSync(s) == 1);
     assert(glClientWaitSync(s, 0, 1000) == 0x911A); // ALREADY_SIGNALED (Null)
     tglmt::GLuint q; glGenQueries(1, &q);

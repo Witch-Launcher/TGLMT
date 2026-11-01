@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <unistd.h>
 
 static int gFails = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); ++gFails; } } while (0)
@@ -76,16 +77,28 @@ int main() {
 
     // 4) Biên dịch MSL thật nếu toolchain sẵn (probe như test_frag_out_scalar).
     if (r1.ok && Run("xcrun --sdk macosx --find metal >/dev/null 2>&1")) {
-        { FILE* f = fopen("/tmp/tglmt-overload-probe.msl", "w");
+        // Per-process paths: ctest -j runs several metal compiles at once. Fixed
+        // /tmp names made this test fail sporadically under parallel load.
+        const std::string base = "/tmp/tglmt-overload-" + std::to_string((long)getpid());
+        const std::string probeMsl = base + "-probe.msl";
+        const std::string probeAir = base + "-probe.air";
+        const std::string pow2Msl = base + "-pow2.msl";
+        const std::string pow2Air = base + "-pow2.air";
+        { FILE* f = fopen(probeMsl.c_str(), "w");
           if (f) { fputs("#include <metal_stdlib>\nusing namespace metal;\nkernel void probe(){}\n", f); fclose(f); } }
-        if (Run("xcrun -sdk macosx metal -c /tmp/tglmt-overload-probe.msl -o /tmp/tglmt-overload-probe.air >/dev/null 2>&1")) {
-            FILE* f = fopen("/tmp/tglmt-overload-pow2.msl", "w");
+        const std::string probeCmd = "xcrun -sdk macosx metal -c " + probeMsl +
+                                     " -o " + probeAir + " >/dev/null 2>&1";
+        if (Run(probeCmd)) {
+            FILE* f = fopen(pow2Msl.c_str(), "w");
             if (f) { fputs(r1.msl.c_str(), f); fclose(f); }
-            CHECK(Run("xcrun -sdk macosx metal -c /tmp/tglmt-overload-pow2.msl -o /tmp/tglmt-overload-pow2.air >/dev/null 2>&1"),
-                  "MSL pow2 overloads biên dịch được (metal -c)");
+            const std::string pow2Cmd = "xcrun -sdk macosx metal -c " + pow2Msl +
+                                        " -o " + pow2Air + " >/dev/null 2>&1";
+            CHECK(Run(pow2Cmd), "MSL pow2 overloads biên dịch được (metal -c)");
         } else {
             printf("SKIP: metal toolchain thiếu component\n");
         }
+        std::remove(probeMsl.c_str()); std::remove(probeAir.c_str());
+        std::remove(pow2Msl.c_str()); std::remove(pow2Air.c_str());
     }
 
     if (gFails) { printf("test_helper_overloads FAIL (%d)\n", gFails); return 1; }

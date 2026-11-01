@@ -48,6 +48,7 @@ MANUAL_IPA      ?= $(APP_DIR)/AquariumBench-manual$(IPA_SUFFIX).ipa
 SDK             := $(shell xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
 SDK_VERSION     := $(shell xcrun --sdk iphoneos --show-sdk-version 2>/dev/null)
 VERIFY          ?= scripts/verify_ipa_trollstore.py
+LIB_AUDIT       ?= $(ROOT)/build/libtglmt.dylib
 
 CXX_IOS         := xcrun --sdk iphoneos clang++
 CXXFLAGS_IOS    := -arch arm64 -miphoneos-version-min=$(DEPLOY_TARGET) -std=c++17 -O2 -fobjc-arc
@@ -55,7 +56,7 @@ FRAMEWORKS_IOS  := -framework UIKit -framework Foundation -framework QuartzCore 
 
 .PHONY: all ipa ipa-xcode ipa-manual ipa-ios15 app verify check verify-plist \
         help check-tools icons lib-ios lib-mac app-mac test xcode-project xcode-app \
-        diagnose clean distclean
+        audit truth probe diagnose clean distclean
 
 all: ipa
 
@@ -69,6 +70,9 @@ help:
 	@echo "    make verify          Verify lại IPA đã build (không build)"
 	@echo "    make diagnose        Verify + checklist khi máy vẫn báo lỗi 181"
 	@echo "    make test            Build + chạy unit/integration test trên macOS"
+	@echo "    make audit           Kiểm tra truth: symbol / dlsym / no-op / manifest (fail nếu nói dối)"
+	@echo "    make truth           Sinh lại docs/EXTENSION_MATRIX.md + docs/TRUTH_MANIFEST.md"
+	@echo "    make probe           Chạy runtime probe cho các static gap (diagnostic, không fail)"
 	@echo ""
 	@echo "  Thành phần:"
 	@echo "    make check-tools     Kiểm tra toolchain (cmake/xcodebuild/Pillow/zip)"
@@ -139,6 +143,27 @@ app-mac: lib-mac
 
 test:
 	@sh "$(ROOT)/scripts/build_and_test.sh"
+
+# Truth gates. These are intentionally cheap (no Metal work) and safe for CI:
+# they prove symbol/dlsym/advertise consistency, not behavior correctness.
+audit:
+	@test -f "$(LIB_AUDIT)" || { echo "Thiếu $(LIB_AUDIT) — chạy 'make test' hoặc build trước"; exit 1; }
+	@python3 tools/ext_coverage.py --dlsym "$(LIB_AUDIT)"
+	@python3 tools/ext_behavior_audit.py
+	@python3 tools/ext_matrix.py --lib "$(LIB_AUDIT)" --strict
+	@python3 tools/truth_manifest.py --lib "$(LIB_AUDIT)" --strict
+
+# Runtime probe for known static gaps. Diagnostic only: gaps print GAP and
+# the command exits 0; a fix flips the line to PASS.
+probe:
+	@cmake --build build --target truth_probe -j8 >/dev/null
+	@./build/truth_probe
+
+# Regenerate the generated truth docs from the current build. Review the diff.
+truth:
+	@test -f "$(LIB_AUDIT)" || { echo "Thiếu $(LIB_AUDIT) — chạy 'make test' hoặc build trước"; exit 1; }
+	@python3 tools/ext_matrix.py --lib "$(LIB_AUDIT)" --write
+	@python3 tools/truth_manifest.py --lib "$(LIB_AUDIT)" --write
 
 # ------------------------------------------------------- iOS app chuẩn (Xcode) --
 

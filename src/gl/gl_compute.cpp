@@ -2,6 +2,7 @@
 // gl_memory.cpp gộp chung: MemoryBarrier → MTLBarrier/memoryBarrierWithScope.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include <unordered_set>
 #include <cstring>
 #include <cstdio>
 using namespace tglmt;
@@ -210,6 +211,45 @@ static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
         }
         if (b) enc->setBuffer(b, (uint32_t)as.slot, (size_t)as.offset);
     }
+    { // Chẩn đoán: in binding SSBO/UBO lần đầu mỗi program để soi PageFault
+        static std::unordered_set<GLuint> loggedBind;
+        if (loggedBind.insert(progId).second) {
+            fprintf(stderr, "[TGLMT] cbind prog@%u grid=%ux%ux%u blocks=%zu atomics=%zu\n",
+                    progId, (unsigned)x, (unsigned)y, (unsigned)z,
+                    pr.computeBlockSlots.size(), pr.computeAtomics.size());
+            for (auto& bs : pr.computeBlockSlots) {
+                GLuint bind = bs.isStorage ? pr.EffectiveSsboBinding(bs.name, bs.binding)
+                                           : (GLuint)(bs.binding < 0 ? 0 : bs.binding);
+                auto& map = bs.isStorage ? c.storageBindPoints : c.uniformBindPoints;
+                auto it = map.find(bind);
+                GLuint buf = it == map.end() ? 0 : it->second.buffer;
+                size_t off = it == map.end() ? 0 : (size_t)it->second.offset;
+                size_t len = 0;
+                auto bit = c.buffers.find(buf);
+                if (bit != c.buffers.end()) len = BufferLen(bit->second);
+                fprintf(stderr, "[TGLMT] cbind %s slot=%d bind=%u name=%s buf=%u len=%zu off=%zu",
+                        bs.isStorage ? "SSBO" : "UBO", bs.slot, bind, bs.name.c_str(), buf, len, off);
+                auto bit2 = c.buffers.find(buf);
+                if (bit2 != c.buffers.end() && len >= 4 && len <= (1u << 20)) {
+                    const uint8_t* pv = BufferBytes(bit2->second);
+                    if (pv) {
+                        fprintf(stderr, " data=");
+                        for (size_t w = 0; w < 8 && w * 4 + 4 <= len; ++w) {
+                            uint32_t v; memcpy(&v, pv + w * 4, 4);
+                            fprintf(stderr, "%u%s", v, (w == 7 || w * 4 + 8 > len) ? "" : ",");
+                        }
+                    }
+                }
+                fprintf(stderr, "\n");
+            }
+            for (auto& u : pr.uniforms) {
+                if (u.second.size() >= 4)
+                    fprintf(stderr, "[TGLMT] cuni loc=%d size=%zu u0=%u\n",
+                            (int)u.first, u.second.size(), *(const uint32_t*)u.second.data());
+            }
+            fflush(stderr);
+        }
+    }
     // Texture + sampler: computeSamplers theo thứ tự khai báo = texture/sampler slot k.
     auto ssDef = DefSampler(c);
     auto black = BlackTex(c);
@@ -259,6 +299,12 @@ static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
         ls0 = (uint32_t)(pr.computeLocalSize[0] > 0 ? pr.computeLocalSize[0] : 1);
         ls1 = (uint32_t)(pr.computeLocalSize[1] > 0 ? pr.computeLocalSize[1] : 1);
         ls2 = (uint32_t)(pr.computeLocalSize[2] > 0 ? pr.computeLocalSize[2] : 1);
+    }
+    { // compute ít lần/frame → luôn ghi context cho FIRST-fault, không cần DIAG
+        char nb[160];
+        snprintf(nb, sizeof(nb), "compute prog@%u grid=%ux%ux%u local=%ux%ux%u",
+                 progId, (unsigned)x, (unsigned)y, (unsigned)z, ls0, ls1, ls2);
+        c.device->noteDrawContext(nb);
     }
     // GL §7.12.1: bất kỳ num_groups nào = 0 → không có work (skip hẳn — Metal
     // dispatchThreads fault khi grid 0, và clamp lên 1 sẽ dispatch SAI theo GL).
@@ -399,6 +445,12 @@ void glDispatchComputeIndirect(GLintptr ind) {
     uint32_t ls0 = (uint32_t)(pr.computeLocalSize[0] > 0 ? pr.computeLocalSize[0] : 1);
     uint32_t ls1 = (uint32_t)(pr.computeLocalSize[1] > 0 ? pr.computeLocalSize[1] : 1);
     uint32_t ls2 = (uint32_t)(pr.computeLocalSize[2] > 0 ? pr.computeLocalSize[2] : 1);
+    {
+        char nb[128];
+        snprintf(nb, sizeof(nb), "compute-indirect prog@%u offset=%lld local=%ux%ux%u",
+                 progId, (long long)ind, ls0, ls1, ls2);
+        c.device->noteDrawContext(nb);
+    }
     enc->dispatchThreadgroupsIndirect(gpu, (size_t)ind, ls0, ls1, ls2);
     ++c.appleStats.computeDispatches;
     if (syncMode) enc->endAndCommit();

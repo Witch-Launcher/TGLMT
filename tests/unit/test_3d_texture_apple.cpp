@@ -183,6 +183,27 @@ int main() {
     glTexSubImage3D(0x806F, 0, 0, 0, 3, 4, 4, 2, 0x1908, 0x1401, nullptr);
     Check(glGetError() == 0x0501, "SubImage3D vượt depth → INVALID_VALUE");
 
+    // (4) glCopyImageSubData 3D nhiều slice + offset z (blitCopySlices).
+    GLuint t3dCopy = 0;
+    glGenTextures(1, &t3dCopy);
+    glBindTexture(0x806F, t3dCopy);
+    glTexImage3D(0x806F, 0, 0x8058, 4, 4, 4, 0, 0x1908, 0x1401, nullptr);
+    glTexParameteri(0x806F, 0x2801, 0x2600);
+    glTexParameteri(0x806F, 0x2800, 0x2600);
+    glCopyImageSubData(t3d, 0x806F, 0, 0, 0, 1, t3dCopy, 0x806F, 0, 0, 0, 1, 4, 4, 2);
+    Check(glGetError() == 0, "glCopyImageSubData 3D d=2 no error");
+    glBindTexture(0x806F, t3dCopy);
+    glUniform1f(glGetUniformLocation(prog, "uMode"), 0.0f);
+    glUniform1f(glGetUniformLocation(prog, "uZ"), 0.375f); // dst slice 1 = src slice 1
+    glDrawArrays(0x0004, 0, 6);
+    glReadPixels(32, 32, 1, 1, 0x1908, 0x1401, p);
+    Check(Near(p[0], 64), "copy 3D d=2 → dst slice 1 = src slice 1 (R=64)");
+    glUniform1f(glGetUniformLocation(prog, "uZ"), 0.625f); // dst slice 2 = src slice 2
+    glDrawArrays(0x0004, 0, 6);
+    glReadPixels(32, 32, 1, 1, 0x1908, 0x1401, p);
+    Check(Near(p[0], 200), "copy 3D d=2 → dst slice 2 = src slice 2 (R=200)");
+    glDeleteTextures(1, &t3dCopy);
+
     if (gFails) {
         printf("test_3d_texture_apple RESULT: FAIL (%d)\n", gFails);
         return 1;

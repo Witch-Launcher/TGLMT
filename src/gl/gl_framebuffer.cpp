@@ -50,21 +50,133 @@ void glBindFramebuffer(GLenum t, GLuint f) {
     if (f && !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
     c.state.BindFBO(t, f);
 }
-void glBindRenderbuffer(GLenum t, GLuint r) {
-    (void)t;
-    Context& c = Context::Current();
-    c.state.SetShadow(0x8D41 /*RENDERBUFFER_BINDING*/, &r, 4);
+static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex, GLint level);
+static GLuint ResolveFBOForTarget(Context& c, GLenum t);
+
+static bool SupportedRenderbufferFormat(GLenum inf) {
+    switch (inf) {
+        case 0x8058: case 0x8C43: case 0x8051: case 0x8F96: case 0x8F97:
+        case 0x8229: case 0x822B: case 0x8C41: case 0x822F:
+        case 0x8231: case 0x8232: case 0x8233: case 0x8234:
+        case 0x822D: case 0x822E: case 0x8235: case 0x8236:
+        case 0x881A: case 0x881B: case 0x8814: case 0x8815:
+        case 0x8C3A: case 0x805B:
+        case 0x81A5: case 0x81A6: case 0x81A7: case 0x8CAC:
+        case 0x88F0:
+            return true;
+        default:
+            return false;
+    }
 }
-void glGenRenderbuffers(GLsizei n, GLuint* r) { Context::Current().registry.Gen(ObjectKind::Renderbuffer, n, r); }
-void glCreateRenderbuffers(GLsizei n, GLuint* r) { Context::Current().registry.Create(ObjectKind::Renderbuffer, n, r); }
-void glDeleteRenderbuffers(GLsizei n, const GLuint* r) { Context::Current().registry.Delete(ObjectKind::Renderbuffer, n, r); }
+static RenderbufferObject* BoundRenderbuffer(Context& c) {
+    GLuint id = 0;
+    if (!c.state.GetShadow(0x8CA7 /*RENDERBUFFER_BINDING*/, &id, sizeof(id))) return nullptr;
+    auto it = c.renderbuffers.find(id);
+    return it == c.renderbuffers.end() ? nullptr : &it->second;
+}
+static bool RenderbufferStorageCore(Context& c, RenderbufferObject& rb, GLsizei samples,
+                                    GLenum inf, GLsizei w, GLsizei h) {
+    if (w < 0 || h < 0) { c.errors.Record(0x0501); return false; } // INVALID_VALUE
+    if (w > 16384 || h > 16384) { c.errors.Record(0x0501); return false; }
+    if (!SupportedRenderbufferFormat(inf)) { c.errors.Record(0x0500); return false; }
+    // TGLMT stores RBOs as textures. MSAA RBO maps to a 2D-multisample
+    // texture + resolve; draw path detects TextureObject::samples.
+    if (samples > 1) {
+        if (samples > 4 || (inf != 0x8058 && inf != 0x8C43)) {
+            c.errors.Record(0x0502); return false; // INVALID_OPERATION
+        }
+    }
+    if (rb.texture) {
+        GLuint old = rb.texture;
+        rb.texture = 0;
+        glDeleteTextures(1, &old);
+    }
+    rb.w = w; rb.h = h; rb.internalFormat = inf; rb.samples = samples;
+    if (w == 0 || h == 0) return true; // zero-sized storage = empty
+    if (samples > 1) {
+        glCreateTextures(0x9100 /*TEXTURE_2D_MULTISAMPLE*/, 1, &rb.texture);
+        glTextureStorage2DMultisample(rb.texture, samples, inf, w, h, GL_TRUE);
+    } else {
+        glCreateTextures(0x0DE1 /*TEXTURE_2D*/, 1, &rb.texture);
+        glTextureStorage2D(rb.texture, 1, inf, w, h);
+    }
+    return true;
+}
+void glBindRenderbuffer(GLenum t, GLuint r) {
+    Context& c = Context::Current();
+    if (t != 0x8D41 /*RENDERBUFFER*/) { c.errors.Record(0x0500); return; }
+    if (r && !c.renderbuffers.count(r)) { c.errors.Record(0x0502); return; }
+    c.state.SetShadow(0x8CA7 /*RENDERBUFFER_BINDING*/, &r, sizeof(r));
+}
+void glGenRenderbuffers(GLsizei n, GLuint* r) {
+    Context& c = Context::Current();
+    c.registry.Gen(ObjectKind::Renderbuffer, n, r);
+    for (GLsizei i = 0; i < n; ++i) c.renderbuffers[r[i]] = RenderbufferObject{r[i]};
+}
+void glCreateRenderbuffers(GLsizei n, GLuint* r) {
+    Context& c = Context::Current();
+    c.registry.Create(ObjectKind::Renderbuffer, n, r);
+    for (GLsizei i = 0; i < n; ++i) c.renderbuffers[r[i]] = RenderbufferObject{r[i]};
+}
+void glDeleteRenderbuffers(GLsizei n, const GLuint* r) {
+    Context& c = Context::Current();
+    std::vector<GLuint> textures;
+    for (GLsizei i = 0; i < n; ++i) {
+        auto it = c.renderbuffers.find(r[i]);
+        if (it == c.renderbuffers.end()) continue;
+        if (it->second.texture) textures.push_back(it->second.texture);
+        c.renderbuffers.erase(it);
+    }
+    c.registry.Delete(ObjectKind::Renderbuffer, n, r);
+    if (!textures.empty()) glDeleteTextures((GLsizei)textures.size(), textures.data());
+}
 GLboolean glIsRenderbuffer(GLuint r) { return Context::Current().registry.Is(ObjectKind::Renderbuffer, r) ? 1 : 0; }
-void glRenderbufferStorage(GLenum t, GLenum inf, GLsizei w, GLsizei h) { (void)t;(void)inf;(void)w;(void)h; }
-void glRenderbufferStorageMultisample(GLenum t, GLsizei s, GLenum inf, GLsizei w, GLsizei h) { (void)t;(void)s;(void)inf;(void)w;(void)h; }
-void glNamedRenderbufferStorage(GLuint r, GLenum inf, GLsizei w, GLsizei h) { (void)r;(void)inf;(void)w;(void)h; }
-void glNamedRenderbufferStorageMultisample(GLuint r, GLsizei s, GLenum inf, GLsizei w, GLsizei h) { (void)r;(void)s;(void)inf;(void)w;(void)h; }
-void glFramebufferRenderbuffer(GLenum t, GLenum a, GLenum rt, GLuint r) { (void)t;(void)a;(void)rt;(void)r; }
-void glNamedFramebufferRenderbuffer(GLuint f, GLenum a, GLenum rt, GLuint r) { (void)f;(void)a;(void)rt;(void)r; }
+void glRenderbufferStorage(GLenum t, GLenum inf, GLsizei w, GLsizei h) {
+    Context& c = Context::Current();
+    if (t != 0x8D41) { c.errors.Record(0x0500); return; }
+    RenderbufferObject* rb = BoundRenderbuffer(c);
+    if (!rb) { c.errors.Record(0x0502); return; }
+    RenderbufferStorageCore(c, *rb, 0, inf, w, h);
+}
+void glRenderbufferStorageMultisample(GLenum t, GLsizei s, GLenum inf, GLsizei w, GLsizei h) {
+    Context& c = Context::Current();
+    if (t != 0x8D41) { c.errors.Record(0x0500); return; }
+    if (s < 0) { c.errors.Record(0x0501); return; }
+    RenderbufferObject* rb = BoundRenderbuffer(c);
+    if (!rb) { c.errors.Record(0x0502); return; }
+    RenderbufferStorageCore(c, *rb, s, inf, w, h);
+}
+void glNamedRenderbufferStorage(GLuint r, GLenum inf, GLsizei w, GLsizei h) {
+    Context& c = Context::Current();
+    auto it = c.renderbuffers.find(r);
+    if (it == c.renderbuffers.end()) { c.errors.Record(0x0502); return; }
+    RenderbufferStorageCore(c, it->second, 0, inf, w, h);
+}
+void glNamedRenderbufferStorageMultisample(GLuint r, GLsizei s, GLenum inf, GLsizei w, GLsizei h) {
+    Context& c = Context::Current();
+    if (s < 0) { c.errors.Record(0x0501); return; }
+    auto it = c.renderbuffers.find(r);
+    if (it == c.renderbuffers.end()) { c.errors.Record(0x0502); return; }
+    RenderbufferStorageCore(c, it->second, s, inf, w, h);
+}
+static bool AttachRenderbuffer(Context& c, GLuint fbo, GLenum attach, GLenum rt, GLuint rbId) {
+    if (rt != 0x8D41 /*RENDERBUFFER*/ && rt != 0) {
+        c.errors.Record(0x0500); return false;
+    }
+    if (!rbId) return AttachToFBO(c, fbo, attach, 0, 0); // detach
+    auto rit = c.renderbuffers.find(rbId);
+    if (rit == c.renderbuffers.end() || !rit->second.texture) {
+        c.errors.Record(0x0502); return false;
+    }
+    return AttachToFBO(c, fbo, attach, rit->second.texture, 0);
+}
+void glFramebufferRenderbuffer(GLenum t, GLenum a, GLenum rt, GLuint r) {
+    Context& c = Context::Current();
+    AttachRenderbuffer(c, ResolveFBOForTarget(c, t), a, rt, r);
+}
+void glNamedFramebufferRenderbuffer(GLuint f, GLenum a, GLenum rt, GLuint r) {
+    AttachRenderbuffer(Context::Current(), f, a, rt, r);
+}
 void glFramebufferTexture(GLenum t, GLenum a, GLuint x, GLint l) {
     // DSA-core không dùng, nhưng Emulated detach/attach qua 2D; để trung thực
     // (không nuốt lệnh) xử lý như 2D TEXTURE_2D.
@@ -99,7 +211,11 @@ void glFramebufferTexture2D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l) {
     else if (a >= 0x8CE0 && a <= 0x8CE7) { f.colorTex[a - 0x8CE0] = x; f.colorLevel[a - 0x8CE0] = l; } // COLOR_ATTACHMENTn
     else if (a == 0x8D00) { f.depthTex = x; f.depthLevel = l; }
     else if (a == 0x8D20) { f.stencilTex = x; f.stencilLevel = l; }
-    else if (a == 0x821A) { f.depthStencilTex = x; f.depthStencilLevel = l; } // DEPTH_STENCIL_ATTACHMENT
+    else if (a == 0x821A || a == 0x84F9) { // DEPTH_STENCIL_ATTACHMENT (0x84F9 alias GL_DEPTH_STENCIL_ATTACHMENT): draw path reads depthTex
+        f.depthStencilTex = x; f.depthStencilLevel = l;
+        f.depthTex = x; f.depthLevel = l;
+        f.stencilTex = x; f.stencilLevel = l;
+    }
     else { c.errors.Record(0x0500); return; }
     auto txt = c.textures.find(x);
     // Size FBO theo mip thật (w>>l): blit bounds + viewport mip bake đúng.
@@ -137,7 +253,11 @@ static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex, GLint
     else if (attach >= 0x8CE0 && attach <= 0x8CE7) { f.colorTex[attach - 0x8CE0] = tex; f.colorLevel[attach - 0x8CE0] = level; }
     else if (attach == 0x8D00) { f.depthTex = tex; f.depthLevel = level; }
     else if (attach == 0x8D20) { f.stencilTex = tex; f.stencilLevel = level; }
-    else if (attach == 0x821A) { f.depthStencilTex = tex; f.depthStencilLevel = level; }
+    else if (attach == 0x821A) { // draw path reads depthTex; keep all aliases in sync
+        f.depthStencilTex = tex; f.depthStencilLevel = level;
+        f.depthTex = tex; f.depthLevel = level;
+        f.stencilTex = tex; f.stencilLevel = level;
+    }
     else { c.errors.Record(0x0500); return false; }
     auto txt = c.textures.find(tex);
     if (txt != c.textures.end() && tex) {
@@ -215,9 +335,47 @@ void glGetNamedFramebufferParameteriv(GLuint f, GLenum p, GLint* v) {
     else { c.errors.Record(0x0500); return; }
 }
 GLenum glCheckFramebufferStatus(GLenum t) {
-    (void)t; return 0x8CD5; // FRAMEBUFFER_COMPLETE (Null backend luôn complete nếu attach hợp lệ)
+    Context& c = Context::Current();
+    GLuint fbo = ResolveFBOForTarget(c, t);
+    if (fbo == 0) return 0x8CD5; // default framebuffer
+    auto it = c.fbos.find(fbo);
+    if (it == c.fbos.end()) { c.errors.Record(0x0502); return 0; }
+    auto& f = it->second;
+    bool any = false;
+    auto checkTex = [&](GLuint id) -> bool {
+        if (!id) return true;
+        any = true;
+        auto it2 = c.textures.find(id);
+        return it2 != c.textures.end() && it2->second.w > 0 && it2->second.h > 0;
+    };
+    for (auto& kv : f.colorTex) if (!checkTex(kv.second)) return 0x8CD6; // INCOMPLETE_ATTACHMENT
+    if (!checkTex(f.depthTex)) return 0x8CD6;
+    if (!checkTex(f.stencilTex)) return 0x8CD6;
+    if (!checkTex(f.depthStencilTex)) return 0x8CD6;
+    // ARB_framebuffer_no_attachments: a sized no-attachment FBO is complete.
+    if (!any && f.defaultWidth <= 0 && f.defaultHeight <= 0) return 0x8CD7; // MISSING_ATTACHMENT
+    return 0x8CD5; // FRAMEBUFFER_COMPLETE
 }
-GLenum glCheckNamedFramebufferStatus(GLuint f, GLenum t) { (void)f; return glCheckFramebufferStatus(t); }
+GLenum glCheckNamedFramebufferStatus(GLuint fbo, GLenum t) {
+    Context& c = Context::Current();
+    if (fbo == 0) return 0x8CD5;
+    if (!c.fbos.count(fbo)) { c.errors.Record(0x0502); return 0; }
+    // Route through the binding-independent path by temporarily using fbo.
+    auto it = c.fbos.find(fbo);
+    auto& f = it->second;
+    bool any = false;
+    auto checkTex = [&](GLuint id) -> bool {
+        if (!id) return true; any = true;
+        auto it2 = c.textures.find(id);
+        return it2 != c.textures.end() && it2->second.w > 0 && it2->second.h > 0;
+    };
+    for (auto& kv : f.colorTex) if (!checkTex(kv.second)) return 0x8CD6;
+    if (!checkTex(f.depthTex)) return 0x8CD6;
+    if (!checkTex(f.stencilTex)) return 0x8CD6;
+    if (!checkTex(f.depthStencilTex)) return 0x8CD6;
+    if (!any && f.defaultWidth <= 0 && f.defaultHeight <= 0) return 0x8CD7;
+    return 0x8CD5;
+}
 void glDrawBuffer(GLenum b) {
     Context& c = Context::Current();
     GLuint fbo = c.state.BoundDrawFBO();

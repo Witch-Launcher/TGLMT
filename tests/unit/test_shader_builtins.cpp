@@ -106,6 +106,8 @@ int main() {
         {"gl_SampleID", 0x8B30, FS "c = vec4(gl_SampleID);}"},
         {"gl_SamplePosition", 0x8B30, FS "c = vec4(gl_SamplePosition, 0, 1);}"},
         {"gl_SampleMask", 0x8B30, FS "gl_SampleMask[0] = 1; c = vec4(1);}"},
+        {"gl_HelperInvocation", 0x8B30,
+         FS "c = vec4(gl_HelperInvocation ? 1.0 : 0.0);}"},
         {"depth_and_mask", 0x8B30, FS "gl_FragDepth = 0.5; gl_SampleMask[0] = 0xF; c = vec4(1);}"},
         {"gl_BaseInstance", 0x8B31, VS "void main(){ gl_Position = vec4(gl_BaseInstance);}"},
         // --- regression: các builtin cũ vẫn ổn ---
@@ -140,8 +142,6 @@ int main() {
     // --- Negative:_builtin ngoài subset phải fail TRUNG THỰG (ok=false) ---
     struct Neg { const char* name; uint32_t stage; const char* glsl; };
     std::vector<Neg> negs = {
-        {"gl_HelperInvocation", 0x8B30,
-         "#version 460 core\nout vec4 c;\nvoid main(){ c = vec4(gl_HelperInvocation ? 1.0 : 0.0);}"},
         {"gl_DrawID", 0x8B31, "#version 460 core\nvoid main(){ gl_Position = vec4(gl_DrawID);}"},
         {"double_type", 0x8B30,
          "#version 460 core\nout vec4 c;\nvoid main(){ double d = 1.0; c = vec4(d);}"},

@@ -240,12 +240,52 @@ void glVertexAttribL3d(GLuint i, GLdouble x, GLdouble y, GLdouble z) { double v[
 void glVertexAttribL3dv(GLuint i, const GLdouble* v) { double d[4]={v[0],v[1],v[2],1}; SetAttribValue(i,d); }
 void glVertexAttribL4d(GLuint i, GLdouble x, GLdouble y, GLdouble z, GLdouble w) { double v[4]={x,y,z,w}; SetAttribValue(i,v); }
 void glVertexAttribL4dv(GLuint i, const GLdouble* v) { SetAttribValue(i,v); }
-void glVertexAttribP1ui(GLuint i, GLenum t, GLboolean n, GLuint v) { (void)i;(void)t;(void)n;(void)v; Context::Current().LogDebug(0,0,0,0,"glVertexAttribP1ui packed — unpack CPU (M2)"); }
-void glVertexAttribP1uiv(GLuint i, GLenum t, GLboolean n, const GLuint* v) { (void)i;(void)t;(void)n;(void)v; }
-void glVertexAttribP2ui(GLuint i, GLenum t, GLboolean n, GLuint v) { (void)i;(void)t;(void)n;(void)v; }
-void glVertexAttribP2uiv(GLuint i, GLenum t, GLboolean n, const GLuint* v) { (void)i;(void)t;(void)n;(void)v; }
-void glVertexAttribP3ui(GLuint i, GLenum t, GLboolean n, GLuint v) { (void)i;(void)t;(void)n;(void)v; }
-void glVertexAttribP3uiv(GLuint i, GLenum t, GLboolean n, const GLuint* v) { (void)i;(void)t;(void)n;(void)v; }
-void glVertexAttribP4ui(GLuint i, GLenum t, GLboolean n, GLuint v) { (void)i;(void)t;(void)n;(void)v; }
-void glVertexAttribP4uiv(GLuint i, GLenum t, GLboolean n, const GLuint* v) { (void)i;(void)t;(void)n;(void)v; }
+static bool DecodePackedAttrib(GLenum type, GLboolean normalized, GLuint value, double out[4]) {
+    if (type == 0x8D9F) { // GL_INT_2_10_10_10_REV
+        auto sx = [](uint32_t x, int bits) -> int {
+            return (int32_t)(x << (32 - bits)) >> (32 - bits);
+        };
+        const int c[4] = {sx(value & 0x3FFu, 10), sx((value >> 10) & 0x3FFu, 10),
+                          sx((value >> 20) & 0x3FFu, 10), sx((value >> 30) & 0x3u, 2)};
+        for (int k = 0; k < 4; ++k) {
+            if (!normalized) out[k] = (double)c[k];
+            else {
+                const double scale = (k == 3) ? 1.0 : 511.0;
+                out[k] = (double)c[k] / scale;
+                if (out[k] < -1.0) out[k] = -1.0;
+            }
+        }
+        return true;
+    }
+    if (type == 0x8368) { // GL_UNSIGNED_INT_2_10_10_10_REV
+        const uint32_t c[4] = {value & 0x3FFu, (value >> 10) & 0x3FFu,
+                               (value >> 20) & 0x3FFu, (value >> 30) & 0x3u};
+        for (int k = 0; k < 4; ++k) {
+            if (!normalized) out[k] = (double)c[k];
+            else out[k] = (double)c[k] / ((k == 3) ? 3.0 : 1023.0);
+        }
+        return true;
+    }
+    return false;
+}
+static void SetPackedAttrib(GLuint i, GLenum type, GLboolean normalized, GLuint value, int components) {
+    Context& c = Context::Current();
+    double out[4] = {0.0, 0.0, 0.0, 1.0};
+    if (!DecodePackedAttrib(type, normalized, value, out)) {
+        c.errors.Record(0x0500); // GL_INVALID_ENUM
+        return;
+    }
+    if (components < 2) out[1] = 0.0;
+    if (components < 3) out[2] = 0.0;
+    if (components < 4) out[3] = 1.0;
+    SetAttribValue(i, out);
+}
+void glVertexAttribP1ui(GLuint i, GLenum t, GLboolean n, GLuint v) { SetPackedAttrib(i, t, n, v, 1); }
+void glVertexAttribP1uiv(GLuint i, GLenum t, GLboolean n, const GLuint* v) { SetPackedAttrib(i, t, n, v ? *v : 0, 1); }
+void glVertexAttribP2ui(GLuint i, GLenum t, GLboolean n, GLuint v) { SetPackedAttrib(i, t, n, v, 2); }
+void glVertexAttribP2uiv(GLuint i, GLenum t, GLboolean n, const GLuint* v) { SetPackedAttrib(i, t, n, v ? *v : 0, 2); }
+void glVertexAttribP3ui(GLuint i, GLenum t, GLboolean n, GLuint v) { SetPackedAttrib(i, t, n, v, 3); }
+void glVertexAttribP3uiv(GLuint i, GLenum t, GLboolean n, const GLuint* v) { SetPackedAttrib(i, t, n, v ? *v : 0, 3); }
+void glVertexAttribP4ui(GLuint i, GLenum t, GLboolean n, GLuint v) { SetPackedAttrib(i, t, n, v, 4); }
+void glVertexAttribP4uiv(GLuint i, GLenum t, GLboolean n, const GLuint* v) { SetPackedAttrib(i, t, n, v ? *v : 0, 4); }
 } // namespace tglmt::gl

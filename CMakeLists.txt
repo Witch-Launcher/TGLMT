@@ -89,4 +89,8 @@ if(TGLMT_BUILD_TESTS)
       TGLMT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus/mc-26.1.2-shaders")
     add_test(NAME ${NAME} COMMAND ${NAME})
   endforeach()
+
+  # Diagnostic runtime probe for known static gaps (not a CTest gate).
+  add_executable(truth_probe tests/truth/probe_gaps.cpp)
+  target_link_libraries(truth_probe PRIVATE tglmt)
 endif()

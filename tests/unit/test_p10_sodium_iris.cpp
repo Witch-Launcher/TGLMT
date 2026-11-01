@@ -4,6 +4,7 @@
 #include "tglmt/Context.h"
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 using namespace tglmt;
 
@@ -15,6 +16,7 @@ void glGetProgramInterfaceiv(GLuint p, GLenum iface, GLenum pn, GLint* v);
 GLuint glGetProgramResourceIndex(GLuint p, GLenum iface, const GLchar* n);
 void glGetProgramResourceName(GLuint p, GLenum iface, GLuint idx, GLsizei ns, GLsizei* l, GLchar* n);
 GLint glGetProgramResourceLocation(GLuint p, GLenum iface, const GLchar* n);
+GLint glGetProgramResourceLocationIndex(GLuint p, GLenum iface, const GLchar* n);
 } }
 
 using namespace tglmt::gl;
@@ -96,7 +98,31 @@ int main() {
         GLint loc1 = glGetProgramResourceLocation(pr, 0x92E1, "color");
         GLint loc2 = glGetUniformLocation(pr, "color");
         Check(loc1 == loc2 && loc1 >= 0, "GetProgramResourceLocation không khớp UniformLocation");
+        // PROGRAM_OUTPUT reflection + LocationIndex (ARB_program_interface_query).
+        GLint nout = 0;
+        glGetProgramInterfaceiv(pr, 0x92E4 /*PROGRAM_OUTPUT*/, 0x92F5 /*ACTIVE_RESOURCES*/, &nout);
+        Check(nout == 1, "PROGRAM_OUTPUT ACTIVE_RESOURCES phải 1");
+        GLuint oi = glGetProgramResourceIndex(pr, 0x92E4, "c");
+        Check(oi != 0xFFFFFFFFu, "GetProgramResourceIndex output fail");
+        GLint oloc = glGetProgramResourceLocation(pr, 0x92E4, "c");
+        Check(oloc == 0, "output location phải 0");
+        Check(glGetProgramResourceLocationIndex(pr, 0x92E4, "c") == 0,
+              "output location index phải 0");
+        Check(glGetProgramResourceLocationIndex(pr, 0x92E4, "missing") == -1,
+              "unknown output location index phải -1");
+        Check(glGetFragDataLocation(pr, "c") == 0, "GetFragDataLocation output");
+        Check(glGetFragDataLocation(pr, "missing") == -1, "GetFragDataLocation unknown");
+        Check(glGetFragDataIndex(pr, "c") == 0, "GetFragDataIndex output");
+        Check(glGetFragDataIndex(pr, "missing") == -1, "GetFragDataIndex unknown");
         glDeleteProgram(pr);
+        GLint ne = 0;
+        glGetIntegerv(0x821D /*NUM_EXTENSIONS*/, &ne);
+        bool advertised = false;
+        for (GLint i = 0; i < ne; ++i) {
+            const char* e = (const char*)glGetStringi(0x1F03, (GLuint)i);
+            if (e && std::string(e) == "GL_ARB_program_interface_query") advertised = true;
+        }
+        Check(advertised, "ARB_program_interface_query advertised after fixes");
     }
 
     if (gFails == 0) { printf("test_p10_sodium_iris: all OK\n"); return 0; }

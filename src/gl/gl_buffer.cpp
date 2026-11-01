@@ -653,73 +653,106 @@ void glFlushMappedNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len) {
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     if (it->second.gpu) it->second.gpu->didModifyRange((size_t)off, (size_t)len);
 }
+// glClearBuffer*: `data` là GIÁ TRỊ theo internalformat, không phải byte.
+// Voxy dùng glClearNamedBufferSubData(GL_R32UI, ..., &id) để ghi node id;
+// nếu chỉ lấy byte đầu sẽ thành 0x21212121 → node id khổng lồ → GPU page fault.
+static size_t ClearPatternBytes(GLenum inf) {
+    switch (inf) {
+        case 0x8232: case 0x8233: return 1;   // R8UI / R8I
+        case 0x8234: case 0x8235: return 2;   // R16UI / R16I
+        case 0x8236: case 0x8237: return 4;   // R32UI / R32I
+        case 0x8229: return 1;                // R8
+        case 0x822D: return 2;                // R16F
+        case 0x822E: return 4;                // R32F
+        case 0x8238: case 0x8239: return 2;   // RG8UI / RG8I
+        case 0x823A: case 0x823B: return 4;   // RG16UI / RG16I
+        case 0x823C: case 0x823D: return 8;   // RG32UI / RG32I
+        case 0x8058: return 4;                // RGBA8
+        case 0x8814: return 16;               // RGBA32F
+        case 0x8D7C: case 0x8D7D: return 4;   // RGBA8UI / RGBA8I
+        case 0x8D76: case 0x8D77: return 8;   // RGBA16UI / RGBA16I
+        case 0x8D70: case 0x8D71: return 16;  // RGBA32UI / RGBA32I
+        default: return 0;
+    }
+}
+static void FillClearRange(void* dst, size_t n, GLenum inf, const void* d) {
+    size_t es = ClearPatternBytes(inf);
+    if (es == 0 || es > 16) { // format lạ: giữ hành vi cũ (byte đầu)
+        uint8_t f = d ? *(const uint8_t*)d : 0;
+        memset(dst, f, n);
+        return;
+    }
+    if (!d) { memset(dst, 0, n); return; }
+    uint8_t pat[16] = {};
+    memcpy(pat, d, es);
+    for (size_t o = 0; o < n; o += es)
+        memcpy((uint8_t*)dst + o, pat, std::min(es, n - o));
+}
 void glClearBufferData(GLenum t, GLenum inf, GLenum f, GLenum ty, const void* d) {
-    (void)inf; (void)f; (void)ty;
+    (void)f; (void)ty;
     Context& c = Context::Current();
     GLuint bid = c.state.BoundBuffer(t);
     BufferObject* bo = BoundBuf(t);
     if (!bo) return;
-    // Metal RenderPass clear tương đương; ở buffer: fill 0 hoặc pattern byte đầu
-    uint8_t fill = d ? *(const uint8_t*)d : 0;
     const size_t n = std::min(BufferLen(*bo), bo->gpu ? bo->gpu->length() : (size_t)-1);
-    std::fill(bo->data.begin(), bo->data.end(), fill);
+    if (!bo->data.empty()) FillClearRange(bo->data.data(), bo->data.size(), inf, d);
     // Clear quyết định TOÀN BỘ nội dung → staged ranges cũ trở nên lỗi thời
     // (payload carry sẽ ghi đè clear). Xóa staging trước.
     c.pendingBufRanges.erase(bid);
     if (bo->gpu && n) {
-        memset(bo->gpu->contents(), fill, n);
+        FillClearRange(bo->gpu->contents(), n, inf, d);
         bo->gpu->didModifyRange(0, n);
     }
 }
 void glClearBufferSubData(GLenum t, GLenum inf, GLintptr off, GLsizeiptr size, GLenum f, GLenum ty, const void* d) {
-    (void)inf; (void)f; (void)ty;
+    (void)f; (void)ty;
     Context& c = Context::Current();
     GLuint bid = c.state.BoundBuffer(t);
     BufferObject* bo = BoundBuf(t);
     if (!bo) return;
-    uint8_t fill = d ? *(const uint8_t*)d : 0;
     if (off < 0 || size < 0 || (size_t)(off + size) > BufferLen(*bo)) { c.errors.Record(0x0501); return; }
     const uint8_t* carry = nullptr;
     std::vector<uint8_t> tmp;
     if (!bo->data.empty()) {
         if ((size_t)(off + size) > bo->data.size()) bo->data.resize((size_t)(off + size), 0);
-        std::fill(bo->data.begin() + off, bo->data.begin() + off + size, fill);
+        FillClearRange(bo->data.data() + off, (size_t)size, inf, d);
     } else {
-        tmp.assign((size_t)size, fill);
+        tmp.assign((size_t)size, 0);
+        FillClearRange(tmp.data(), (size_t)size, inf, d);
         carry = tmp.data();
     }
     StageBufRange(c, bid, (size_t)off, (size_t)size, carry);
 }
 void glClearNamedBufferData(GLuint b, GLenum inf, GLenum f, GLenum ty, const void* d) {
-    (void)inf; (void)f; (void)ty;
+    (void)f; (void)ty;
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
-    uint8_t fill = d ? *(const uint8_t*)d : 0;
     const size_t n = std::min(BufferLen(it->second),
                               it->second.gpu ? it->second.gpu->length() : (size_t)-1);
-    std::fill(it->second.data.begin(), it->second.data.end(), fill);
+    if (!it->second.data.empty())
+        FillClearRange(it->second.data.data(), it->second.data.size(), inf, d);
     c.pendingBufRanges.erase(b); // clear quyết định toàn bộ nội dung
     if (it->second.gpu && n) {
-        memset(it->second.gpu->contents(), fill, n);
+        FillClearRange(it->second.gpu->contents(), n, inf, d);
         it->second.gpu->didModifyRange(0, n);
     }
 }
 void glClearNamedBufferSubData(GLuint b, GLenum inf, GLintptr off, GLsizeiptr size, GLenum f, GLenum ty, const void* d) {
-    (void)inf; (void)f; (void)ty;
+    (void)f; (void)ty;
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
-    uint8_t fill = d ? *(const uint8_t*)d : 0;
     if (off < 0 || size < 0 || (size_t)(off + size) > BufferLen(it->second)) { c.errors.Record(0x0501); return; }
     const uint8_t* carry = nullptr;
     std::vector<uint8_t> tmp;
     if (!it->second.data.empty()) {
         if ((size_t)(off + size) > it->second.data.size())
             it->second.data.resize((size_t)(off + size), 0);
-        std::fill(it->second.data.begin() + off, it->second.data.begin() + off + size, fill);
+        FillClearRange(it->second.data.data() + off, (size_t)size, inf, d);
     } else {
-        tmp.assign((size_t)size, fill);
+        tmp.assign((size_t)size, 0);
+        FillClearRange(tmp.data(), (size_t)size, inf, d);
         carry = tmp.data();
     }
     StageBufRange(c, b, (size_t)off, (size_t)size, carry);

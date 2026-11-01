@@ -225,10 +225,13 @@ void glGetnTexImage(GLenum t, GLint l, GLenum f, GLenum ty, GLsizei n, void* p) 
     }
     GetTexSubImpl(c, tx, l, 0, 0, tw, th, f, ty, n, p);
 }
-void glGetCompressedTexImage(GLenum t, GLint l, void* p) { (void)t;(void)l;(void)p; }
-void glGetCompressedTextureImage(GLuint t, GLint l, GLsizei n, void* p) { (void)t;(void)l; if(p&&n>0) memset(p,0,(size_t)n); }
-void glGetCompressedTextureSubImage(GLuint t, GLint l, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLsizei n, void* p) {
-    (void)t;(void)l;(void)x;(void)y;(void)z;(void)w;(void)h;(void)d; if(p&&n>0) memset(p,0,(size_t)n);
+// Không có compressed texture nào được tạo (xem gl_texture.cpp) → đọc compressed
+// image là INVALID_OPERATION, không trả bộ đệm 0 giả.
+void glGetCompressedTexImage(GLenum, GLint, void*) { Context::Current().errors.Record(0x0502); }
+void glGetCompressedTextureImage(GLuint, GLint, GLsizei, void*) { Context::Current().errors.Record(0x0502); }
+void glGetCompressedTextureSubImage(GLuint, GLint, GLint, GLint, GLint,
+                                    GLsizei, GLsizei, GLsizei, GLsizei, void*) {
+    Context::Current().errors.Record(0x0502);
 }
 // EXT_texture_swizzle: Metal code → GL swizzle value (round-trip glGet).
 static void SwzArray(const TextureObject& tx, GLint* v) {
@@ -293,6 +296,8 @@ void glGetTexLevelParameteriv(GLenum t, GLint l, GLenum p, GLint* v) {
     if (p == 0x1000) *v = (GLint)lw;          // TEXTURE_WIDTH
     else if (p == 0x1001) *v = (GLint)lh;     // TEXTURE_HEIGHT
     else if (p == 0x1003) *v = (GLint)tx.internalFormat; // TEXTURE_INTERNAL_FORMAT
+    else if (p == 0x9106) *v = (GLint)tx.samples; // TEXTURE_SAMPLES
+    else if (p == 0x9107) *v = 1;             // TEXTURE_FIXED_SAMPLE_LOCATIONS
     else *v = 0;
 }
 void glGetTexLevelParameterfv(GLenum t, GLint l, GLenum p, GLfloat* v) { GLint x=0; glGetTexLevelParameteriv(t,l,p,&x); *v=(GLfloat)x; }
@@ -315,6 +320,9 @@ void glGetTextureLevelParameteriv(GLuint t, GLint l, GLenum p, GLint* v) {
     }
     if (p == 0x1000) *v = (GLint)it->second.w;
     else if (p == 0x1001) *v = (GLint)it->second.h;
+    else if (p == 0x1003) *v = (GLint)it->second.internalFormat;
+    else if (p == 0x9106) *v = (GLint)it->second.samples;
+    else if (p == 0x9107) *v = 1;
     else *v = 0;
 }
 void glGetTextureLevelParameterfv(GLuint t, GLint l, GLenum p, GLfloat* v) { GLint x=0; glGetTextureLevelParameteriv(t,l,p,&x); *v=(GLfloat)x; }
@@ -350,29 +358,120 @@ void glGetNamedFramebufferAttachmentParameteriv(GLuint f, GLenum a, GLenum p, GL
 }
 // glGetFramebufferParameteriv/Named đã chuyển sang gl_framebuffer.cpp (P10 ARB_framebuffer_no_attachments,
 // đọc defaults từ FBO object thật thay vì shadow). Xoá stubs ở đây để khỏi duplicate symbol.
-void glGetRenderbufferParameteriv(GLenum t, GLenum p, GLint* v) { (void)t;(void)p; *v=0; }
-void glGetNamedRenderbufferParameteriv(GLuint r, GLenum p, GLint* v) { (void)r; glGetRenderbufferParameteriv(0x8D41,p,v); }
+static void RenderbufferComponentSizes(GLenum inf, GLint* red, GLint* green,
+                                       GLint* blue, GLint* alpha, GLint* depth,
+                                       GLint* stencil) {
+    *red = *green = *blue = *alpha = *depth = *stencil = 0;
+    switch (inf) {
+        case 0x8058: case 0x8C43: case 0x8F97: *red = *green = *blue = *alpha = 8; break;
+        case 0x8051: case 0x8F96: case 0x8C41: *red = *green = *blue = 8; break;
+        case 0x805B: *red = *green = *blue = *alpha = 16; break;
+        case 0x881A: case 0x881B: *red = *green = *blue = *alpha = 16; break;
+        case 0x8814: case 0x8815: *red = *green = *blue = *alpha = 32; break;
+        case 0x8C3A: *red = 11; *green = 11; *blue = 10; break;
+        case 0x8229: case 0x822F: case 0x8231: case 0x8232: *red = 8; break;
+        case 0x822B: *red = *green = 8; break;
+        case 0x822D: case 0x8233: case 0x8234: *red = 16; break;
+        case 0x822E: case 0x8235: case 0x8236: *red = 32; break;
+        case 0x81A5: *depth = 16; break;
+        case 0x81A6: *depth = 24; break;
+        case 0x81A7: case 0x8CAC: *depth = 32; break;
+        case 0x88F0: *depth = 24; *stencil = 8; break;
+        default: break;
+    }
+}
+static bool RenderbufferParam(RenderbufferObject& rb, GLenum p, GLint* v) {
+    GLint r, g, b, a, d, s;
+    RenderbufferComponentSizes(rb.internalFormat, &r, &g, &b, &a, &d, &s);
+    switch (p) {
+        case 0x8D42: *v = rb.w; return true;                 // WIDTH
+        case 0x8D43: *v = rb.h; return true;                 // HEIGHT
+        case 0x8D44: *v = (GLint)rb.internalFormat; return true;
+        case 0x8CAB: *v = rb.samples; return true;           // SAMPLES
+        case 0x8D50: *v = r; return true;                     // RED_SIZE
+        case 0x8D51: *v = g; return true;                     // GREEN_SIZE
+        case 0x8D52: *v = b; return true;                     // BLUE_SIZE
+        case 0x8D53: *v = a; return true;                     // ALPHA_SIZE
+        case 0x8D54: *v = d; return true;                     // DEPTH_SIZE
+        case 0x8D55: *v = s; return true;                     // STENCIL_SIZE
+        default: return false;
+    }
+}
+void glGetRenderbufferParameteriv(GLenum t, GLenum p, GLint* v) {
+    Context& c = Context::Current();
+    if (t != 0x8D41) { c.errors.Record(0x0500); return; }
+    GLuint id = 0;
+    if (!c.state.GetShadow(0x8CA7 /*RENDERBUFFER_BINDING*/, &id, sizeof(id)) || !id) {
+        c.errors.Record(0x0502); return;
+    }
+    auto it = c.renderbuffers.find(id);
+    if (it == c.renderbuffers.end()) { c.errors.Record(0x0502); return; }
+    if (!RenderbufferParam(it->second, p, v)) c.errors.Record(0x0500);
+}
+void glGetNamedRenderbufferParameteriv(GLuint r, GLenum p, GLint* v) {
+    Context& c = Context::Current();
+    auto it = c.renderbuffers.find(r);
+    if (it == c.renderbuffers.end()) { c.errors.Record(0x0502); return; }
+    if (!RenderbufferParam(it->second, p, v)) c.errors.Record(0x0500);
+}
 // --- VAO getters ---
 void glGetVertexAttribiv(GLuint i, GLenum p, GLint* v) {
     Context& c = Context::Current();
+    if (i >= 16) { c.errors.Record(0x0501); return; }
+    if (p == 0x8626 /*CURRENT_VERTEX_ATTRIB*/) {
+        double d[4] = {0.0, 0.0, 0.0, 1.0};
+        c.state.GetShadow(0x8626, d, sizeof(d), i);
+        for (int k = 0; k < 4; ++k) v[k] = (GLint)d[k];
+        return;
+    }
     auto it = c.vaos.find(c.state.BoundVAO());
-    if (it == c.vaos.end() || i >= 16) { c.errors.Record(0x0501); return; }
+    if (it == c.vaos.end()) { c.errors.Record(0x0501); return; }
     auto& a = it->second.attribs[i];
     if (p == 0x8622) *v = a.enabled ? 1 : 0;      // VERTEX_ATTRIB_ARRAY_ENABLED
     else if (p == 0x8623) *v = a.size;            // ..._SIZE
-    else if (p == 0x8625) *v = a.stride;          // ..._STRIDE
-    else if (p == 0x8626) *v = (GLint)a.type;     // ..._ARRAY_TYPE
+    else if (p == 0x8624) *v = a.stride;          // ..._STRIDE
+    else if (p == 0x8625) *v = (GLint)a.type;     // ..._ARRAY_TYPE
     else if (p == 0x886A) *v = a.normalized ? 1 : 0;   // ..._ARRAY_NORMALIZED
     else if (p == 0x88FD) *v = (GLint)a.divisor;  // ..._DIVISOR
     else if (p == 0x82EB) *v = (GLint)a.binding;  // VERTEX_ATTRIB_BINDING
     else if (p == 0x82EC) *v = (GLint)a.relativeOffset; // VERTEX_ATTRIB_RELATIVE_OFFSET
     else *v = 0;
 }
-void glGetVertexAttribfv(GLuint i, GLenum p, GLfloat* v) { GLint x=0; glGetVertexAttribiv(i,p,&x); *v=(GLfloat)x; }
-void glGetVertexAttribdv(GLuint i, GLenum p, GLdouble* v) { GLint x=0; glGetVertexAttribiv(i,p,&x); *v=x; }
+void glGetVertexAttribfv(GLuint i, GLenum p, GLfloat* v) {
+    if (p == 0x8626) {
+        Context& c = Context::Current();
+        double d[4] = {0.0, 0.0, 0.0, 1.0};
+        c.state.GetShadow(0x8626, d, sizeof(d), i);
+        for (int k = 0; k < 4; ++k) v[k] = (GLfloat)d[k];
+        return;
+    }
+    GLint x=0; glGetVertexAttribiv(i,p,&x); *v=(GLfloat)x;
+}
+void glGetVertexAttribdv(GLuint i, GLenum p, GLdouble* v) {
+    if (p == 0x8626) {
+        Context& c = Context::Current();
+        double d[4] = {0.0, 0.0, 0.0, 1.0};
+        c.state.GetShadow(0x8626, d, sizeof(d), i);
+        for (int k = 0; k < 4; ++k) v[k] = d[k];
+        return;
+    }
+    GLint x=0; glGetVertexAttribiv(i,p,&x); *v=x;
+}
 void glGetVertexAttribIiv(GLuint i, GLenum p, GLint* v) { glGetVertexAttribiv(i,p,v); }
-void glGetVertexAttribIuiv(GLuint i, GLenum p, GLuint* v) { GLint x=0; glGetVertexAttribiv(i,p,&x); *v=(GLuint)x; }
-void glGetVertexAttribLdv(GLuint i, GLenum p, GLdouble* v) { GLint x=0; glGetVertexAttribiv(i,p,&x); *v=x; }
+void glGetVertexAttribIuiv(GLuint i, GLenum p, GLuint* v) {
+    if (p == 0x8626) {
+        Context& c = Context::Current();
+        double d[4] = {0.0, 0.0, 0.0, 1.0};
+        c.state.GetShadow(0x8626, d, sizeof(d), i);
+        for (int k = 0; k < 4; ++k) v[k] = (GLuint)d[k];
+        return;
+    }
+    GLint x=0; glGetVertexAttribiv(i,p,&x); *v=(GLuint)x;
+}
+void glGetVertexAttribLdv(GLuint i, GLenum p, GLdouble* v) {
+    if (p == 0x8626) { glGetVertexAttribdv(i,p,v); return; }
+    GLint x=0; glGetVertexAttribiv(i,p,&x); *v=x;
+}
 void glGetVertexAttribPointerv(GLuint i, GLenum p, void** v) {
     (void)p;
     Context& c = Context::Current();
@@ -388,24 +487,165 @@ void glGetSynciv(GLsync s, GLenum p, GLsizei n, GLsizei* l, GLint* v) {
     Context& c = Context::Current();
     auto it = c.syncs.find((GLuint)(uintptr_t)s);
     if (it == c.syncs.end()) { c.errors.Record(0x0501); return; }
-    if (n > 0) {
-        if (p == 0x9112) v[0] = 0x9116;              // OBJECT_TYPE → SYNC_FENCE
-        else if (p == 0x9113) v[0] = 0x9119;         // SYNC_STATUS → SIGNALED (Null)
-        else if (p == 0x9114) v[0] = 0;              // SYNC_CONDITION
-        else v[0] = 0;
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    GLint out;
+    switch (p) {
+        case 0x9112: out = 0x9116; break; // OBJECT_TYPE → SYNC_FENCE
+        case 0x9113: out = 0x9117; break; // SYNC_CONDITION → GPU_COMMANDS_COMPLETE
+        case 0x9114: out = 0x9119; break; // SYNC_STATUS → SIGNALED (Null)
+        case 0x9115: out = 0; break;      // SYNC_FLAGS
+        default: c.errors.Record(0x0500); return; // INVALID_ENUM
     }
-    if (l) *l = 1;
+    if (n > 0) v[0] = out;
+    if (l) *l = n > 0 ? 1 : 0;
 }
 // glGetProgramInterfaceiv/Resource* đã chuyển sang gl_program_interface_p10.cpp (P10
 // ARB_program_interface_query, introspect từ converter data thật thay vì stub 0).
 // Xoá stubs ở đây để khỏi duplicate symbol.
-void glGetProgramStageiv(GLuint p, GLenum st, GLenum q, GLint* v) { (void)p;(void)st;(void)q; *v=0; }
-GLuint glGetSubroutineIndex(GLuint p, GLenum st, const GLchar* n) { (void)p;(void)st;(void)n; return 0xFFFFFFFFu; }
-GLint glGetSubroutineUniformLocation(GLuint p, GLenum st, const GLchar* n) { (void)p;(void)st;(void)n; return -1; }
-void glGetActiveSubroutineUniformiv(GLuint p, GLenum st, GLuint ix, GLenum q, GLint* v) { (void)p;(void)st;(void)ix;(void)q; *v=0; }
-void glGetActiveSubroutineUniformName(GLuint p, GLenum st, GLuint ix, GLsizei n, GLsizei* l, GLchar* name) { (void)p;(void)st;(void)ix; if(l)*l=0; if(name&&n>0)name[0]=0; }
-void glGetActiveSubroutineName(GLuint p, GLenum st, GLuint ix, GLsizei n, GLsizei* l, GLchar* name) { (void)p;(void)st;(void)ix; if(l)*l=0; if(name&&n>0)name[0]=0; }
-void glGetUniformSubroutineuiv(GLenum st, GLint l, GLuint* v) { (void)st;(void)l; *v=0; }
+static bool SubStage(GLenum st) {
+    return st == 0x8B31 || st == 0x8B30 || st == 0x8DD9 || st == 0x8E88 || st == 0x8E87;
+}
+void glGetProgramStageiv(GLuint p, GLenum st, GLenum q, GLint* v) {
+    Context& c = Context::Current();
+    if (!v) return;
+    *v = 0;
+    auto it = c.programs.find(p);
+    if (it == c.programs.end() || !it->second.linked) { c.errors.Record(0x0502); return; }
+    if (!SubStage(st)) { c.errors.Record(0x0500); return; }
+    auto si = it->second.subroutines.find(st);
+    if (si == it->second.subroutines.end()) return; // stage không có subroutine
+    auto& info = si->second;
+    switch (q) {
+        case 0x8DE5: *v = (GLint)info.uniforms.size(); break; // ACTIVE_SUBROUTINE_UNIFORMS
+        case 0x8DE6: { // ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH
+            size_t m = 0;
+            for (auto& u : info.uniforms) m = std::max(m, u.first.size());
+            *v = (GLint)m;
+            break;
+        }
+        case 0x8DE7: *v = (GLint)info.impls.size(); break; // ACTIVE_SUBROUTINES
+        case 0x8DE8: { // ACTIVE_SUBROUTINE_MAX_LENGTH
+            size_t m = 0;
+            for (auto& n : info.impls) m = std::max(m, n.size());
+            *v = (GLint)m;
+            break;
+        }
+        default: c.errors.Record(0x0500); break;
+    }
+}
+GLuint glGetSubroutineIndex(GLuint p, GLenum st, const GLchar* n) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return 0xFFFFFFFFu; }
+    if (!SubStage(st)) { c.errors.Record(0x0500); return 0xFFFFFFFFu; }
+    auto si = it->second.subroutines.find(st);
+    if (si == it->second.subroutines.end() || !n) return 0xFFFFFFFFu;
+    auto ii = si->second.implIndex.find(n);
+    return ii == si->second.implIndex.end() ? 0xFFFFFFFFu : ii->second;
+}
+GLint glGetSubroutineUniformLocation(GLuint p, GLenum st, const GLchar* n) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return -1; }
+    if (!SubStage(st)) { c.errors.Record(0x0500); return -1; }
+    auto si = it->second.subroutines.find(st);
+    if (si == it->second.subroutines.end() || !n) return -1;
+    for (auto& u : si->second.uniforms)
+        if (u.first == n) {
+            auto li = it->second.uniformLoc.find(n);
+            return li == it->second.uniformLoc.end() ? -1 : li->second;
+        }
+    return -1;
+}
+void glGetActiveSubroutineUniformiv(GLuint p, GLenum st, GLuint ix, GLenum q, GLint* v) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
+    if (!SubStage(st)) { c.errors.Record(0x0500); return; }
+    auto si = it->second.subroutines.find(st);
+    if (si == it->second.subroutines.end() || ix >= si->second.uniforms.size() || !v) {
+        c.errors.Record(0x0501); return;
+    }
+    auto& u = si->second.uniforms[ix];
+    auto ti = si->second.typeImpls.find(u.second);
+    const std::vector<std::string> empty;
+    const auto& list = (ti == si->second.typeImpls.end()) ? empty : ti->second;
+    switch (q) {
+        case 0x8E4A: v[0] = (GLint)list.size(); break; // NUM_COMPATIBLE_SUBROUTINES
+        case 0x8E4B: // COMPATIBLE_SUBROUTINES
+            for (size_t i = 0; i < list.size(); ++i) {
+                auto gi = si->second.implIndex.find(list[i]);
+                v[i] = (gi == si->second.implIndex.end()) ? 0 : (GLint)gi->second;
+            }
+            break;
+        case 0x8A38: v[0] = 1; break; // UNIFORM_SIZE
+        case 0x8A39: v[0] = (GLint)u.first.size() + 1; break; // UNIFORM_NAME_LENGTH
+        default: c.errors.Record(0x0500); break;
+    }
+}
+void glGetActiveSubroutineUniformName(GLuint p, GLenum st, GLuint ix, GLsizei n,
+                                      GLsizei* l, GLchar* name) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
+    if (!SubStage(st)) { c.errors.Record(0x0500); return; }
+    auto si = it->second.subroutines.find(st);
+    if (si == it->second.subroutines.end() || ix >= si->second.uniforms.size()) {
+        c.errors.Record(0x0501); return;
+    }
+    const std::string& nm = si->second.uniforms[ix].first;
+    GLsizei k = (n > 0) ? std::min<GLsizei>(n - 1, (GLsizei)nm.size()) : 0;
+    if (name && k > 0) memcpy(name, nm.data(), (size_t)k);
+    if (name && n > 0) name[k] = 0;
+    if (l) *l = k;
+}
+void glGetActiveSubroutineName(GLuint p, GLenum st, GLuint ix, GLsizei n,
+                               GLsizei* l, GLchar* name) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
+    if (!SubStage(st)) { c.errors.Record(0x0500); return; }
+    auto si = it->second.subroutines.find(st);
+    if (si == it->second.subroutines.end() || ix >= si->second.impls.size()) {
+        c.errors.Record(0x0501); return;
+    }
+    const std::string& nm = si->second.impls[ix];
+    GLsizei k = (n > 0) ? std::min<GLsizei>(n - 1, (GLsizei)nm.size()) : 0;
+    if (name && k > 0) memcpy(name, nm.data(), (size_t)k);
+    if (name && n > 0) name[k] = 0;
+    if (l) *l = k;
+}
+void glGetUniformSubroutineuiv(GLenum st, GLint l, GLuint* v) {
+    Context& c = Context::Current();
+    if (!v) return;
+    *v = 0;
+    if (!SubStage(st)) { c.errors.Record(0x0500); return; }
+    GLuint p = 0, pl = 0;
+    if (c.state.GetShadow(0x8254, &pl, 4) && pl) {
+        auto pit = c.pipelines.find(pl);
+        if (pit != c.pipelines.end()) p = pit->second.activeProgram;
+    }
+    if (!p) p = c.state.BoundProgram();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
+    auto si = it->second.subroutines.find(st);
+    if (si == it->second.subroutines.end()) return;
+    for (auto& u : si->second.uniforms) {
+        auto li = it->second.uniformLoc.find(u.first);
+        if (li == it->second.uniformLoc.end() || li->second != l) continue;
+        auto ui = it->second.uniforms.find(l);
+        GLint ordinal = 0;
+        if (ui != it->second.uniforms.end() && ui->second.size() >= 4)
+            memcpy(&ordinal, ui->second.data(), 4);
+        auto ti = si->second.typeImpls.find(u.second);
+        if (ti != si->second.typeImpls.end() && ordinal >= 0 &&
+            (size_t)ordinal < ti->second.size()) {
+            auto gi = si->second.implIndex.find(ti->second[(size_t)ordinal]);
+            if (gi != si->second.implIndex.end()) *v = gi->second;
+        }
+        return;
+    }
+}
 void glGetUniformIndices(GLuint p, GLsizei n, const GLchar* const* names, GLuint* ix) { (void)p; for(GLsizei i=0;i<n;++i) ix[i]=0xFFFFFFFFu; (void)names; }
 // Trả internalformat có HỖ TRỢ THẬT (đúng ToMetalFormat switch — KHÔNG fallback
 // RGBA8). Trả false cho format lạ = trung thực (chúng ta không tạo đúng format).
@@ -461,5 +701,24 @@ void glGetInternalformati64v(GLenum t, GLenum inf, GLenum p, GLsizei n, GLint64*
     InternalFormatQuery(inf, p, v, n);
 }
 void glGetMultisamplefv(GLenum p, GLuint i, GLfloat* v) { (void)p;(void)i; *v=0; }
-void glGetShaderPrecisionFormat(GLenum st, GLenum p, GLint* r, GLint* v) { (void)st;(void)p; *r=0; *v=0; }
+void glGetShaderPrecisionFormat(GLenum st, GLenum p, GLint* r, GLint* v) {
+    Context& c = Context::Current();
+    if (st != 0x8B31 /*VERTEX_SHADER*/ && st != 0x8B30 /*FRAGMENT_SHADER*/ &&
+        st != 0x91B9 /*COMPUTE_SHADER*/) {
+        c.errors.Record(0x0500); return; // INVALID_ENUM
+    }
+    if (p != 0x8DF0 && p != 0x8DF1 && p != 0x8DF2 && // LOW/MEDIUM/HIGH_FLOAT
+        p != 0x8DF3 && p != 0x8DF4 && p != 0x8DF5) {  // LOW/MEDIUM/HIGH_INT
+        c.errors.Record(0x0500); return;
+    }
+    // Metal maps all three GLSL precision qualifiers to IEEE-754 binary32 or
+    // 32-bit integers. GL 4.6 §7.15: range = exponent range, precision = bits.
+    if (p == 0x8DF0 || p == 0x8DF1 || p == 0x8DF2) {
+        if (r) { r[0] = 127; r[1] = 127; }
+        if (v) *v = 23;
+    } else {
+        if (r) { r[0] = 31; r[1] = 31; }
+        if (v) *v = 0;
+    }
+}
 } // namespace tglmt::gl

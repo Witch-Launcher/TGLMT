@@ -63,6 +63,33 @@ int main() {
         }
     }
 
+    // --- 1b. std140 vec3 phải size 12 / align 16 (Voxy SceneUniform):
+    // ivec3 @64 → frameId @76 (không phải 80), vec3 @80.
+    {
+        const char* fs =
+            "#version 460 core\n"
+            "layout(std140) uniform Scene { mat4 MVP; ivec3 baseSectionPos; uint frameId; vec3 cameraSubPos; float pad; vec3 extra[2]; };\n"
+            "layout(location = 0) out vec4 c;\n"
+            "void main(){ c = MVP * vec4(vec3(baseSectionPos) + cameraSubPos + extra[1], float(frameId)+pad); }\n";
+        GLSLConvertResult r = ConvertGLSLtoMSL(fs, 0x8B30);
+        if (!r.ok) printf("[conv log] %s\n", r.log.c_str());
+        Check(r.ok, "SceneUniform convert ok");
+        Check(r.blocks.size() == 1 && r.blocks[0].members.size() == 6, "SceneUniform members");
+        if (r.ok && r.blocks.size() == 1 && r.blocks[0].members.size() == 6) {
+            auto& m = r.blocks[0].members;
+            Check(m[0].uniformOffset == 0 && m[0].uniformSize == 64, "MVP @0");
+            Check(m[1].uniformOffset == 64 && m[1].uniformSize == 12, "baseSectionPos @64 size12");
+            Check(m[2].uniformOffset == 76 && m[2].uniformSize == 4, "frameId @76");
+            Check(m[3].uniformOffset == 80 && m[3].uniformSize == 12, "cameraSubPos @80 size12");
+            Check(m[4].uniformOffset == 92 && m[4].uniformSize == 4, "pad @92");
+            Check(m[5].uniformOffset == 96 && m[5].uniformSize == 32, "vec3[2] @96 stride16");
+        }
+        Check(r.msl.find("alignas(16) packed_int3 baseSectionPos") != std::string::npos,
+              "ivec3 → packed_int3");
+        Check(r.msl.find("alignas(16) packed_float3 cameraSubPos") != std::string::npos,
+              "vec3 → packed_float3");
+    }
+
     // --- 2. Link: binding lấy từ layout(binding=N); không layout → 0 ---
     Context ctx("null");
     Context::MakeCurrent(&ctx);

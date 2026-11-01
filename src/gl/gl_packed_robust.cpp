@@ -74,7 +74,7 @@ void glMultiTexCoordP4uiv(GLenum t, GLenum ty, const GLuint* v) { glMultiTexCoor
 
 // --- Robustness Getn* (GL 4.5): bufSize-guarded, delegate về bản không-n ---
 // glGetnTexImage chuyển sang gl_get_extra.cpp (dùng chung GetTexSubImpl tươi GPU).
-void glGetnCompressedTexImage(GLenum t, GLint l, GLsizei n, void* p) { (void)t;(void)l; if(p&&n>0) memset(p,0,(size_t)n); }
+void glGetnCompressedTexImage(GLenum, GLint, GLsizei, void*) { Context::Current().errors.Record(0x0502); }
 void glGetnUniformfv(GLuint p, GLint l, GLsizei n, GLfloat* v) {
     Context& c = Context::Current();
     if (n < 0) { c.errors.Record(0x0501); return; }

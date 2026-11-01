@@ -95,6 +95,16 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
     Context& c = Context::Current();
     if (count < 0 || inst < 1) { c.errors.Record(0x0501); return; }
     if (count == 0) return; // no-op đúng spec (không encode draw-0)
+    if (c.conditionalRender.active) {
+        auto qit = c.queries.find(c.conditionalRender.query);
+        if (qit == c.queries.end() || qit->second.active) return; // deleted/invalid: skip
+        const bool noWait = c.conditionalRender.mode == 0x8E14 || c.conditionalRender.mode == 0x8E16;
+        GLint ok = 0;
+        if (noWait && !qit->second.ready) return;
+        // BY_REGION is conservatively treated as whole-query (no scissor-region query).
+        tglmt::gl::glGetQueryObjectiv(c.conditionalRender.query, 0x8866 /*QUERY_RESULT*/, &ok);
+        if (!ok) return;
+    }
     // Software pipeline-statistics (spec §18.4.2): đếm draw hợp lệ đã submit
     // (qua gate count/inst). VS invocations = input vertices — CHƯA nhân expansion
     // của GS vì GS chưa có đường thật (P6); số này đúng tuyệt đối với mọi
@@ -264,9 +274,17 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
         } else {
             size_t traceOff = (type == 0x1401) ? 0 : off;
             if (enc) enc->drawIndexed(prim, (uint32_t)count, ToIndex(effType, c), ib.get(), traceOff, (uint32_t)inst);
-            AppleDrawGL(mode, count, effType, (type == 0x1401 && cliPtr) ? effCliPtr : (cliPtr ? idx : nullptr), true,
-                        (type == 0x1401) ? 0 : (cliPtr ? 0 : (shadowUpload ? origOff : off)),
-                        (type == 0x1401 && cliPtr) ? 0 : (cliPtr ? 0 : ebo), inst, baseVertex, baseInstance, 0);
+            if (type == 0x1401) {
+                // UBYTE đã expand sang U16 trong ubExpand; phải dùng effCliPtr,
+                // eboId=0 — nếu trả ebo gốc AppleDrawGL đọc U16 tại offset cũ
+                // (Voxy cull: firstIndex 196608 → cube index 36B).
+                AppleDrawGL(mode, count, effType, effCliPtr, true, 0, 0,
+                            inst, baseVertex, baseInstance, 0);
+            } else {
+                AppleDrawGL(mode, count, effType, cliPtr ? idx : nullptr, true,
+                            cliPtr ? 0 : (shadowUpload ? origOff : off),
+                            cliPtr ? 0 : ebo, inst, baseVertex, baseInstance, 0);
+            }
         }
     }
     if (enc) enc->endEncoding();
@@ -298,6 +316,7 @@ static bool ReadArraysCmd(const void* ind, GLuint* count, GLuint* inst, GLuint* 
     GLuint dib = c.state.BoundBuffer(0x8F3F); // DRAW_INDIRECT_BUFFER
     struct Cmd { GLuint count, instanceCount, first, baseInstance; };
     if (dib) {
+        c.SyncComputeWritesTo(dib); // indirect commands có thể do compute ghi
         Context::BufferView bv = c.SyncBuffer(dib);
         if (!bv.p) { c.errors.Record(0x0502); return false; }
         size_t at = (size_t)ind;
@@ -317,6 +336,7 @@ static bool ReadElementsCmd(const void* ind, GLuint* count, GLuint* inst, GLuint
     GLuint dib = c.state.BoundBuffer(0x8F3F);
     struct Cmd { GLuint count, instanceCount, firstIndex, baseVertex, baseInstance; };
     if (dib) {
+        c.SyncComputeWritesTo(dib); // Voxy cmdgen.comp ghi thẳng drawCallBuffer
         Context::BufferView bv = c.SyncBuffer(dib);
         if (!bv.p) { c.errors.Record(0x0502); return false; }
         size_t at = (size_t)ind;
@@ -340,6 +360,15 @@ void glDrawArraysIndirect(GLenum m, const void* ind) {
 void glDrawElementsIndirect(GLenum m, GLenum t, const void* ind) {
     GLuint count = 0, inst = 1, firstIdx = 0, baseInst = 0; GLint baseVtx = 0;
     if (!ReadElementsCmd(ind, &count, &inst, &firstIdx, &baseVtx, &baseInst)) return;
+    { // chẩn đoán Voxy cull: instanceCount/offset lớn bất thường
+        static int n = 0;
+        if (n < 12) {
+            ++n;
+            fprintf(stderr, "[TGLMT] elsIndirect#%d mode=0x%x type=0x%x count=%u inst=%u first=%u bv=%d bi=%u\n",
+                    n, m, t, count, inst, firstIdx, baseVtx, baseInst);
+            fflush(stderr);
+        }
+    }
     // firstIndex là số index (element), phải nhân elemSize ra byte-offset (bug cũ truyền nguyên)
     size_t elem = IndexElemSize(t);
     EmitDraw(m, (GLsizei)count, t, (const void*)(firstIdx * elem),
@@ -393,6 +422,7 @@ void glMultiDrawArraysIndirectCount(GLenum m, const void* ind, GLintptr doff, GL
     if (s != 0 && stride < 16) { c.errors.Record(0x0501); return; }
     GLuint pb = c.state.BoundBuffer(0x80EE); // PARAMETER_BUFFER
     GLsizei dc = md;
+    if (pb) c.SyncComputeWritesTo(pb); // draw count do compute/atomic ghi
     Context::BufferView pv = c.SyncBuffer(pb);
     if (pv.p && (size_t)doff + 4 <= pv.size) memcpy(&dc, pv.p + doff, 4);
     else if (pb) { c.errors.Record(0x0502); return; }
@@ -414,12 +444,22 @@ void glMultiDrawElementsIndirectCount(GLenum m, GLenum t, const void* ind, GLint
     if (s != 0 && stride < 20) { c.errors.Record(0x0501); return; }
     GLuint pb = c.state.BoundBuffer(0x80EE);
     GLsizei dc = md;
+    if (pb) c.SyncComputeWritesTo(pb); // Voxy prep/cmdgen ghi drawCountCallBuffer
     Context::BufferView pv = c.SyncBuffer(pb);
     if (pv.p && (size_t)doff + 4 <= pv.size) memcpy(&dc, pv.p + doff, 4);
     else if (pb) { c.errors.Record(0x0502); return; }
     if (dc < 0) dc = 0;
     if (dc > md) dc = md;
     GLuint dib = c.state.BoundBuffer(0x8F3F);
+    {
+        static int n = 0;
+        if (n < 12) {
+            ++n;
+            fprintf(stderr, "[TGLMT] mdiCount#%d md=%d dc=%d doff=%lld stride=%zu pb=%u dib=%u ind=%p\n",
+                    n, md, dc, (long long)doff, stride, pb, dib, ind);
+            fflush(stderr);
+        }
+    }
     for (GLsizei i = 0; i < dc; ++i) {
         const void* cmd = dib ? (const void*)(uintptr_t)(i * stride)
                               : (const void*)((const uint8_t*)ind + i * stride);

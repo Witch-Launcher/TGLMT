@@ -2,7 +2,7 @@
 //
 // Quy tắc vàng (gl_error_string_debug.cpp): extension được advertise ⇒ có test
 // đang pass. Test này verify:
-//  1. 57 ext alias-ready (10 batch-1 + 47 batch-2) xuất hiện trong
+//  1. 54 ext alias-ready (9 batch-1 + 45 batch-2) xuất hiện trong
 //     glGetStringi(GL_EXTENSIONS).
 //  2. Hàm alias (glXxxARB/EXT/OES/APPLE) resolvable + gọi được, không crash,
 //     state khớp core.
@@ -45,7 +45,7 @@ GLboolean glUnmapBufferARB(GLenum target);
 
 static const char* kBatch1[] = {
     "GL_ARB_color_buffer_float", "GL_ARB_draw_buffers", "GL_ARB_draw_instanced",
-    "GL_ARB_instanced_arrays", "GL_ARB_multisample", "GL_ARB_occlusion_query",
+    "GL_ARB_instanced_arrays", "GL_ARB_occlusion_query",
     "GL_ARB_point_parameters", "GL_ARB_sample_shading",
     "GL_ARB_texture_buffer_object", "GL_ARB_vertex_buffer_object",
 };
@@ -61,14 +61,14 @@ static const char* kBatch2[] = {
     "GL_EXT_instanced_arrays", "GL_EXT_map_buffer_range", "GL_EXT_multi_draw_arrays",
     "GL_EXT_multi_draw_indirect", "GL_EXT_occlusion_query_boolean",
     "GL_EXT_point_parameters", "GL_EXT_polygon_offset",
-    "GL_EXT_polygon_offset_clamp", "GL_EXT_provoking_vertex", "GL_EXT_subtexture",
+    "GL_EXT_polygon_offset_clamp", "GL_EXT_subtexture",
     "GL_EXT_texture_array", "GL_EXT_texture_border_clamp", "GL_EXT_texture_buffer",
     "GL_EXT_texture_buffer_object", "GL_EXT_texture_view", "GL_EXT_timer_query",
     "GL_OES_blend_equation_separate", "GL_OES_blend_func_separate",
     "GL_OES_blend_subtract", "GL_OES_copy_image", "GL_OES_draw_buffers_indexed",
     "GL_OES_draw_elements_base_vertex", "GL_OES_mapbuffer", "GL_OES_sample_shading",
     "GL_OES_texture_border_clamp", "GL_OES_texture_buffer",
-    "GL_OES_texture_storage_multisample_2d_array", "GL_OES_texture_view",
+    "GL_OES_texture_view",
     "GL_OES_vertex_array_object",
 };
 

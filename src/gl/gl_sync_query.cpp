@@ -86,13 +86,29 @@ static bool PipeStatOf(const Context::PipeStats& s, GLenum t, GLuint64* out) {
 static bool IsOcclusionTarget(GLenum t) {
     return t == 0x8C2F /*ANY_SAMPLES_PASSED*/ ||
            t == 0x8D6A /*ANY_SAMPLES_PASSED_CONSERVATIVE*/ ||
-           t == 0x8896 /*SAMPLES_PASSED (boolean approximation)*/;
+           t == 0x8914 /*SAMPLES_PASSED (boolean approximation)*/;
+}
+static bool IsQueryTarget(GLenum t) {
+    switch (t) {
+        case 0x8914: case 0x8C2F: case 0x8D6A: // samples
+        case 0x88BF: case 0x8E28:             // time elapsed / timestamp
+        case 0x8C87: case 0x8C88:             // primitives generated / TF written
+        case 0x82EE: case 0x82EF: case 0x82F0: case 0x82F1: case 0x82F2:
+        case 0x82F3: case 0x82F4: case 0x82F5: case 0x82F6: case 0x82F7:
+        case 0x887F: case 0x82EC: case 0x82ED:
+            return true;
+        default: return false;
+    }
 }
 
 void glBeginQuery(GLenum t, GLuint id) {
     Context& c = Context::Current();
+    if (!IsQueryTarget(t)) { c.errors.Record(0x0500); return; }
     auto it = c.queries.find(id);
     if (it == c.queries.end()) { c.errors.Record(0x0502); return; }
+    if (it->second.active) { c.errors.Record(0x0502); return; }
+    for (auto& [qid, q] : c.queries)
+        if (q.active && q.target == t) { c.errors.Record(0x0502); return; }
     it->second.target = t; it->second.active = true; it->second.ready = false;
     it->second.occlSlot = UINT64_MAX;
     GLuint64 v = 0;
@@ -111,7 +127,10 @@ void glBeginQuery(GLenum t, GLuint id) {
 }
 void glEndQuery(GLenum t) {
     Context& c = Context::Current();
+    if (!IsQueryTarget(t)) { c.errors.Record(0x0500); return; }
+    bool found = false;
     for (auto& [id, q] : c.queries) if (q.target == t && q.active) {
+        found = true;
         q.active = false;
         if (IsOcclusionTarget(t) && q.occlSlot != UINT64_MAX) {
             // Chưa đọc được ngay — GPU có thể还在 encode. ready=false, đọc
@@ -126,13 +145,16 @@ void glEndQuery(GLenum t) {
             else q.result = 0;
         }
     }
+    if (!found) c.errors.Record(0x0502); // no active query for target
 }
 void glBeginQueryIndexed(GLenum t, GLuint idx, GLuint id) { (void)idx; glBeginQuery(t, id); }
 void glEndQueryIndexed(GLenum t, GLuint idx) { (void)idx; glEndQuery(t); }
 void glQueryCounter(GLuint id, GLenum t) {
     Context& c = Context::Current();
+    if (t != 0x8E28 /*TIMESTAMP*/) { c.errors.Record(0x0500); return; }
     auto it = c.queries.find(id);
     if (it == c.queries.end()) { c.errors.Record(0x0502); return; }
+    if (it->second.active) { c.errors.Record(0x0502); return; }
     it->second.target = t;
     // Metal GPUStartTime/GPUEndTime — Null: timestamp CPU nano
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -159,9 +181,10 @@ void glGetQueryObjectiv(GLuint id, GLenum p, GLint* v) {
             q.ready = true;
         } else { q.result = 0; q.ready = true; } // Null: không render → 0
     }
-    if (p == 0x8867) *v = q.ready ? 1 : 0;       // QUERY_RESULT_AVAILABLE
-    else if (p == 0x8866) *v = (GLint)q.result;  // QUERY_RESULT
-    else *v = 0;
+    if (p == 0x8867) *v = q.ready ? 1 : 0;              // QUERY_RESULT_AVAILABLE
+    else if (p == 0x8866) *v = (GLint)q.result;         // QUERY_RESULT
+    else if (p == 0x9194) *v = q.ready ? (GLint)q.result : 0; // RESULT_NO_WAIT
+    else { c.errors.Record(0x0500); *v = 0; }
 }
 void glGetQueryObjectuiv(GLuint id, GLenum p, GLuint* v) { GLint t=0; glGetQueryObjectiv(id,p,&t); *v=(GLuint)t; }
 void glGetQueryObjecti64v(GLuint id, GLenum p, GLint64* v) {
@@ -180,17 +203,67 @@ void glGetQueryObjecti64v(GLuint id, GLenum p, GLint64* v) {
         } else { q.result = 0; q.ready = true; }
     }
     if (p == 0x8867) *v = q.ready ? 1 : 0;
-    else *v = (GLint64)q.result;
+    else if (p == 0x8866) *v = (GLint64)q.result;
+    else if (p == 0x9194) *v = q.ready ? (GLint64)q.result : 0;
+    else { c.errors.Record(0x0500); *v = 0; }
 }
 void glGetQueryObjectui64v(GLuint id, GLenum p, GLuint64* v) { GLint64 t=0; glGetQueryObjecti64v(id,p,&t); *v=(GLuint64)t; }
-void glGetQueryBufferObjectiv(GLuint a, GLuint b, GLenum c_, GLintptr d) { (void)a;(void)b;(void)c_;(void)d; }
-void glGetQueryBufferObjectuiv(GLuint a, GLuint b, GLenum c_, GLintptr d) { (void)a;(void)b;(void)c_;(void)d; }
-void glGetQueryBufferObjecti64v(GLuint a, GLuint b, GLenum c_, GLintptr d) { (void)a;(void)b;(void)c_;(void)d; }
-void glGetQueryBufferObjectui64v(GLuint a, GLuint b, GLenum c_, GLintptr d) { (void)a;(void)b;(void)c_;(void)d; }
-void glGetQueryiv(GLenum t, GLenum p, GLint* v) { (void)t;(void)p; *v = 0; }
-void glGetQueryIndexediv(GLenum t, GLuint i, GLenum p, GLint* v) { (void)t;(void)i;(void)p; *v = 0; }
-void glBeginConditionalRender(GLuint id, GLenum m) { (void)id;(void)m; }
-void glEndConditionalRender() {}
+static GLint QueryCounterBits(GLenum t) {
+    if (t == 0x8C2F || t == 0x8D6A || t == 0x8914) return 1;
+    if (t == 0x88BF || t == 0x8E28 || t == 0x8C87 || t == 0x8C88) return 64;
+    if (t == 0x82EE || t == 0x82EF || t == 0x82F0 || t == 0x82F1 || t == 0x82F2 ||
+        t == 0x82F3 || t == 0x82F4 || t == 0x82F5 || t == 0x82F6 || t == 0x82F7 ||
+        t == 0x887F || t == 0x82EC || t == 0x82ED) return 64;
+    return 0;
+}
+static void QueryBufferWrite(GLuint id, GLuint buffer, GLenum p, GLintptr off, bool is64) {
+    Context& c = Context::Current();
+    if (p != 0x8866 && p != 0x8867 && p != 0x9194) { c.errors.Record(0x0500); return; }
+    if (!c.buffers.count(buffer)) { c.errors.Record(0x0502); return; }
+    GLuint64 v = 0;
+    if (is64) glGetQueryObjectui64v(id, p, &v);
+    else { GLuint t = 0; glGetQueryObjectuiv(id, p, &t); v = t; }
+    size_t n = is64 ? sizeof(GLuint64) : sizeof(GLuint);
+    glNamedBufferSubData(buffer, off, (GLsizeiptr)n, &v);
+}
+void glGetQueryBufferObjectiv(GLuint id, GLuint b, GLenum p, GLintptr off) { QueryBufferWrite(id, b, p, off, false); }
+void glGetQueryBufferObjectuiv(GLuint id, GLuint b, GLenum p, GLintptr off) { QueryBufferWrite(id, b, p, off, false); }
+void glGetQueryBufferObjecti64v(GLuint id, GLuint b, GLenum p, GLintptr off) { QueryBufferWrite(id, b, p, off, true); }
+void glGetQueryBufferObjectui64v(GLuint id, GLuint b, GLenum p, GLintptr off) { QueryBufferWrite(id, b, p, off, true); }
+void glGetQueryiv(GLenum t, GLenum p, GLint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }
+    if (!IsQueryTarget(t)) { c.errors.Record(0x0500); return; }
+    if (p == 0x8865 /*CURRENT_QUERY*/) {
+        *v = 0;
+        for (auto& [id, q] : c.queries) if (q.active && q.target == t) { *v = (GLint)id; break; }
+    } else if (p == 0x8864 /*QUERY_COUNTER_BITS*/) {
+        *v = QueryCounterBits(t);
+    } else { c.errors.Record(0x0500); *v = 0; }
+}
+void glGetQueryIndexediv(GLenum t, GLuint i, GLenum p, GLint* v) {
+    if (i != 0) { Context::Current().errors.Record(0x0500); if (v) *v = 0; return; }
+    glGetQueryiv(t, p, v);
+}
+void glBeginConditionalRender(GLuint id, GLenum m) {
+    Context& c = Context::Current();
+    if (m != 0x8E13 && m != 0x8E14 && m != 0x8E15 && m != 0x8E16) {
+        c.errors.Record(0x0500); return; // WAIT / NO_WAIT / BY_REGION_*
+    }
+    auto it = c.queries.find(id);
+    if (it == c.queries.end()) { c.errors.Record(0x0502); return; }
+    if (it->second.active || c.conditionalRender.active) { c.errors.Record(0x0502); return; }
+    c.conditionalRender.query = id;
+    c.conditionalRender.mode = m;
+    c.conditionalRender.active = true;
+}
+void glEndConditionalRender() {
+    Context& c = Context::Current();
+    if (!c.conditionalRender.active) { c.errors.Record(0x0502); return; }
+    c.conditionalRender.active = false;
+    c.conditionalRender.query = 0;
+    c.conditionalRender.mode = 0;
+}
 void glFinish() { auto& c = Context::Current(); c.FlushPendingEncoder(); c.FlushAllBufferStaging(); c.FlushAllTextureStaging(); c.CommitAndWait(); }
 void glFlush() { auto& c = Context::Current(); c.FlushPendingEncoder(); c.FlushAllBufferStaging(); c.FlushAllTextureStaging(); }
 } // namespace tglmt::gl

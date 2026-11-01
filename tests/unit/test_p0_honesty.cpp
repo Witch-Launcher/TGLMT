@@ -197,19 +197,21 @@ int main() {
         GLint n = 0;
         glGetIntegerv(0x821D /*GL_NUM_EXTENSIONS*/, &n);
         Check(n == (GLint)tglmt_num_extensions(), "NUM_EXTENSIONS khớp tglmt_num_extensions()");
-        bool hasPipe = false, hasClamp = false, hasNoErr = false, hasSpirv = false;
+        bool hasPipe = false, hasClamp = false, hasNoErr = false, hasRetracted = false;
         for (GLint i = 0; i < n; ++i) {
             const char* e = (const char*)glGetStringi(0x1F03, (GLuint)i);
             if (!e) continue;
             if (std::string(e) == "GL_ARB_pipeline_statistics_query") hasPipe = true;
             if (std::string(e) == "GL_ARB_polygon_offset_clamp") hasClamp = true;
             if (std::string(e) == "GL_KHR_no_error") hasNoErr = true;
-            if (std::string(e) == "GL_ARB_gl_spirv") hasSpirv = true;
+            if (std::string(e) == "GL_ARB_gl_spirv" ||
+                std::string(e) == "GL_ARB_direct_state_access" ||
+                std::string(e) == "GL_EXT_separate_shader_objects") hasRetracted = true;
         }
         Check(!hasPipe, "ARB_pipeline_statistics_query KHÔNG quảng cáo (fragment invocations không đo được)");
         Check(hasClamp, "ARB_polygon_offset_clamp CÓ quảng cáo (depthBias clamp thật)");
         Check(hasNoErr, "KHR_no_error CÓ quảng cáo (env TGLMT_NO_ERROR wire SetNoError)");
-        Check(hasSpirv, "ARB_gl_spirv CÓ quảng cáo");
+        Check(!hasRetracted, "retracted extensions KHÔNG được quảng cáo");
     }
 
     // --- 8. glInvalidateFramebuffer → contentUndefined (TBDR DontCare).

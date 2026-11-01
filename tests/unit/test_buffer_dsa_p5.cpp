@@ -40,6 +40,29 @@ int main() {
         glDeleteBuffers(1, &buf);
     }
 
+    // ===== glClearNamedBuffer(Sub)Data: data là GIÁ TRỊ, không phải byte =====
+    {
+        GLuint buf = 0;
+        glCreateBuffers(1, &buf);
+        unsigned zero[4] = {0, 0, 0, 0};
+        glNamedBufferData(buf, sizeof(zero), zero, 0x88E4);
+        unsigned id = 0x21;
+        glClearNamedBufferSubData(buf, 0x8236 /*R32UI*/, 4, 4, 0x1903, 0x1405, &id);
+        Check(glGetError() == 0, "ClearNamedBufferSubData R32UI lỗi");
+        unsigned full = 0xDEADBEEF;
+        glClearNamedBufferData(buf, 0x8236 /*R32UI*/, 0x1903, 0x1405, &full);
+        Check(glGetError() == 0, "ClearNamedBufferData R32UI lỗi");
+        unsigned out[4] = {};
+        glGetNamedBufferSubData(buf, 0, sizeof(out), out);
+        Check(out[0] == 0xDEADBEEF && out[1] == 0xDEADBEEF,
+              "ClearNamedBufferData phải lặp nguyên 4 byte");
+        glClearNamedBufferSubData(buf, 0x8236, 8, 4, 0x1903, 0x1405, &id);
+        glGetNamedBufferSubData(buf, 0, sizeof(out), out);
+        Check(out[2] == 0x21 && out[3] == 0xDEADBEEF,
+              "ClearNamedBufferSubData R32UI phải ghi đúng uint32");
+        glDeleteBuffers(1, &buf);
+    }
+
     // ===== DSA texture: create + storage + subimage + param (không bind) =====
     {
         GLuint tex = 0;

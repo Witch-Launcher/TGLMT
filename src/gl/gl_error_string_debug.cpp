@@ -44,8 +44,14 @@ const GLubyte* glGetString(GLenum n) {
 // cáo extension cho tới khi đường counter GPU (P5) chạy thật. Quảng cáo extension
 // rồi trả 0 cho fragment invocations = nói dối, đúng thứ hạng "No-op accepted"
 // mà vocabulary docs cấm.
+//
+// RETRACTED 2026-10-23 (tools/ext_behavior_audit.py): ARB_gl_spirv,
+// ARB_multisample, EXT_provoking_vertex,
+// OES_texture_storage_multisample_2d_array,
+// ARB_copy_image, EXT_separate_shader_objects, ARB_direct_state_access.
+// Symbols remain callable, but the extensions are not advertised until their
+// no-op entry points are implemented.
 static const char* const kExts[] = {
-    "GL_ARB_gl_spirv",
     "GL_ARB_indirect_parameters",
     "GL_ARB_polygon_offset_clamp",
     "GL_ARB_texture_filter_anisotropic",
@@ -57,7 +63,6 @@ static const char* const kExts[] = {
     "GL_ARB_draw_buffers",
     "GL_ARB_draw_instanced",
     "GL_ARB_instanced_arrays",
-    "GL_ARB_multisample",
     "GL_ARB_occlusion_query",
     "GL_ARB_point_parameters",
     "GL_ARB_sample_shading",
@@ -70,7 +75,6 @@ static const char* const kExts[] = {
     // = nói dối. 47 ext mirror core functionality đang chạy.
     "GL_APPLE_sync",
     "GL_APPLE_vertex_array_object",
-    "GL_ARB_draw_buffers_blend",
     "GL_EXT_base_instance",
     "GL_EXT_blend_color",
     "GL_EXT_blend_equation_separate",
@@ -94,7 +98,6 @@ static const char* const kExts[] = {
     "GL_EXT_point_parameters",
     "GL_EXT_polygon_offset",
     "GL_EXT_polygon_offset_clamp",
-    "GL_EXT_provoking_vertex",
     "GL_EXT_subtexture",
     "GL_EXT_texture_array",
     "GL_EXT_texture_border_clamp",
@@ -112,7 +115,6 @@ static const char* const kExts[] = {
     "GL_OES_sample_shading",
     "GL_OES_texture_border_clamp",
     "GL_OES_texture_buffer",
-    "GL_OES_texture_storage_multisample_2d_array",
     "GL_OES_texture_view",
     "GL_OES_vertex_array_object",
     // P3 batch-3: enum-only exts — behavior = core đã verify thật, enums đã define.
@@ -137,8 +139,8 @@ static const char* const kExts[] = {
     // (xem AppleMetalBridge.mm):
     //  - half_float_vertex: HALF_FLOAT (0x140B) → MTLVertexFormatHalf2/3/4,
     //    GLTypeSize stride=2. (Trước bị loại nhầm do grep sai chỗ.)
-    //  - vertex_type_2_10_10_10_rev: INT_2_10_10_10_REV/UINT_2_10_10_10_REV
-    //    (size=4, norm) → MTLVertexFormatInt/UInt1010102Normalized.
+    //  - vertex_type_2_10_10_10_rev: packed glVertexAttribPointer + all
+    //    glVertexAttribP* entry points implemented + tested (test_vertex_packed).
     //  - vertex_array_bgra (+EXT): type=GL_BGRA size=4 norm →
     //    MTLVertexFormatUChar4Normalized_BGRA.
     "GL_ARB_half_float_vertex",
@@ -163,7 +165,6 @@ static const char* const kExts[] = {
     "GL_ARB_texture_swizzle",
     // (c) API-side, hàm thật:
     "GL_ARB_draw_elements_base_vertex",
-    "GL_ARB_copy_image",
     "GL_ARB_get_texture_sub_image",
     "GL_ARB_multi_draw_indirect",
     "GL_ARB_texture_buffer_range",
@@ -241,16 +242,11 @@ static const char* const kExts[] = {
     "GL_ARB_compute_variable_group_size",
     "GL_EXT_debug_label",
     "GL_ARB_ES3_2_compatibility",
-    // ===== P8: ARB_shader_objects (GLSL đời đầu, forwards sang core) — 11+28. =====
-    //  - glXxxObjectARB forward 1:1 sang glXxxShader/Program (type-dispatch cho
-    //    Delete/InfoLog/Parameter). 28 alias còn lại do generator.
+    // ===== P8: ARB_shader_objects + EXT_draw_buffers2 (indexed MRT control). =====
     "GL_ARB_shader_objects",
-    // ===== P8: EXT_draw_buffers2 (indexed MRT control) + separate_shader_objects. =====
     //  - draw_buffers2: ColorMask/Enable/Disable/IsEnabled/Get indexed (per-target MRT).
-    //  - separate_shader_objects: CreateShaderProgram (compile+link separable) +
-    //    UseShaderProgram (bind theo stage) + ActiveProgram (validate pipeline).
+    //  - EXT_separate_shader_objects is retracted until UseProgramStages is real.
     "GL_EXT_draw_buffers2",
-    "GL_EXT_separate_shader_objects",
     // ===== P9: stencil_two_side + viewport_array + atomic_counters (Metal thật). =====
     //  - stencil_two_side: ActiveStencilFaceEXT + sửa face check bug.
     //  - viewport_array (ARB+OES): DepthRangeArray/Indexed forwards.
@@ -263,17 +259,18 @@ static const char* const kExts[] = {
     // ===== P10: Sodium/Iris exts (framebuffer_no_attachments + texture_view + program_interface). =====
     //  - framebuffer_no_attachments: FramebufferParameteri/Get (defaults state).
     //  - texture_view: TextureView Metal view thật (mip/slice subset, vanilla mip bake).
-    //  - program_interface_query: GetProgramResource* từ converter data (UNIFORM/BLOCK/INPUT).
+    //  - program_interface_query: GetProgramResource* works for uniforms, blocks,
+    //    inputs and fragment outputs; LocationIndex is 0 (no dual-source support).
     "GL_ARB_framebuffer_no_attachments",
     "GL_ARB_texture_view",
     "GL_ARB_program_interface_query",
     // ===== P5: buffer storage (ARB_buffer_storage) — immutable buffer THẬT. =====
     //  - glBufferStorage (+Named) ĐÃ implement (immutable, flags, GPU upload).
     "GL_ARB_buffer_storage",
-    // ===== P5: direct state access (ARB_direct_state_access) — 97 hàm THẬT. =====
-    //  - Texture/buffer/framebuffer/VAO/sampler/query DSA ĐÃ implement đầy đủ
-    //    (không bind, thao tác trực tiếp object). Verify bằng coverage + test.
-    "GL_ARB_direct_state_access",
+    // ===== P5: direct state access is retracted. =====
+    //  - 17 DSA entry points are no-ops (multisample storage, renderbuffer
+    //    storage, compressed/copy sub-image, query-buffer, named invalidate).
+    //    Re-advertise after the core FBO/MSAA/compressed paths are real.
     // ===== P4: SSBO graphics (ARB_shader_storage_buffer_object) — THẬT cả vs/fs. =====
     //  - Converter nhận `buffer` block vs/fs (slot 17+k chung UBO), backend bind
     //    device buffer + glShaderStorageBlockBinding override (e2e test_ssbo_graphics_apple).

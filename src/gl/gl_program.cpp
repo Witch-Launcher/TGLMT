@@ -3,6 +3,7 @@
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -11,6 +12,9 @@
 using namespace tglmt;
 
 namespace tglmt::gl {
+static bool IsIdentChar(char c, bool first) {
+    return c == '_' || isalpha((unsigned char)c) || (!first && isdigit((unsigned char)c));
+}
 // P10: GLSL type string → GL enum (cho program_interface_query TYPE property).
 static GLenum GlslTypeToGLEnum(const std::string& t) {
     if (t == "float") return 0x1406;
@@ -105,6 +109,72 @@ void glDetachShader(GLuint p, GLuint s) {
     auto& v = itp->second.shaders;
     v.erase(std::remove(v.begin(), v.end(), s), v.end());
 }
+static std::string RewriteColorIndex(std::string msl, int from, int to) {
+    if (from == to) return msl;
+    std::string a = "[[color(" + std::to_string(from) + ")]]";
+    std::string b = "[[color(" + std::to_string(to) + ")]]";
+    size_t p = 0;
+    while ((p = msl.find(a, p)) != std::string::npos) { msl.replace(p, a.size(), b); p += b.size(); }
+    // MRT field name `mrtN` phải đổi cùng lúc với attribute/copy.
+    std::string fa = "mrt" + std::to_string(from), fb = "mrt" + std::to_string(to);
+    p = 0;
+    while ((p = msl.find(fa, p)) != std::string::npos) {
+        bool left = p > 0 && IsIdentChar(msl[p - 1], false);
+        bool right = p + fa.size() < msl.size() && IsIdentChar(msl[p + fa.size()], false);
+        if (!left && !right) { msl.replace(p, fa.size(), fb); p += fb.size(); }
+        else p += fa.size();
+    }
+    return msl;
+}
+// Fragment đơn output do converter phát `fragment T TGLMT_fs(...) { ... return
+// tglmt_fragColor; }` (KHÔNG có [[color]] — Metal mặc định color(0)). Khi
+// glBindFragDataLocation đổi sang attachment khác, bọc return thành struct có
+// [[color(loc)]] để output đi đúng draw buffer.
+// Fixed-function sample mask (glSampleMaski/glSampleCoverage): MSL không có
+// state tương đương. Inject một fragment input [[sample_id]] + buffer mask và
+// discard sample bị tắt trước khi shader chạy. Chỉ compile bản này cho MSAA.
+static std::string InjectSampleMask(std::string msl) {
+    if (msl.find("tglmt_sampleMask") != std::string::npos) return msl;
+    // buffer(30) là slot cuối của graphics (SSBO/UBO có thể chiếm); nếu shader
+    // đã dùng thì không inject để tránh đè binding.
+    if (msl.find("buffer(30)") != std::string::npos) return msl;
+    size_t fn = msl.find(" TGLMT_fs(");
+    if (fn == std::string::npos) return msl;
+    size_t open = msl.find('(', fn);
+    if (open == std::string::npos) return msl;
+    int depth = 1;
+    size_t close = open + 1;
+    for (; close < msl.size() && depth > 0; ++close) {
+        if (msl[close] == '(') ++depth;
+        else if (msl[close] == ')') --depth;
+    }
+    if (depth != 0) return msl;
+    --close; // index of matching ')' */
+
+    msl.insert(close,
+               ",\n    constant uint& tglmt_sampleMask [[buffer(30)]],"
+               "\n    uint tglmt_sampleID [[sample_id]]");
+    size_t body = msl.find('{', close);
+    if (body == std::string::npos) return msl;
+    msl.insert(body + 1,
+               "\n    if (!((tglmt_sampleMask >> (tglmt_sampleID & 31u)) & 1u))"
+               " { discard_fragment(); }\n");
+    return msl;
+}
+static std::string WrapSingleFragColor(std::string msl, const std::string& type, int loc) {
+    if (loc <= 0 || msl.find("struct TGLMT_FOut") != std::string::npos) return msl;
+    std::string sig = "fragment " + type + " TGLMT_fs(";
+    size_t p = msl.find(sig);
+    if (p == std::string::npos) return msl;
+    std::string rep = "struct TGLMT_FOut { " + type + " c [[color(" +
+                      std::to_string(loc) + ")]]; };\nfragment TGLMT_FOut TGLMT_fs(";
+    msl.replace(p, sig.size(), rep);
+    size_t r = msl.find("return tglmt_fragColor;", p);
+    if (r != std::string::npos)
+        msl.replace(r, strlen("return tglmt_fragColor;"),
+                    "TGLMT_FOut _out = {}; _out.c = tglmt_fragColor; return _out;");
+    return msl;
+}
 static std::string RewriteLocns(std::string msl, bool isAttrib, int from, int to) {
     // Viết lại [[user(locnFROM)]] hoặc [[attribute(FROM)]] → số thật (token duy nhất).
     std::string a, b;
@@ -122,6 +192,127 @@ static std::string RewriteLocns(std::string msl, bool isAttrib, int from, int to
     }
     return msl;
 }
+
+// --- ARB_separate_shader_objects: subroutine reflection ---------------------
+// Converter đã hỗ trợ subroutine bằng cách hạ mỗi uniform subroutine thành
+// `uniform int` + hàm dispatch switch. Ở đây chỉ cần đọc tên impl/uniform từ
+// source GLSL để trả index/location đúng GL; việc chọn hàm do uniform int đảm
+// nhiệm (glUniformSubroutinesuiv ghi ordinal của type tương ứng).
+static bool IsSubIdent(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+static std::string SubStripComments(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size();) {
+        if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '/') {
+            while (i < in.size() && in[i] != '\n') { out.push_back(' '); ++i; }
+        } else if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < in.size() && !(in[i] == '*' && in[i + 1] == '/')) {
+                out.push_back(in[i] == '\n' ? '\n' : ' '); ++i;
+            }
+            if (i + 1 < in.size()) { out += "  "; i += 2; }
+        } else {
+            out.push_back(in[i++]);
+        }
+    }
+    return out;
+}
+static void SubSkipSpace(const std::string& s, size_t& i) {
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) ++i;
+}
+static std::string SubIdent(const std::string& s, size_t& i) {
+    size_t b = i;
+    while (i < s.size() && IsSubIdent(s[i])) ++i;
+    return s.substr(b, i - b);
+}
+static bool SubWord(const std::string& s, size_t i, const char* w) {
+    size_t n = strlen(w);
+    if (i + n > s.size() || s.compare(i, n, w) != 0) return false;
+    if (i > 0 && IsSubIdent(s[i - 1])) return false;
+    if (i + n < s.size() && IsSubIdent(s[i + n])) return false;
+    return true;
+}
+static void RefreshSubroutines(Context& c, ProgramObject& pr) {
+    pr.subroutines.clear();
+    for (GLuint sid : pr.shaders) {
+        auto sit = c.shaders.find(sid);
+        if (sit == c.shaders.end()) continue;
+        GLenum st = sit->second.type;
+        if (st != 0x8B31 && st != 0x8B30 && st != 0x8DD9 &&
+            st != 0x8E88 && st != 0x8E87) continue;
+        std::string src = SubStripComments(sit->second.source);
+        auto& info = pr.subroutines[st];
+        size_t i = 0;
+        while (i < src.size()) {
+            if (!SubWord(src, i, "subroutine")) { ++i; continue; }
+            size_t j = i + 10;
+            SubSkipSpace(src, j);
+            if (SubWord(src, j, "uniform")) {
+                j += 7; SubSkipSpace(src, j);
+                std::string ty = SubIdent(src, j);
+                SubSkipSpace(src, j);
+                std::string nm = SubIdent(src, j);
+                if (!ty.empty() && !nm.empty()) {
+                    bool dup = false;
+                    for (auto& u : info.uniforms) if (u.first == nm) { dup = true; break; }
+                    if (!dup) info.uniforms.emplace_back(nm, ty);
+                }
+                size_t semi = src.find(';', j);
+                i = (semi == std::string::npos) ? src.size() : semi + 1;
+                continue;
+            }
+            if (j < src.size() && src[j] == '(') {
+                size_t rp = src.find(')', j + 1);
+                if (rp == std::string::npos) { i = src.size(); continue; }
+                std::string ty = src.substr(j + 1, rp - j - 1);
+                // trim type
+                size_t b = ty.find_first_not_of(" \t\r\n");
+                size_t e = ty.find_last_not_of(" \t\r\n");
+                ty = (b == std::string::npos) ? "" : ty.substr(b, e - b + 1);
+                size_t lp = src.find('(', rp + 1);
+                size_t semi = src.find(';', rp + 1);
+                if (lp == std::string::npos || (semi != std::string::npos && semi < lp)) {
+                    i = rp + 1; continue;
+                }
+                std::string before = src.substr(rp + 1, lp - rp - 1);
+                // tên hàm = identifier cuối cùng trước '('
+                size_t q = before.size();
+                while (q > 0 && !IsSubIdent(before[q - 1])) --q;
+                size_t qe = q;
+                while (q > 0 && IsSubIdent(before[q - 1])) --q;
+                std::string fn = before.substr(q, qe - q);
+                if (!ty.empty() && !fn.empty() && info.implIndex.find(fn) == info.implIndex.end()) {
+                    GLuint idx = (GLuint)info.impls.size();
+                    info.impls.push_back(fn);
+                    info.implIndex[fn] = idx;
+                    info.typeImpls[ty].push_back(fn);
+                }
+                i = lp + 1;
+                continue;
+            }
+            ++i;
+        }
+    }
+    // Gán location cho subroutine uniform theo thứ tự khai báo để
+    // glUniformSubroutinesuiv(count) và glGetSubroutineUniformLocation khớp nhau.
+    for (auto& [st, info] : pr.subroutines) {
+        (void)st;
+        GLint next = 0;
+        for (auto& kv : pr.uniformLoc) next = std::max(next, kv.second + 1);
+        for (auto& u : info.uniforms) {
+            auto it = pr.uniformLoc.find(u.first);
+            if (it == pr.uniformLoc.end()) {
+                pr.uniformLoc[u.first] = next++;
+            }
+            for (auto& e : pr.uniformLayout)
+                if (e.name == u.first) { e.loc = pr.uniformLoc[u.first]; break; }
+        }
+    }
+}
+
 void glLinkProgram(GLuint p) {
     Context& c = Context::Current();
     auto itp = c.programs.find(p);
@@ -141,6 +332,7 @@ void glLinkProgram(GLuint p) {
     pr.vsImages.clear(); pr.fsImages.clear(); pr.computeImages.clear();
     pr.computeAtomics.clear(); pr.vsAtomics.clear(); pr.fsAtomics.clear();
     pr.vsUBSize = pr.fsUBSize = 0;
+    pr.pipelineVS = nullptr; pr.pipelineFS = nullptr;
     ShaderObject *vs = nullptr, *fs = nullptr;
     bool hasV = false, hasF = false;
     pr.hasTessStages = false; pr.hasGeometryStage = false;
@@ -238,16 +430,20 @@ void glLinkProgram(GLuint p) {
         pr.reflectionComplete = true;
         return;
     }
-    if (!hasV) { pr.infoLog = "error: graphics program needs vertex shader"; return; }
+    if (!hasV && !hasF) { pr.infoLog = "error: graphics program needs a shader"; return; }
+    if (!pr.separable && hasF && !hasV) {
+        pr.infoLog = "error: non-separable fragment program needs vertex shader"; return;
+    }
     // Snapshot conv: Blaze3D gắn CÙNG ShaderObject vào NHIỀU program (và có thể
     // relink). Link cũ mutate vs->conv/fs->conv tại chỗ (900→0) trong khi MSL
     // copy lại từ vs->msl gốc mỗi lần → link thứ 2 thấy location đã 0 nên bỏ
     // rewrite, Metal nhận attribute(900) out-of-bounds → 1282 → crash game.
     // Từ đây chỉ làm việc trên bản copy, link idempotent, shader gốc giữ nguyên.
-    GLSLConvertResult vsC = vs->conv, fsC = fs ? fs->conv : GLSLConvertResult{};
+    GLSLConvertResult vsC = vs ? vs->conv : GLSLConvertResult{};
+    GLSLConvertResult fsC = fs ? fs->conv : GLSLConvertResult{};
     // Không có fragment: GL cho phép (chỉ depth/raster discard)? — yêu cầu FS để đơn giản
     // và trung thực với M5b (pipeline cần fragment fn). Ghi rõ thay vì im lặng.
-    if (vs && !fs) {
+    if (vs && !fs && !pr.separable) {
         // Vertex-only: hợp lệ trong GL khi không cần màu (rasterizer discard/XFB).
         // TGLMT M5b cần fragment fn → link OK nhưng AppleDraw trả về trace-only.
         // reflectionComplete giữ false: reflection rỗng (không điền) nên
@@ -256,8 +452,10 @@ void glLinkProgram(GLuint p) {
         return;
     }
     // 1. Varying matching: mọi fs.in phải có vs.out cùng tên (đúng GL: thiếu → link lỗi).
-    //    vs.out thừa không ai đọc: cho phép (GL cho phép).
+    //    vs.out thừa không ai đọc: cho phép (GL cho phép). FS-only separable thì
+    //    link độc lập, việc ghép với VS xảy ra ở pipeline draw/validate.
     for (auto& fi : fsC.inputs) {
+        if (!hasV) break;
         bool found = false;
         for (auto& vo : vsC.outputs)
             if (vo.name == fi.name) {
@@ -389,6 +587,7 @@ void glLinkProgram(GLuint p) {
         }
         pr.fsUBSize = fsC.uniformBufferSize;
     }
+    RefreshSubroutines(c, pr);
     // 4c. GL_ACTIVE_UNIFORMS reflection — glGetActiveUniform phải trả type/size
     // thật. Iris ProgramUniforms.buildUniforms so type Iris cấp với type chương
     // trình đọc: stub cũ luôn FLOAT nên `iris_LightmapTextureMatrix` (mat4, do
@@ -396,6 +595,28 @@ void glLinkProgram(GLuint p) {
     // UV = 0 → terrain/entity đen (CR r5.9.3, iPhone 8 Plus build 107).
     // Name mảng theo spec GL: "name[0]" + size = số phần tử.
     pr.activeUniforms.clear();
+    pr.fragOutputs.clear();
+    for (size_t i = 0; i < fsC.outputs.size(); ++i) {
+        auto& o = fsC.outputs[i];
+        // layout(location=) thắng; nếu không có thì glBindFragDataLocation(Indexed)
+        // quyết định, cuối cùng mới theo thứ tự khai báo (đúng GL).
+        GLint loc;
+        GLuint outIdx = 0;
+        auto fb = pr.fragDataBind.find(o.name);
+        if (o.location >= 0 && o.location < kTempLocBase) loc = o.location;
+        else if (fb != pr.fragDataBind.end()) loc = (GLint)fb->second.color;
+        else loc = (GLint)i;
+        if (fb != pr.fragDataBind.end()) outIdx = fb->second.index;
+        // Single-output converter luôn phát [[color(0)]] (bất kể layout/binding);
+        // MRT dùng [[color(location tạm 900+)]]. Viết lại đúng nguồn.
+        int srcColor = (fsC.outputs.size() > 1) ? o.location : 0;
+        pr.fragmentMSL = RewriteColorIndex(pr.fragmentMSL, srcColor, loc);
+        pr.fragOutputs.push_back({o.name, loc, GlslTypeToGLEnum(o.glslType), outIdx});
+        o.location = loc; // để debug/reflection phía sau
+    }
+    if (fsC.outputs.size() == 1 && !pr.fragOutputs.empty() && pr.fragOutputs[0].location > 0)
+        pr.fragmentMSL = WrapSingleFragColor(pr.fragmentMSL, fsC.outputs[0].mslType,
+                                             pr.fragOutputs[0].location);
     {
         std::set<std::string> seen;
         auto add = [&](const GLSLVar& u) {
@@ -629,19 +850,28 @@ void glLinkProgram(GLuint p) {
     // Kèm excerpt MSL để log MC hiện đủ nguyên nhân từ xa (không cần DumpProgramMSL).
     if (c.device && !c.device->isNull()) {
         std::string err;
-        pr.appleVS = c.device->compileLibrary(pr.vertexMSL, err);
-        if (!pr.appleVS) {
-            pr.linked = false;
-            pr.infoLog = "error: MSL vertex compile: " + err + "\n--- MSL head ---\n" +
-                         pr.vertexMSL.substr(0, 1200);
-            return;
+        if (!pr.vertexMSL.empty()) {
+            pr.appleVS = c.device->compileLibrary(pr.vertexMSL, err);
+            if (!pr.appleVS) {
+                pr.linked = false;
+                pr.infoLog = "error: MSL vertex compile: " + err + "\n--- MSL head ---\n" +
+                             pr.vertexMSL.substr(0, 1200);
+                return;
+            }
         }
-        pr.appleFS = c.device->compileLibrary(pr.fragmentMSL, err);
-        if (!pr.appleFS) {
-            pr.linked = false;
-            pr.infoLog = "error: MSL fragment compile: " + err + "\n--- MSL head ---\n" +
-                         pr.fragmentMSL.substr(0, 1200);
-            return;
+        if (!pr.fragmentMSL.empty()) {
+            pr.appleFS = c.device->compileLibrary(pr.fragmentMSL, err);
+            if (!pr.appleFS) {
+                pr.linked = false;
+                pr.infoLog = "error: MSL fragment compile: " + err + "\n--- MSL head ---\n" +
+                             pr.fragmentMSL.substr(0, 1200);
+                return;
+            }
+            // Bản có sample-mask phải tồn tại để MSAA draw phản ánh glSampleMaski;
+            // nếu Metal từ chối (shader lạ), fallback bản thường thay vì fail link.
+            std::string maskErr;
+            pr.appleFSMasked = c.device->compileLibrary(
+                InjectSampleMask(pr.fragmentMSL), maskErr);
         }
     }
     // Msluse (diag): số lần MSL tham chiếu `ubo_<Block>.` — trả lời trực tiếp
@@ -673,7 +903,7 @@ void glProgramParameteri(GLuint p, GLenum n, GLint v) {
     Context& c = Context::Current();
     auto it = c.programs.find(p);
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
-    if (n == 0x825B && v) it->second.separable = true; // PROGRAM_SEPARABLE
+    if (n == 0x8258 && v) it->second.separable = true; // PROGRAM_SEPARABLE
 }
 void glBindAttribLocation(GLuint p, GLuint i, const GLchar* n) {
     Context& c = Context::Current();
@@ -681,8 +911,22 @@ void glBindAttribLocation(GLuint p, GLuint i, const GLchar* n) {
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
     if (n) it->second.attribBind[n] = i; // có hiệu lực ở LinkProgram (đúng GL)
 }
-void glBindFragDataLocation(GLuint p, GLuint col, const GLchar* n) { (void)p;(void)col;(void)n; }
-void glBindFragDataLocationIndexed(GLuint p, GLuint col, GLuint idx, const GLchar* n) { (void)p;(void)col;(void)idx;(void)n; }
+void glBindFragDataLocation(GLuint p, GLuint col, const GLchar* n) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return; } // INVALID_OPERATION
+    if (col >= 8) { c.errors.Record(0x0501); return; }                // INVALID_VALUE
+    if (!n) { c.errors.Record(0x0501); return; }
+    it->second.fragDataBind[n] = {col, 0};
+}
+void glBindFragDataLocationIndexed(GLuint p, GLuint col, GLuint idx, const GLchar* n) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
+    if (col >= 8 || idx > 1) { c.errors.Record(0x0501); return; }
+    if (!n) { c.errors.Record(0x0501); return; }
+    it->second.fragDataBind[n] = {col, idx};
+}
 void glGetAttachedShaders(GLuint p, GLsizei m, GLsizei* c_, GLuint* s) {
     Context& c = Context::Current();
     auto it = c.programs.find(p);
@@ -813,17 +1057,69 @@ void glProgramBinary(GLuint p, GLenum f, const void* b, GLsizei l) {
     }
     glLinkProgram(p);
 }
-void glValidateProgram(GLuint p) { (void)p; }
-void glActiveShaderProgram(GLuint pl, GLuint pr) { (void)pl;(void)pr; }
+void glValidateProgram(GLuint p) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
+    it->second.validateStatus = it->second.linked && !it->second.shaders.empty();
+}
+void glActiveShaderProgram(GLuint pl, GLuint pr) {
+    Context& c = Context::Current();
+    auto it = c.pipelines.find(pl);
+    if (it == c.pipelines.end()) { c.errors.Record(0x0502); return; }
+    if (pr != 0) {
+        auto pit = c.programs.find(pr);
+        if (pit == c.programs.end() || !pit->second.linked) { c.errors.Record(0x0502); return; }
+    }
+    it->second.activeProgram = pr;
+}
 void glBindProgramPipeline(GLuint p) {
     Context& c = Context::Current();
+    if (p && !c.pipelines.count(p)) { c.errors.Record(0x0502); return; }
     c.state.SetShadow(0x8254 /*PROGRAM_PIPELINE_BINDING*/, &p, 4);
 }
-void glGenProgramPipelines(GLsizei n, GLuint* p) { Context::Current().registry.Gen(ObjectKind::ProgramPipeline, n, p); }
-void glCreateProgramPipelines(GLsizei n, GLuint* p) { Context::Current().registry.Create(ObjectKind::ProgramPipeline, n, p); }
-void glDeleteProgramPipelines(GLsizei n, const GLuint* p) { Context::Current().registry.Delete(ObjectKind::ProgramPipeline, n, p); }
+void glGenProgramPipelines(GLsizei n, GLuint* p) {
+    Context& c = Context::Current();
+    c.registry.Gen(ObjectKind::ProgramPipeline, n, p);
+    for (GLsizei i = 0; i < n; ++i) c.pipelines[p[i]] = ProgramPipelineObject{p[i]};
+}
+void glCreateProgramPipelines(GLsizei n, GLuint* p) {
+    Context& c = Context::Current();
+    c.registry.Create(ObjectKind::ProgramPipeline, n, p);
+    for (GLsizei i = 0; i < n; ++i) c.pipelines[p[i]] = ProgramPipelineObject{p[i]};
+}
+void glDeleteProgramPipelines(GLsizei n, const GLuint* p) {
+    Context& c = Context::Current();
+    GLuint bound = 0;
+    c.state.GetShadow(0x8254, &bound, 4);
+    bool unbind = false;
+    for (GLsizei i = 0; i < n; ++i) {
+        if (bound && p[i] == bound) unbind = true;
+        c.pipelines.erase(p[i]);
+    }
+    if (unbind) { GLuint z = 0; c.state.SetShadow(0x8254, &z, 4); }
+    c.registry.Delete(ObjectKind::ProgramPipeline, n, p);
+}
 GLboolean glIsProgramPipeline(GLuint p) { return Context::Current().registry.Is(ObjectKind::ProgramPipeline, p) ? 1 : 0; }
-void glUseProgramStages(GLuint a, GLbitfield b, GLuint c_) { (void)a;(void)b;(void)c_; }
+void glUseProgramStages(GLuint a, GLbitfield b, GLuint c_) {
+    Context& c = Context::Current();
+    auto it = c.pipelines.find(a);
+    if (it == c.pipelines.end()) { c.errors.Record(0x0502); return; }
+    const GLbitfield kAll = 0x00000001u | 0x00000002u | 0x00000004u | 0x00000008u |
+                            0x00000010u | 0x00000020u;
+    // GL_ALL_SHADER_BITS (0xFFFFFFFF) là bitmask hợp lệ, không phải bit lạ.
+    if (b != 0xFFFFFFFFu && (b & ~kAll) != 0) { c.errors.Record(0x0501); return; }
+    if (c_ != 0) {
+        auto pit = c.programs.find(c_);
+        if (pit == c.programs.end() || !pit->second.linked) { c.errors.Record(0x0502); return; }
+        if (!pit->second.separable) { c.errors.Record(0x0502); return; }
+    }
+    for (GLbitfield bit = 1; bit <= 0x20; bit <<= 1) {
+        if (!(b & bit)) continue;
+        if (c_ == 0) it->second.stagePrograms.erase(bit);
+        else it->second.stagePrograms[bit] = c_;
+    }
+}
 } // namespace tglmt::gl
 
 namespace tglmt {

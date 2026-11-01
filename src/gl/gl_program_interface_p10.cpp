@@ -32,10 +32,8 @@ void InterfaceInfo(ProgramObject& pr, GLenum iface, GLuint& count, GLsizei& maxL
         count = (GLuint)pr.attribLoc.size();
         for (auto& kv : pr.attribLoc) maxLen = std::max(maxLen, (GLsizei)kv.first.size() + 1);
     } else if (iface == 0x92E4 /*PROGRAM_OUTPUT*/) {
-        // Outputs: không lưu riêng trong ProgramObject — dùng uniformLayout? Không.
-        // Tạm: 0 resources (fragment outputs không introspect được qua API này ở TGLMT).
-        // Trung thực: trả 0 thay vì đoán.
-        count = 0; maxLen = 0;
+        count = (GLuint)pr.fragOutputs.size();
+        for (auto& o : pr.fragOutputs) maxLen = std::max(maxLen, (GLsizei)o.name.size() + 1);
     } else if (iface == 0x92E6 /*SHADER_STORAGE_BLOCK*/) {
         count = (GLuint)pr.storageBlocks.size();
         for (auto& b : pr.storageBlocks) maxLen = std::max(maxLen, (GLsizei)b.name.size() + 1);
@@ -75,6 +73,9 @@ GLuint glGetProgramResourceIndex(GLuint program, GLenum programInterface, const 
             if (kv.first == nm) return i;
             ++i;
         }
+    } else if (programInterface == 0x92E4 /*PROGRAM_OUTPUT*/) {
+        for (GLuint i = 0; i < pr->fragOutputs.size(); ++i)
+            if (pr->fragOutputs[i].name == nm) return i;
     } else if (programInterface == 0x92E6 /*P4: SHADER_STORAGE_BLOCK*/) {
         for (GLuint i = 0; i < pr->storageBlocks.size(); ++i)
             if (pr->storageBlocks[i].name == nm) return i;
@@ -97,6 +98,8 @@ void glGetProgramResourceName(GLuint program, GLenum programInterface, GLuint in
             ++i;
         }
     }
+    else if (programInterface == 0x92E4 && index < pr->fragOutputs.size())
+        nm = pr->fragOutputs[index].name;
     else if (programInterface == 0x92E6 && index < pr->storageBlocks.size())
         nm = pr->storageBlocks[index].name;
     if (nm.empty()) { Context::Current().errors.Record(0x0501); return; } // INVALID_VALUE (index quá)
@@ -137,6 +140,15 @@ void glGetProgramResourceiv(GLuint program, GLenum programInterface, GLuint inde
             } else if (p == 0x92F5 /*DATA_SIZE? Thực tế UNIFORM_BLOCK_DATA_SIZE=0x8A30*/) {
                 v = (GLint)b.minSize;
             } else { Context::Current().errors.Record(0x0500); return; }
+        } else if (programInterface == 0x92E4 /*PROGRAM_OUTPUT*/ &&
+                   index < pr->fragOutputs.size()) {
+            auto& o = pr->fragOutputs[index];
+            if (p == 0x92E9 /*LOCATION*/) v = o.location;
+            else if (p == 0x92FA /*TYPE*/) v = (GLint)o.type;
+            else if (p == 0x92F9 /*NAME_LENGTH*/) v = (GLint)o.name.size() + 1;
+            else if (p == 0x92FB /*ARRAY_SIZE*/) v = 1;
+            else if (p == 0x930A /*REFERENCED_BY_FRAGMENT_SHADER*/) v = 1;
+            else { Context::Current().errors.Record(0x0500); return; }
         } else if (programInterface == 0x92E6 /*P4: SHADER_STORAGE_BLOCK*/ &&
                    index < pr->storageBlocks.size()) {
             auto& b = pr->storageBlocks[index];
@@ -182,12 +194,22 @@ GLint glGetProgramResourceLocation(GLuint program, GLenum programInterface, cons
     } else if (programInterface == 0x92E3 /*PROGRAM_INPUT*/) {
         auto it = pr->attribLoc.find(nm);
         if (it != pr->attribLoc.end()) return it->second;
+    } else if (programInterface == 0x92E4 /*PROGRAM_OUTPUT*/) {
+        for (auto& o : pr->fragOutputs)
+            if (o.name == nm) return o.location;
     }
     return -1;
 }
 GLint glGetProgramResourceLocationIndex(GLuint program, GLenum programInterface, const GLchar* name) {
-    // Chỉ cho OUTPUT với dual-source blend (không hỗ trợ) → luôn -1.
-    (void)program; (void)programInterface; (void)name;
+    Context& c = Context::Current();
+    if (programInterface != 0x92E4 /*PROGRAM_OUTPUT*/) {
+        c.errors.Record(0x0500); // INVALID_ENUM (chỉ OUTPUT có location index)
+        return -1;
+    }
+    ProgramObject* pr = GetLinkedProg(program);
+    if (!pr || !name) return -1;
+    for (auto& o : pr->fragOutputs)
+        if (o.name == name) return 0; // TGLMT chỉ có 1 fragment output index (no dual-source)
     return -1;
 }
 } // namespace tglmt::gl

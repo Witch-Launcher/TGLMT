@@ -59,6 +59,21 @@ int main() {
             printf("OK: COMPUTE_WORK_GROUP_SIZE = {8,4,2}\n");
         }
     }
+    // --- 1b. local_size_x là biểu thức macro (Voxy traversal) ---
+    {
+        const char* src = "#version 460 core\n"
+            "#define LOCAL_SIZE_BITS 5\n"
+            "#define LOCAL_SIZE (1<<LOCAL_SIZE_BITS)\n"
+            "layout(local_size_x=LOCAL_SIZE) in;\n"
+            "void main(){ }\n";
+        GLuint pr = CompileLinkCompute(apple, src);
+        CHECK(pr != 0, "compute macro-size link");
+        GLint sz[3] = {-1, -1, -1};
+        glGetProgramiv(pr, 0x8267, sz);
+        CHECK(sz[0] == 32 && sz[1] == 1 && sz[2] == 1,
+              "local_size_x=(1<<5) phải là 32");
+        if (sz[0] != 32) printf("  macro local_size_x = %d\n", sz[0]);
+    }
     // --- 2. Shader không có layout → GLSL mặc định 1,1,1 ---
     {
         const char* src = "#version 460 core\nvoid main(){ }\n";

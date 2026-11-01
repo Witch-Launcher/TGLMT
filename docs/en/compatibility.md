@@ -22,7 +22,7 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | Feature | Class | Notes |
 |---|---|---|
 | Depth test, depth write, depth function | GPU | encoded as `MTLDepthStencilState`, cached (16 states) |
-| Stencil test and stencil ops | Trace only | state is tracked and returned by `glGet*`; the depth-stencil descriptor carries depth only, so stencil never reaches the GPU |
+| Stencil test and stencil ops | GPU | enabled state, front/back func/ref/mask/ops, write mask and FBO depth-stencil attachment are encoded into the Metal depth-stencil state and render pass. Metal has a single reference value shared by both faces. Verified by `test_stencil_apple`. |
 | Blending, blend colour, all 15 factors and 5 equations | GPU | attachment 0 on the draw path |
 | `glColorMask` / `glColorMaski` | GPU | baked into the pipeline key as `colorWriteMask` |
 | Face culling, front-face orientation | GPU | verified by a dedicated orientation test |
@@ -35,8 +35,8 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | `glLogicOp` | Trace only | stored in the shadow; there is no logic-op stage in the render path |
 | Primitive restart | GPU | fixed and custom restart indices split the draw correctly |
 | MSAA via the `metal::` interface | GPU | `makeMSAATarget`, `makeMSAAPipeline`, resolve — verified by test |
-| MSAA via the GL API (`glRenderbufferStorageMultisample`, `glTexImage2DMultisample`, `glTexStorage*Multisample`) | No-op accepted | no multisample storage is allocated |
-| Renderbuffers (`glRenderbufferStorage*`, `glFramebufferRenderbuffer`) | No-op accepted | FBOs must attach textures with `glFramebufferTexture2D` |
+| MSAA via the GL API (`glRenderbufferStorageMultisample`, `glTexImage2DMultisample`, `glTexStorage2DMultisample`) | GPU | multisample colour + multisample depth target and resolve; 2D only. MSAA 3D/array is rejected. Verified by `test_msaa_gl_apple`, `test_msaa_depth_apple`. |
+| Renderbuffers (`glRenderbufferStorage*`, `glFramebufferRenderbuffer`) | GPU | colour/depth/stencil renderbuffers, including multisample colour; verified by `test_renderbuffer`. |
 | `glInvalidateFramebuffer` and friends | No-op accepted | explicitly documented as not implemented |
 | `glBlitFramebuffer` | GPU, CPU fallback | GPU blit when formats match; CPU copy when scaling, filtering, or format differs |
 | FBO completeness, attachment with mip level | GPU | target size is `base >> level` |
@@ -48,7 +48,7 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | Feature | Class | Notes |
 |---|---|---|
 | `glTexImage2D` / `glTexSubImage2D` | GPU | staged, coalesced, flushed as one `replaceRegion` |
-| Mip levels greater than 0 | CPU emulated | level 0 stays on the GPU; higher levels are written to the shadow only (`mipStaged`) |
+| Mip levels greater than 0 | GPU | `glTexStorage2D` allocates the full mip chain; level uploads, sampling, FBO attachment and `glCopyImageSubData` use Metal texture views. Legacy `glTexImage2D`/`glTexSubImage2D` level>0 promotes the GPU texture to a mip chain when real data arrives (NULL-only level allocation does not). Verified by `test_mip_storage_apple`, `test_legacy_mip_apple`. |
 | `glGenerateMipmap` | GPU | uses the Metal mip-generation path; requires a mipmapped texture |
 | Mip filtering on a single-level texture | CPU emulated | falls back to the base level and counts `mipBase` |
 | Drawing or clearing into mip level greater than 0 of a single-level texture | Trace only | skipped and counted as `mipLevelSkipped` |
@@ -56,6 +56,7 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | `sampler2DArray` | GPU | mapped to `texture2d_array` |
 | `glTexBuffer` / `samplerBuffer` | CPU emulated, GPU read | `glTexBuffer` materialises the buffer into a texture when it is bound (`BindBufTex`); the shader then reads it with `.read()` on the GPU |
 | Compressed texture upload (`glCompressedTexImage*`) | No-op accepted | no decompression, no error |
+| `glCopyImageSubData` | GPU | 2D copy between textures, including source/destination mip levels via texture views, plus 3D/array multi-slice copies through `blitCopySlices` (3D uses origin.z, arrays use slices). Same-format GPU blit, otherwise CPU shadow fallback for level-0 2D. |
 | `glCopyTexSubImage2D` / `glCopyTextureSubImage2D` | GPU | read framebuffer → texture copy, then the shadow is refreshed from the GPU |
 | `glCopyTexImage*`, `glCopyTexSubImage1D`, `glCopyTexSubImage3D` | No-op accepted | |
 | `glPixelStorei` pack/unpack row length, skip, alignment | CPU emulated | exact spec enums; applied at upload and readback |
@@ -74,7 +75,7 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | Instancing | GPU | `glDraw*Instanced` |
 | `baseVertex` on an indexed draw | CPU emulated | Metal indexed draws have no `baseVertex`, so each index is rewritten with `baseVertex` added into a temporary ring buffer; a negative or overflowing resulting index raises `GL_INVALID_OPERATION` |
 | `baseVertex != 0` on a non-indexed draw | Trace only | the draw path returns before encoding |
-| `baseInstance != 0` | Trace only | rejected with an explicit log |
+| `baseInstance != 0` | GPU | encoded via `drawIndexedBaseInstance` / `drawPrimitivesBaseInstance` (non-indexed uses `base_instance` in MSL) |
 | Indirect draws | CPU emulated | the command is read from `GL_DRAW_INDIRECT_BUFFER` (or from the host pointer) on the CPU, then issued as an ordinary draw; `glMultiDraw*Indirect` loops over that |
 | `glMultiDraw*` | CPU emulated | expanded into sub-draws that share one open encoder; each sub-draw increments `multidrawBatched` (tracked in the context, not printed in the frame summary) |
 | `GL_TRIANGLE_FAN`, `GL_LINE_LOOP` | CPU emulated | expanded to triangles / closed strips on the CPU; combined with `baseVertex != 0` these become trace-only |
@@ -82,7 +83,7 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | Transform feedback | Trace only | object creation, binding, begin/end, pause/resume, buffer binding, varyings query and active/paused queries are implemented; nothing is captured because no program executes, and `glGetTransformFeedbackVarying` reports type `GL_FLOAT` and size 1 regardless of the real declaration |
 | Geometry shader draws | Trace only | programs with a geometry stage link, then the draw path declines to encode |
 | Tessellation draws | Trace only | as above for tessellation stages |
-| Compute dispatch | No-op accepted | `glDispatchCompute` logs and returns; no compute encoder is created from the GL path |
+| Compute dispatch | GPU | compute encoder, SSBO, image load/store and dispatch are implemented; verified by `test_compute_dispatch` |
 
 ## Shader converter boundaries
 

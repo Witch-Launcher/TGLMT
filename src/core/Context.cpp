@@ -67,6 +67,18 @@ Context::Context(const std::string& backend) : backendName(backend) {
     // commitAndWait mỗi frame — xem Context::ThrottleGpu).
     if (device) device->setCommandBufferCounters(&cbCommitted, &cbCompleted);
 }
+Context::~Context() {
+    // Deferred IR owns an open MTLRenderCommandEncoder until a flush point.
+    // Tests and embeddings may destroy the Context without EndFrame; close it
+    // here so Metal never sees an encoder released without endEncoding.
+    const bool hadWork = pendingEncoder != nullptr || pendingCompute != nullptr;
+    FlushPendingEncoder();
+    FlushPendingCompute(false);
+    if (device && hadWork) {
+        device->flushClearBatch();
+        device->commitAndWait();
+    }
+}
 // Đọc cấu hình runtime từ env (launcher setenv trước khi tạo Context).
 // Không hợp lệ/để trống → giữ mặc định compile-time; luôn kẹp [1..8] để không
 // bao giờ biến thành vòng lặp throttle hoặc pool vô hạn.

@@ -22,13 +22,13 @@ mipmap, roundtrip `ReadPixels`/`GetTexImage`.
 | Stage compute | ✅ Hoạt động (P6f): kernel, SSBO, image, dispatch — ARB_compute_shader |
 | Transform feedback | State machine + đếm draw, không capture varying |
 | `glLogicOp` | Shadow only (shader compute-ROP có nhưng chưa nối vào draw) |
-| Stencil test | Đã lưu, chưa encode |
+| Stencil test | GPU: encode vào depth-stencil state; Metal dùng một ref chung cho hai mặt |
 | `glColorMask` | Đã bake write-mask attachment 0 (`AppleMetalBridge.mm` writeMask, kiểm bởi `test_water_translucent_apple` case4); MRT > 0 chưa |
 | Blend attachment > 0, `ClearBuffer` MRT > 0 | Chỉ single-target |
-| Texture compressed / 3D / multisample storage | No-op hoặc fallback RGBA8 kèm log |
+| Texture compressed / 3D / multisample storage | Compressed và MSAA 3D/array bị từ chối; MSAA 2D, texture 3D và mip chain đã có |
 | `ReadPixels` | Chỉ RGBA/BGRA + `UNSIGNED_BYTE` |
 | Blend dual-source | Rơi về ONE/ADD |
-| `baseInstance != 0` | Trace-only |
+| `baseInstance != 0` | GPU qua `drawIndexedBaseInstance` / `drawPrimitivesBaseInstance` |
 | Packed vertex `UNSIGNED_INT_10F_11F_11F_REV` | Xấp xỉ normalized, có log |
 
 ## Ghi chú thiết bị (chuẩn A11)

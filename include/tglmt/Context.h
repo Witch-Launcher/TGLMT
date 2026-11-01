@@ -12,6 +12,7 @@
 #include <array>
 #include <deque>
 #include <map>
+#include <utility>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -118,9 +119,9 @@ struct TextureObject {
     uint32_t w = 0, h = 0, d = 0;
     std::vector<uint8_t> pixels;    // base level shadow (đủ cho unit test readback)
     // Mip levels >0 (vanilla 26.x alloc + upload MỌI level qua TexImage/SubImage
-    // per-level: GlDevice.createTexture + MipmapGenerator). GPU hiện giữ base
-    // level duy nhất (non-mipmapped) nên các level này chỉ sống trong shadow để
-    // GetTexImage(level>0)/CPU fallback đúng + sẵn sàng cho mipmapped sau này.
+    // per-level). glTexStorage2D luôn cấp đủ chain; legacy TexImage/SubImage
+    // level>0 nâng GPU lên mip chain khi level có data thật. Shadow per-level
+    // phục vụ GetTexImage(level>0)/CPU fallback.
     struct MipLevel {
         GLsizei w = 0, h = 0;
         GLsizei d = 0; // P3: depth cho mip 3D (0 = mip 2D)
@@ -140,6 +141,11 @@ struct TextureObject {
     // identity {R,G,B,A}. Bind lúc draw → ITexture::swizzledView (gl_apple_draw).
     uint8_t swz[4] = {2, 3, 4, 5};
     std::shared_ptr<metal::ITexture> gpu;
+    // FBO attach mip level>0: view Metal (baseLevel=level, count=1) cache theo level.
+    std::unordered_map<GLint, std::shared_ptr<metal::ITexture>> levelViews;
+    // MSAA texture: target gồm multisample + resolve; gpu trỏ resolve texture.
+    GLsizei samples = 1;
+    std::shared_ptr<metal::IRenderTarget> msaaTarget;
     // Như BufferObject::lastReadGen — encoder đã commit nhưng GPU chưa execute
     // (lastReadGen == Context::waitGen) → ghi replaceRegion sẽ đổi nội dung
     // mà draw cũ đang sample (in-flight write).
@@ -199,6 +205,7 @@ struct ProgramObject {
     GLuint id = 0;
     std::vector<GLuint> shaders;
     bool linked = false;
+    bool validateStatus = false;
     // true khi mọi list reflection (uniformLayout/vsSamplers/fsSamplers/
     // computeSamplers/images/atomics) đã điền đầy đủ bởi link — điều kiện để
     // glGetUniformLocation trả -1 trung thực cho tên không có trong program.
@@ -233,8 +240,31 @@ struct ProgramObject {
         GLint size = 1;
     };
     std::vector<ActiveUniform> activeUniforms;
+    struct FragOutput {
+        std::string name;
+        GLint location = 0;
+        GLenum type = 0;
+        GLuint index = 0; // dual-source index (glBindFragDataLocationIndexed)
+    };
+    std::vector<FragOutput> fragOutputs;
+    // glBindFragDataLocation(Indexed): áp ở link, ưu tiên layout(location=) nếu có.
+    struct FragDataBind { GLuint color = 0; GLuint index = 0; };
+    std::unordered_map<std::string, FragDataBind> fragDataBind;
+    // ARB_separate_shader_objects: subroutine reflection (stage -> info).
+    struct SubroutineStageInfo {
+        std::vector<std::string> impls;                              // thứ tự khai báo toàn stage
+        std::unordered_map<std::string, GLuint> implIndex;           // tên -> index GL
+        std::vector<std::pair<std::string, std::string>> uniforms;   // (tên, type) theo thứ tự
+        std::unordered_map<std::string, std::vector<std::string>> typeImpls; // type -> impls
+    };
+    std::unordered_map<GLenum, SubroutineStageInfo> subroutines;
+    // Pipeline synthetic: trỏ stage gốc để upload uniform/sampler đúng program.
+    const ProgramObject* pipelineVS = nullptr;
+    const ProgramObject* pipelineFS = nullptr;
     size_t vsUBSize = 0, fsUBSize = 0;
     std::shared_ptr<metal::ILibrary> appleVS, appleFS;
+    // Bản FS có inject fixed-function sample mask (chỉ dùng cho MSAA target).
+    std::shared_ptr<metal::ILibrary> appleFSMasked;
     // P6f compute: library + pipeline + localSize (từ layout(local_size) converter).
     std::shared_ptr<metal::ILibrary> appleCS;
     std::shared_ptr<metal::IComputePipeline> appleCSPipeline;
@@ -329,6 +359,14 @@ struct ProgramObject {
     }
 };
 
+struct ProgramPipelineObject {
+    GLuint id = 0;
+    std::unordered_map<GLbitfield, GLuint> stagePrograms; // shader bit -> program
+    GLuint activeProgram = 0;
+    GLboolean validateStatus = 0;
+    std::string infoLog;
+};
+
 struct FramebufferObject {
     GLuint id = 0;
     std::unordered_map<GLenum, GLuint> colorTex; // attachment -> texture id
@@ -343,6 +381,15 @@ struct FramebufferObject {
     // P10 ARB_framebuffer_no_attachments: defaults cho FBO không attachment.
     GLint defaultWidth = 0, defaultHeight = 0, defaultLayers = 0, defaultSamples = 0;
     GLboolean defaultFixedSampleLocations = 0;
+    std::vector<GLfloat> sampleLocations; // ARB/NV_sample_locations: x,y pairs
+};
+
+struct RenderbufferObject {
+    GLuint id = 0;
+    GLsizei w = 0, h = 0;
+    GLenum internalFormat = 0;
+    GLsizei samples = 0;
+    GLuint texture = 0; // backing texture (RBO is a texture in TGLMT)
 };
 
 struct QueryObject {
@@ -379,6 +426,63 @@ struct XfbObject {
     GLuint capturedCount = 0;      // số đỉnh đã capture (cho glDrawTransformFeedback*)
 };
 
+struct ExtState {
+    GLint rasterSamples = 0;
+    GLenum windowRectMode = 0;
+    std::vector<GLint> windowRects;
+    GLfloat viewportWScale[32] = {};
+    GLenum viewportSwizzle[32][4] = {};
+    GLfloat coverageColor[4] = {1, 1, 1, 1};
+    GLint blendParam = 0;
+    GLint coverageModulation = 0;
+    std::vector<GLfloat> coverageTable = std::vector<GLfloat>(16, 1.0f);
+    GLdouble depthBounds[2] = {0, 1};
+    std::map<GLenum, std::vector<std::array<GLdouble, 16>>> matrixStacks;
+    std::map<uint64_t, std::array<GLfloat, 4>> texEnvF;
+    std::map<uint64_t, std::array<GLint, 4>> texEnvI;
+    std::map<uint64_t, std::array<GLfloat, 4>> texGenF;
+    std::map<uint64_t, std::array<GLint, 4>> texGenI;
+    std::map<std::pair<GLenum, GLuint>, void*> clientPtr;
+    std::map<std::pair<GLenum, GLuint>, bool> clientEnabled;
+    std::map<uint64_t, std::vector<uint8_t>> programLocals;
+    std::map<GLuint, std::string> programStrings;
+    GLuint subpixelBias[2] = {0, 0};
+    GLfloat conservativeDilate = 1.0f;
+    GLint conservativeMode = 0;
+    GLuint shadingRateImage = 0;
+    GLenum shadingRateCombiner[2] = {0, 0};
+    GLenum shadingRateSampleOrder = 0;
+    std::map<uint64_t, std::vector<GLenum>> shadingRatePalettes;
+    GLenum shadingRate = 0;
+    std::map<GLuint64, GLuint> bindlessHandles;
+    std::map<GLuint64, bool> bindlessResident;
+    GLuint64 nextBindlessHandle = 1;
+    std::map<GLuint, GLuint64> bufferAddresses;
+    std::map<GLenum, std::map<GLuint, GLuint64>> indexedAddresses;
+    std::map<std::string, std::string> namedStrings;
+    std::map<GLuint, bool> perfMonitors;
+    std::map<GLuint, bool> perfQueries;
+    std::map<GLuint, std::string> perfQueryNames;
+    GLuint nextPerfObject = 1;
+    std::map<GLuint, bool> commandLists;
+    std::map<GLuint, bool> commandStates;
+    GLuint nextCommandObject = 1;
+    std::map<GLenum, std::vector<uint8_t>> colorTables;
+    std::map<GLenum, GLint> colorTableWidths;
+    std::map<GLenum, GLenum> colorTableFormats;
+    std::map<GLenum, std::array<GLfloat, 4>> colorTableScale;
+    std::map<GLenum, std::array<GLfloat, 4>> colorTableBias;
+    std::map<uint64_t, std::array<GLfloat, 4>> imagingF;
+    std::map<uint64_t, std::array<GLint, 4>> imagingI;
+    std::map<GLenum, std::vector<uint8_t>> convolutionImages;
+    std::map<GLenum, std::array<GLsizei, 2>> convolutionSizes;
+    std::map<GLenum, std::array<GLint, 3>> histogramParams;
+    std::map<GLenum, bool> histogramSink;
+    std::map<GLenum, std::array<GLint, 2>> minmaxParams;
+    std::map<GLenum, bool> minmaxSink;
+    std::map<GLuint, bool> paths;
+    GLuint nextPath = 1;
+};
 class Context {
 public:
     static Context& Current();      // thread_local current
@@ -399,9 +503,15 @@ public:
     std::unordered_map<GLuint, SamplerObject> samplers;
     std::unordered_map<GLuint, ShaderObject> shaders;
     std::unordered_map<GLuint, ProgramObject> programs;
+    std::unordered_map<GLuint, ProgramPipelineObject> pipelines;
     std::unordered_map<GLuint, FramebufferObject> fbos;
+    std::unordered_map<GLuint, RenderbufferObject> renderbuffers;
     std::unordered_map<GLuint, QueryObject> queries;
     std::unordered_map<GLuint, SyncObject> syncs;
+    struct ConditionalRender { GLuint query = 0; GLenum mode = 0; bool active = false; };
+    ConditionalRender conditionalRender;
+    ExtState ext;
+    std::map<GLuint, std::array<GLint64, 4>> attrib64; // NV_vertex_attrib_integer_64bit current values
     std::unordered_map<GLuint, XfbObject> xfbs;
     // UBO/SSBO bind points (glBindBufferBase/Range): binding → buffer range.
     // A11: upload shadow + bind Metal buffer(17+k) mỗi draw (xem AppleDrawGL).
@@ -726,6 +836,9 @@ public:
         metal::PixelFormat fmt = metal::PixelFormat::Invalid;
         uint32_t stride = 0;
         bool depth = false;
+        uint32_t samples = 1;
+        bool stencil = false;
+        metal::StencilDesc stencilDesc;
         // MRT: format + blend + writeMask từng slot glDrawBuffers.
         uint32_t colorCount = 1;
         metal::PixelFormat colorFmts[8] = {};
@@ -736,9 +849,23 @@ public:
         metal::CustomAttrib attribs[16] = {};
         bool operator==(const PipelineKey& o) const {
             if (vsLib != o.vsLib || fsLib != o.fsLib || fmt != o.fmt ||
-                stride != o.stride || depth != o.depth ||
-                colorCount != o.colorCount)
+                stride != o.stride || depth != o.depth || samples != o.samples ||
+                stencil != o.stencil || colorCount != o.colorCount)
                 return false;
+            if (stencil) {
+                if (stencilDesc.enabled != o.stencilDesc.enabled) return false;
+                if (stencilDesc.enabled) {
+                    auto faceEq = [](const metal::StencilFaceDesc& a,
+                                     const metal::StencilFaceDesc& b) {
+                        return a.func == b.func && a.ref == b.ref &&
+                               a.readMask == b.readMask && a.writeMask == b.writeMask &&
+                               a.sfail == b.sfail && a.dpfail == b.dpfail &&
+                               a.dppass == b.dppass;
+                    };
+                    if (!faceEq(stencilDesc.front, o.stencilDesc.front) ||
+                        !faceEq(stencilDesc.back, o.stencilDesc.back)) return false;
+                }
+            }
             for (uint32_t i = 0; i < colorCount && i < 8; ++i) {
                 if (colorFmts[i] != o.colorFmts[i]) return false;
                 const auto& a = blends[i];
@@ -959,7 +1086,10 @@ public:
     void LogDebug(GLenum src, GLenum type, GLuint id, GLenum sev, const std::string& msg);
 
     Context(const std::string& backend = "null");
-    ~Context() = default;
+    // End any open Metal encoder before members die. Without this, a caller that
+    // draws but never reaches Renderer::EndFrame aborts in Metal with
+    // "Command encoder released without endEncoding" during Context destruction.
+    ~Context();
 private:
     static thread_local Context* tCurrent_;
     static Context* sFallback_;

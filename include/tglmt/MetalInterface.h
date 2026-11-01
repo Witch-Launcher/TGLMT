@@ -109,13 +109,31 @@ struct CustomAttrib {
     uint32_t divisor = 0;     // 0 = PerVertex, >0 = PerInstance stepRate
 };
 // Tùy chọn pipeline cho M5b GL-driven render (depth/blend bake cùng descriptor).
+struct StencilFaceDesc {
+    uint32_t func = 0x0207;   // GL_ALWAYS
+    int32_t ref = 0;
+    uint32_t readMask = 0xFF;
+    uint32_t writeMask = 0xFF;
+    uint32_t sfail = 0x1E00;  // GL_KEEP
+    uint32_t dpfail = 0x1E00;
+    uint32_t dppass = 0x1E00;
+};
+struct StencilDesc {
+    bool enabled = false;
+    StencilFaceDesc front, back;
+};
 struct PipelineOpts {
     bool depth = false;              // target có depth → depthAttachmentPixelFormat
+    uint32_t samples = 1;            // rasterSampleCount (MSAA target)
     // MRT: số color attachment (draw slot) pipeline ghi. Slot không ghi
     // (GL_NONE / không có texture) → colorFmts[i] = Invalid (Metal cho phép slot
     // rỗng giữa các attachment có format).
     uint32_t colorCount = 1;
     PixelFormat colorFmts[8] = {};   // format từng slot; giá trị 0 → dùng `fmt` truyền vào
+    // Stencil attachment có trong render pass (Depth24Stencil8). Stencil test
+    // bật/tắt nằm trong `stencilDesc`; tách để pipeline/pass luôn khớp format.
+    bool stencil = false;
+    StencilDesc stencilDesc;
     // Per-attachment: blending (glEnablei/glBlendFunci) + writeMask (glColorMaski).
     // writeMask áp dụng cả khi enabled=false (glColorMask độc lập với blend).
     AttachmentBlend blends[8];
@@ -226,6 +244,14 @@ public:
     virtual PixelFormat pixelFormat() const { return PixelFormat::RGBA8Unorm; }
     // Target có depth attachment không (để gộp clear màu+depth 1 command buffer).
     virtual bool hasDepth() const { return false; }
+    // Target có stencil attachment không (combined Depth24Stencil8).
+    virtual bool hasStencil() const { return false; }
+    // MSAA: số sample của attachment (1 = non-MSAA).
+    virtual uint32_t sampleCount() const { return 1; }
+    // Texture color đang render (MSAA: texture multisample, không phải resolve).
+    virtual ITexture* colorTexture(uint32_t slot = 0) { (void)slot; return nullptr; }
+    // Texture resolve của target MSAA (nullptr = không có/không hỗ trợ).
+    virtual std::shared_ptr<ITexture> resolvedTexture() { return nullptr; }
     // MRT: số slot color đang attach theo glDrawBuffers (>=1).
     virtual uint32_t colorCount() const { return 1; }
 };
@@ -239,8 +265,22 @@ public:
     // Encoder mới đã có pipeline từ makeRenderEncoder*; hàm này chỉ dùng khi
     // reuse encoder và pipeline thực sự đổi (dirty). Null backend: no-op.
     virtual void setPipeline(IRenderPipeline* p) { (void)p; }
+    // Stencil ref front/back — GL cho phép ref khác nhau giữa 2 mặt.
+    virtual void setStencilReference(int front, int back) { (void)front; (void)back; }
     virtual void drawPrimitives(PrimitiveType t, uint32_t start, uint32_t count, uint32_t instances = 1) = 0;
     virtual void drawIndexed(PrimitiveType t, uint32_t count, IndexType it, IBuffer* ib, size_t off, uint32_t instances = 1) = 0;
+    // gl_BaseInstance: Metal base_instance áp cho instance_id. Default bỏ qua
+    // (backend cũ/null), Apple backend override để Voxy MDIC dùng drawId.
+    virtual void drawPrimitivesBaseInstance(PrimitiveType t, uint32_t start, uint32_t count,
+                                            uint32_t instances, uint32_t baseInstance) {
+        (void)baseInstance;
+        drawPrimitives(t, start, count, instances);
+    }
+    virtual void drawIndexedBaseInstance(PrimitiveType t, uint32_t count, IndexType it, IBuffer* ib,
+                                         size_t off, uint32_t instances, uint32_t baseInstance) {
+        (void)baseInstance;
+        drawIndexed(t, count, it, ib, off, instances);
+    }
     // Kết thúc encode + commit + chờ GPU xong (kèm blit-synchronize để readback an toàn).
     virtual bool endAndCommit() = 0;
     // Kết thúc + commit KHÔNG đợi (cho nhiều draw/frame; thứ tự đảm bảo bởi cùng
@@ -269,6 +309,10 @@ public:
     virtual void setVertexSamplerState(ISamplerState* s, uint32_t idx) { (void)s; (void)idx; }
     virtual void setFragmentBuffer(IBuffer* b, size_t off, uint32_t idx) {
         (void)b; (void)off; (void)idx;
+    }
+    // Inline ≤4KB (Metal setFragmentBytes) — dùng cho fixed-function sample mask.
+    virtual void setFragmentBytes(const void* p, size_t n, uint32_t idx) {
+        (void)p; (void)n; (void)idx;
     }
     // Cull (glCullFace/glFrontFace): enabled=false → MTLCullModeNone.
     // cullModeGL: GL_BACK/GL_FRONT; frontFaceGL: GL_CCW/GL_CW.
@@ -344,6 +388,10 @@ public:
     // encoder chỉ đổi setVisibilityResultMode:offset:. Null backend → nullptr.
     virtual IBuffer* visibilityBuffer() { return nullptr; }
     virtual std::shared_ptr<ITexture> newTexture(uint32_t w, uint32_t h, PixelFormat f) = 0;
+    virtual std::shared_ptr<ITexture> newTextureLevels(uint32_t w, uint32_t h, PixelFormat f,
+                                                       uint32_t levels) {
+        (void)levels; return newTexture(w, h, f);
+    }
     virtual std::shared_ptr<IEncoder> makeEncoder() = 0;
     virtual void commitAndWait() = 0;
     // Apple: trỏ 2 con trỏ đếm command buffer đã commit / đã execute xong
@@ -404,6 +452,12 @@ public:
     // Depth/stencil state (glDepthFunc/glDepthMask → MTLCompareFunction + writeMask).
     virtual std::shared_ptr<IDepthStencilState> makeDepthStencilState(uint32_t func, bool writeMask) {
         (void)func; (void)writeMask; return nullptr;
+    }
+    // Mở rộng: depth test/write + stencil front/back. Default giữ hành vi cũ.
+    virtual std::shared_ptr<IDepthStencilState> makeDepthStencilStateEx(
+            uint32_t func, bool write, bool depthTest, const StencilDesc& stencil) {
+        (void)depthTest; (void)stencil;
+        return makeDepthStencilState(func, write);
     }
     // Pipeline cho target có depth (depthAttachmentPixelFormat=Depth32Float khớp pass).
     virtual std::shared_ptr<IRenderPipeline> makeDepthPipeline(ILibrary* vsLib, const char* vsFn,
@@ -500,9 +554,11 @@ public:
     // Trả nullptr → caller fallback deferred (Null backend).
     virtual std::shared_ptr<IRenderEncoder> makeClearEncoder(IRenderTarget* target,
             const ClearColor& clear, double clearDepth, LoadOp colorLoad, LoadOp depthLoad,
-            const ScissorRect* scissor) {
+            const ScissorRect* scissor, double clearStencil = 0.0,
+            LoadOp stencilLoad = LoadOp::DontCare) {
         (void)target; (void)clear; (void)clearDepth;
         (void)colorLoad; (void)depthLoad; (void)scissor;
+        (void)clearStencil; (void)stencilLoad;
         return nullptr;
     }
     // Clear màu theo TỌA ĐỘ TARGET (hệ Metal, top-left). Nguyên nhân: Metal
@@ -554,6 +610,16 @@ public:
         (void)src; (void)dst; (void)sx; (void)sy; (void)w; (void)h; (void)dx; (void)dy;
         return false;
     }
+    // Copy nhiều slice/depth plane (3D hoặc 2D array): mỗi lớp gọi Metal blit
+    // copy một slice. Mặc định false để backend Null/khác fallback CPU.
+    virtual bool blitCopySlices(ITexture* src, ITexture* dst,
+            uint32_t sx, uint32_t sy, uint32_t sz,
+            uint32_t dx, uint32_t dy, uint32_t dz,
+            uint32_t w, uint32_t h, uint32_t d) {
+        (void)src; (void)dst; (void)sx; (void)sy; (void)sz;
+        (void)dx; (void)dy; (void)dz; (void)w; (void)h; (void)d;
+        return false;
+    }
     // Blit với default framebuffer tham gia (composite cuối menu ra màn hình):
     // FBO→màn hình và màn hình→FBO. Cùng size + COLOR → GPU copy thật;
     // còn lại false để caller giữ hành vi cũ + log rõ.
@@ -578,6 +644,12 @@ public:
     // Trả false khi backend không hỗ trợ / vùng sai.
     virtual bool updateTexture(ITexture* tex, uint32_t x, uint32_t y,
             uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) {
+        (void)tex; (void)x; (void)y; (void)w; (void)h; (void)data; (void)bytesPerRow;
+        return false;
+    }
+    virtual bool updateTextureLevel(ITexture* tex, uint32_t level, uint32_t x, uint32_t y,
+            uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) {
+        if (level == 0) return updateTexture(tex, x, y, w, h, data, bytesPerRow);
         (void)tex; (void)x; (void)y; (void)w; (void)h; (void)data; (void)bytesPerRow;
         return false;
     }

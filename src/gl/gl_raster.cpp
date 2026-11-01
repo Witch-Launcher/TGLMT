@@ -164,8 +164,19 @@ void glColorMaski(GLuint i, GLboolean r, GLboolean g, GLboolean b, GLboolean a) 
 }
 void glDepthRangeArrayfvNV(GLuint a, GLsizei b, const GLfloat* c_) { (void)a;(void)b;(void)c_; }
 void glLogicOp(GLenum o) { Context::Current().state.SetShadow(0x0BF1, &o, 4); }
-void glSampleCoverage(GLfloat v, GLboolean inv) { (void)v;(void)inv; }
-void glSampleMaski(GLuint m, GLbitfield mask) { (void)m;(void)mask; }
+void glSampleCoverage(GLfloat v, GLboolean inv) {
+    Context& c = Context::Current();
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    c.state.SetShadow(0x80AA /*SAMPLE_COVERAGE_VALUE*/, &v, sizeof(v));
+    GLint iv = inv ? 1 : 0;
+    c.state.SetShadow(0x80AB /*SAMPLE_COVERAGE_INVERT*/, &iv, sizeof(iv));
+}
+void glSampleMaski(GLuint m, GLbitfield mask) {
+    Context& c = Context::Current();
+    if (m >= 1) { c.errors.Record(0x0501); return; } // MAX_SAMPLE_MASK_WORDS = 1
+    c.state.SetShadow(0x8E52 /*SAMPLE_MASK_VALUE*/, &mask, sizeof(mask), m);
+}
 void glMinSampleShading(GLfloat v) { Context::Current().state.SetShadow(0x8C51, &v, 4); }
 void glHint(GLenum t, GLenum m) { (void)t;(void)m; }
 void glLineStipple(GLint a, GLushort b) { (void)a;(void)b; }

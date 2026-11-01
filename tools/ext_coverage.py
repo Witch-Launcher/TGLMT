@@ -29,6 +29,19 @@ GLXML = ROOT / "docs/khronos/gl.xml"
 SRC = ROOT / "src/gl"
 GL_ERR = ROOT / "src/gl/gl_error_string_debug.cpp"
 
+def default_lib():
+    """Pick the library produced by the current build, not a stale path."""
+    import os
+    env = os.environ.get("TGLMT_LIB")
+    if env:
+        return pathlib.Path(env)
+    for rel in ("build/libtglmt.dylib", "build-apple/libtglmt.dylib",
+                "build-iphoneos/libtglmt.a"):
+        candidate = ROOT / rel
+        if candidate.exists():
+            return candidate
+    return ROOT / "build/libtglmt.dylib"
+
 # Vendor mobile-relevant (giữ). Desktop/NVIDIA/AMD/... → excluded.
 MOBILE_VENDOR = {"ARB", "KHR", "EXT", "OES", "APPLE", "ARM", "IMG"}
 
@@ -185,7 +198,7 @@ def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
 
     if mode == "--dlsym":
-        lib = sys.argv[2] if len(sys.argv) > 2 else str(ROOT / "build-apple/libtglmt.dylib")
+        lib = sys.argv[2] if len(sys.argv) > 2 else str(default_lib())
         return dlsym_check(lib)
 
     if mode == "--kexts":

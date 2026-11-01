@@ -7,7 +7,7 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 test -f build/libtglmt.a || { echo "chay cmake --build build truoc"; exit 2; }
-clang++ -std=c++17 -Iinclude tools/dump_msl_corpus.cpp build/libtglmt.a -o /tmp/tglmt_dumpmsl
+clang++ -std=c++17 -Iinclude tools/dump_msl_corpus.cpp build/libtglmt.a -framework Metal -framework Foundation -framework QuartzCore -o /tmp/tglmt_dumpmsl
 rm -rf /tmp/tglmt_mslcorpus && /tmp/tglmt_dumpmsl /tmp/tglmt_mslcorpus >/dev/null
 pass=0; fail=0; failed=""
 for f in /tmp/tglmt_mslcorpus/*.metal; do

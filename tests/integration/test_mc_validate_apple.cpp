@@ -97,6 +97,8 @@ int main() {
         glViewport(0, 0, 64, 64);
         glClearColor(0, 0, 1, 1);
         glClear(0x00004000);
+        glTextureBarrier();
+        Check(glGetError() == 0, "A texture barrier");
         glDrawArrays(0x0004, 0, 3);
         Check(glGetError() == 0, "A gl error");
         Check(ctx.appleStats.rangeWarn == 0, "A rangeWarn==0 cho draw tot");

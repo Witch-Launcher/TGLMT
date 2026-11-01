@@ -50,6 +50,7 @@ static void OutI(Context& c, GLenum p, GLint* v, GLuint idx = 0) {
             *v = (it == c.atomicBindPoints.end()) ? 0 : (GLint)it->second.buffer; break; }
         case 0x92C2: { auto it = c.atomicBindPoints.find(idx); // ATOMIC_COUNTER_BUFFER_START
             *v = (it == c.atomicBindPoints.end()) ? 0 : (GLint)it->second.offset; break; }
+        case 0x8E52: *v = (GLint)0xFFFFFFFFu; break; // SAMPLE_MASK_VALUE mặc định
         case 0x92C3: { auto it = c.atomicBindPoints.find(idx); // ATOMIC_COUNTER_BUFFER_SIZE
             if (it == c.atomicBindPoints.end()) *v = 0;
             else if (it->second.size) *v = (GLint)it->second.size;
@@ -92,6 +93,7 @@ static bool StaticLimit(GLenum p, GLint* v) {
         case 0x8B49: *v = 4096; break;   // MAX_FRAGMENT_UNIFORM_COMPONENTS
         case 0x8B4B: *v = 128; break;    // MAX_VARYING_COMPONENTS
         case 0x8D57: *v = 4; break;      // MAX_SAMPLES (A11 4x MSAA)
+        case 0x8E59: *v = 1; break;      // MAX_SAMPLE_MASK_WORDS
         case 0x910E: *v = 4; break;      // MAX_COLOR_TEXTURE_SAMPLES
         case 0x910F: *v = 4; break;      // MAX_DEPTH_TEXTURE_SAMPLES
         case 0x9110: *v = 4; break;      // MAX_INTEGER_SAMPLES
@@ -243,6 +245,10 @@ void glGetFloatv(GLenum p, GLfloat* v) {
     if (p == 0x0B22) { v[0] = 1; v[1] = 1; return; } // ALIASED_LINE_WIDTH_RANGE
     if (p == 0x0B12) { v[0] = 1; v[1] = 1; return; } // POINT_SIZE_RANGE (cap 1, an toàn)
     if (p == 0x84FF) { *v = 16; return; }            // MAX_TEXTURE_MAX_ANISOTROPY
+    if (p == 0x80AA) {                               // SAMPLE_COVERAGE_VALUE mặc định
+        if (!c.state.GetShadow(p, &t, 4)) t = 1.0f;
+        *v = t; return;
+    }
     if (c.state.GetShadow(p, &t, 4)) { *v = t; return; }
     *v = 0;
 }
@@ -309,8 +315,10 @@ void glGetProgramiv(GLuint p, GLenum q, GLint* v) {
     auto it = c.programs.find(p);
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
     if (q == 0x8B82) *v = it->second.linked ? 1 : 0;       // LINK_STATUS
+    else if (q == 0x8B83) *v = it->second.validateStatus ? 1 : 0; // VALIDATE_STATUS
     else if (q == 0x8B84) *v = (GLint)it->second.infoLog.size();
     else if (q == 0x8B85) *v = (GLint)it->second.shaders.size(); // ATTACHED_SHADERS
+    else if (q == 0x8258) *v = it->second.separable ? 1 : 0; // PROGRAM_SEPARABLE
     // ACTIVE_UNIFORMS (0x8B86): stub cũ map 0x8B86 → ATTACHED_SHADERS (sai mã;
     // ATTACHED_SHADERS = 0x8B85) → Iris ProgramUniforms chỉ thấy 2 uniform, và
     // glGetActiveUniform trả FLOAT cho mọi tên → mat4 (iris_LightmapTextureMatrix)
@@ -443,8 +451,24 @@ GLint glGetAttribLocation(GLuint p, const GLchar* n) {
     // Chưa link / không có attrib → -1 (đúng GL). Link fail → attribLoc rỗng → -1.
     return (f == it->second.attribLoc.end()) ? -1 : f->second;
 }
-GLint glGetFragDataLocation(GLuint p, const GLchar* n) { (void)p;(void)n; return -1; }
-GLint glGetFragDataIndex(GLuint p, const GLchar* n) { (void)p;(void)n; return -1; }
+GLint glGetFragDataLocation(GLuint p, const GLchar* n) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end() || !it->second.linked) { c.errors.Record(0x0502); return -1; }
+    if (!n) { c.errors.Record(0x0501); return -1; }
+    for (auto& o : it->second.fragOutputs)
+        if (o.name == n) return o.location;
+    return -1;
+}
+GLint glGetFragDataIndex(GLuint p, const GLchar* n) {
+    Context& c = Context::Current();
+    auto it = c.programs.find(p);
+    if (it == c.programs.end() || !it->second.linked) { c.errors.Record(0x0502); return -1; }
+    if (!n) { c.errors.Record(0x0501); return -1; }
+    for (auto& o : it->second.fragOutputs)
+        if (o.name == n) return (GLint)o.index;
+    return -1;
+}
 void glGetUniformfv(GLuint p, GLint l, GLfloat* v) {
     Context& c = Context::Current();
     auto it = c.programs.find(p);
