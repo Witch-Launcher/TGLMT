@@ -388,7 +388,9 @@ static void LogF(const char* fmt, ...) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     AquariumView* me = weakSelf;
                     if (!me) return;
-                    LogF("[test] %s", raw ? raw : "");
+                    // `raw` có thể trỏ vào buffer tạm của test; log bằng NSString
+                    // đã copy để tránh mojibake trong aquarium.log.
+                    LogF("[test] %s", line ? [line UTF8String] : "");
                     [me appendTestLine:line progress:p done:done summary:line];
                 });
             };
