@@ -40,6 +40,7 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | `glInvalidateFramebuffer` and friends | No-op accepted | explicitly documented as not implemented |
 | `glBlitFramebuffer` | GPU, CPU fallback | GPU blit when formats match; CPU copy when scaling, filtering, or format differs |
 | FBO completeness, attachment with mip level | GPU | target size is `base >> level` |
+| FBO attachment to a 2D-array layer | GPU | `glFramebufferTextureLayer` creates a per-layer Metal view for colour and depth attachments; verified by `test_texture_array_apple`. A single slice of a 3D texture remains unsupported because Metal cannot create a 2D view of a 3D texture. |
 | `glClear` | GPU | immediate clear, or deferred to the next draw as `loadAction = Clear` |
 | `glClearTexImage` / `glClearTexSubImage` | No-op accepted | |
 

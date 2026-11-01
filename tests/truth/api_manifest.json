@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "generated_by": "tools/truth_manifest.py",
-  "git": "32ac485+dirty",
+  "git": "9d25111+dirty",
   "library": "build/libtglmt.dylib",
   "summary": {
     "core_functions": 698,
@@ -953,6 +953,7 @@
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_draw_buffers2_p8.cpp",
         "tests/unit/test_framebuffer_state.cpp",
         "tests/unit/test_renderbuffer.cpp",
@@ -1173,6 +1174,7 @@
         "tests/integration/test_clear_targets_apple.cpp",
         "tests/integration/test_mc_bake_depth_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
+        "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp"
       ]
     },

@@ -991,11 +991,18 @@ public:
         td.arrayLength = layers;
         td.mipmapLevelCount = 1;
         td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-        td.storageMode = MTLStorageModeShared;
+        // Depth/Stencil CẤM Shared/Managed (validateWithDevice abort): Private.
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            td.storageMode = MTLStorageModePrivate;
+        else
+            td.storageMode = MTLStorageModeShared;
         id<MTLTexture> t = nil;
         @try { t = [dev_ newTextureWithDescriptor:td]; } @catch (NSException*) { return nullptr; }
         if (!t) return nullptr;
-        return std::make_shared<AppleTexture>(t, w, h, f, layers);
+        auto tex = std::make_shared<AppleTexture>(t, w, h, f, layers);
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            tex->trackDepthInit(depthInit_);
+        return tex;
     }
     bool updateTexture3D(ITexture* tex, uint32_t z, uint32_t x, uint32_t y,
             uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) override {

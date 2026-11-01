@@ -25,11 +25,14 @@ static GLuint MakeProgram() {
         "#version 460 core\n"
         "out vec4 o;\n"
         "uniform sampler2DArray uArr;\n"
+        "uniform sampler2DArray uDepth;\n"
         "uniform float uLayer;\n"
+        "uniform float uUseDepth;\n"
         "void main() {\n"
         "  vec4 a = texture(uArr, vec3(0.5, 0.5, uLayer));\n"
         "  ivec3 s = textureSize(uArr, 0);\n"
-        "  o = vec4(a.r, float(s.z) / 8.0, a.g, 1.0);\n"
+        "  float v = (uUseDepth > 0.5) ? texture(uDepth, vec3(0.5, 0.5, uLayer)).r : a.r;\n"
+        "  o = vec4(v, float(s.z) / 8.0, a.g, 1.0);\n"
         "}\n";
     GLuint v = glCreateShader(0x8B31), f = glCreateShader(0x8B30);
     glShaderSource(v, 1, &vs, nullptr);
@@ -203,6 +206,43 @@ int main() {
     glDrawArrays(0x0004, 0, 6);
     glReadPixels(16, 16, 1, 1, 0x1908, 0x1401, p);
     Check(Near(p[0], 0), "layer 0 array không bị clear");
+
+    // Depth array layer attach: clear depth layer 1 = 0.25 rồi sample lại.
+    GLuint depthArr = 0;
+    glGenTextures(1, &depthArr);
+    glActiveTexture(0x84C2);
+    glBindTexture(0x8C1A, depthArr);
+    glTexImage3D(0x8C1A, 0, 0x8CAC /*DEPTH_COMPONENT32F*/, 8, 8, 2, 0,
+                 0x1902 /*DEPTH_COMPONENT*/, 0x1406 /*FLOAT*/, nullptr);
+    Check(glGetError() == 0, "depth array storage không lỗi");
+    GLuint fboDepth = 0;
+    glGenFramebuffers(1, &fboDepth);
+    glBindFramebuffer(0x8D40, fboDepth);
+    glFramebufferTextureLayer(0x8D40, 0x8CE0, arrRT, 0, 0);
+    glFramebufferTextureLayer(0x8D40, 0x8D00 /*DEPTH_ATTACHMENT*/, depthArr, 0, 1);
+    glDrawBuffers(1, (const GLenum[]){0x8CE0});
+    Check(glGetError() == 0 && glCheckFramebufferStatus(0x8D40) == 0x8CD5,
+          "depth array FBO complete");
+    glViewport(0, 0, 8, 8);
+    glClearDepth(0.25);
+    glClear(0x0100 /*DEPTH_BUFFER_BIT*/);
+    Check(glGetError() == 0, "clear depth array layer không lỗi");
+    glBindFramebuffer(0x8D40, fbo);
+    glViewport(0, 0, 32, 32);
+    glActiveTexture(0x84C1);
+    glBindTexture(0x8C1A, arrRT);
+    glActiveTexture(0x84C2);
+    glBindTexture(0x8C1A, depthArr);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "uArr"), 1);
+    glUniform1i(glGetUniformLocation(prog, "uDepth"), 2);
+    glUniform1f(glGetUniformLocation(prog, "uUseDepth"), 1.0f);
+    glUniform1f(glGetUniformLocation(prog, "uLayer"), 1.0f);
+    glDrawArrays(0x0004, 0, 6);
+    Check(glGetError() == 0, "draw depth sampler2DArray no error");
+    glReadPixels(16, 16, 1, 1, 0x1908, 0x1401, p);
+    Check(Near(p[0], 64), "depth array layer 1 clear 0.25 → R=64");
+    glUniform1f(glGetUniformLocation(prog, "uUseDepth"), 0.0f);
 
     if (gFails) {
         printf("test_texture_array_apple RESULT: FAIL (%d)\n", gFails);
