@@ -65,6 +65,7 @@ static const char* const kExts[] = {
     "GL_ARB_instanced_arrays",
     "GL_ARB_occlusion_query",
     "GL_ARB_point_parameters",
+    "GL_ARB_sample_locations",
     "GL_ARB_sample_shading",
     "GL_ARB_texture_buffer_object",
     "GL_ARB_vertex_buffer_object",
@@ -75,6 +76,13 @@ static const char* const kExts[] = {
     // = nói dối. 47 ext mirror core functionality đang chạy.
     "GL_APPLE_sync",
     "GL_APPLE_vertex_array_object",
+    // ANGLE (ES compatibility, symbol aliases forward sang core thật):
+    // framebuffer_blit → glBlitFramebuffer, framebuffer_multisample →
+    // glRenderbufferStorageMultisample, instanced_arrays → glDraw*Instanced /
+    // glVertexAttribDivisor. Test: test_ext_aliases.
+    "GL_ANGLE_framebuffer_blit",
+    "GL_ANGLE_framebuffer_multisample",
+    "GL_ANGLE_instanced_arrays",
     "GL_EXT_base_instance",
     "GL_EXT_blend_color",
     "GL_EXT_blend_equation_separate",
@@ -125,6 +133,8 @@ static const char* const kExts[] = {
     "GL_ARB_map_buffer_range",
     "GL_ARB_sampler_objects",
     "GL_ARB_texture_storage",
+    "GL_ARB_texture_storage_multisample",
+    "GL_ARB_conservative_depth",
     "GL_ARB_uniform_buffer_object",
     "GL_ARB_vertex_array_object",
     "GL_OES_element_index_uint",
@@ -242,6 +252,13 @@ static const char* const kExts[] = {
     "GL_ARB_compute_variable_group_size",
     "GL_EXT_debug_label",
     "GL_ARB_ES3_2_compatibility",
+    // ===== P11: base_instance + ES3_1_compatibility =====
+    //  - ARB_base_instance: 3 entry point dùng chung EmitDraw(baseInstance) +
+    //    Metal drawPrimitives/drawIndexed baseInstance; e2e MDIC baseInstance PASS.
+    //  - ARB_ES3_1_compatibility: glMemoryBarrierByRegion = full barrier (hợp lệ,
+    //    mạnh hơn yêu cầu); các feature ES 3.1 còn lại đã có trong core 4.6.
+    "GL_ARB_base_instance",
+    "GL_ARB_ES3_1_compatibility",
     // ===== P8: ARB_shader_objects + EXT_draw_buffers2 (indexed MRT control). =====
     "GL_ARB_shader_objects",
     //  - draw_buffers2: ColorMask/Enable/Disable/IsEnabled/Get indexed (per-target MRT).
@@ -286,8 +303,7 @@ static const char* const kExts[] = {
     //  stencil_texturing, rgtc (không decode — glCompressedTexImage2D no-op),
     //  occlusion ANY_SAMPLES (cần GPU query), clear_texture (no-op),
     //  vertex_attrib_64bit (Double không render),
-    //  vertex_type_10f_11f_11f_rev (Metal không có Float101111),
-    //  texture_storage_multisample (multisample texture no-op — Iris không dùng) → P4/P7.
+    //  vertex_type_10f_11f_11f_rev (Metal không có Float101111) → P4/P7.
 };
 static const GLuint kNumExts = (GLuint)(sizeof(kExts) / sizeof(kExts[0]));
 const GLubyte* glGetStringi(GLenum n, GLuint i) {

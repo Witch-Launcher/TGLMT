@@ -47,7 +47,9 @@ int main() {
 
     glUseProgram(pr);
     glDispatchCompute(8, 1, 1); // 8 workgroup × 8 thread = 64
-    glMemoryBarrier(0x0020 | 0x0040); // SHADER_STORAGE | COMMAND
+    // ARB_ES3_1_compatibility: barrier theo region; TGLMT hạ xuống full barrier.
+    glMemoryBarrierByRegion(0x0020 | 0x0040); // SHADER_STORAGE | COMMAND
+    if (glGetError() != 0) { printf("test_compute_dispatch FAIL: MemoryBarrierByRegion\n"); return 1; }
 
     glBindBuffer(0x90D2, buf);
     const float* r = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z), 0x0008 | 0x0010);

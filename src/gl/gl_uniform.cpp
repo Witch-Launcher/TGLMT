@@ -57,7 +57,18 @@ static void TrackSamplerUnit(ProgramObject& pr, GLint loc, GLint unit) {
             for (auto& s : lst) if (s == nm) return true;
             return false;
         };
-        if (isSamp(pr.vsSamplers) || isSamp(pr.fsSamplers)) {
+        auto isStageSamp = [&](const std::vector<ProgramObject::StageSampler>& lst) {
+            for (auto& x : lst) if (x.name == nm) return true;
+            return false;
+        };
+        auto isImg = [&](const std::vector<ProgramObject::ImageSlot>& lst) {
+            for (auto& x : lst) if (x.name == nm) return true;
+            return false;
+        };
+        if (isSamp(pr.vsSamplers) || isSamp(pr.fsSamplers) ||
+            isStageSamp(pr.vsCaptureSamplers) || isStageSamp(pr.tcsSamplers) ||
+            isStageSamp(pr.tesSamplers) || isStageSamp(pr.fsTessSamplers) ||
+            isImg(pr.tcsImages) || isImg(pr.tesImages)) {
             pr.samplerUnits[nm] = (GLuint)unit;
             return;
         }
@@ -76,12 +87,19 @@ static bool ProgramHasUniformName(const ProgramObject& pr, const std::string& nm
         return false;
     };
     if (isIn(pr.vsSamplers) || isIn(pr.fsSamplers) || isIn(pr.computeSamplers)) return true;
+    auto inStageSamp = [&](const std::vector<ProgramObject::StageSampler>& lst) {
+        for (auto& s : lst) if (s.name == nm) return true;
+        return false;
+    };
+    if (inStageSamp(pr.vsCaptureSamplers) || inStageSamp(pr.tcsSamplers) ||
+        inStageSamp(pr.tesSamplers) || inStageSamp(pr.fsTessSamplers)) return true;
     for (auto& e : pr.uniformLayout) if (e.name == nm) return true;
     auto inImg = [&](const std::vector<ProgramObject::ImageSlot>& v) {
         for (auto& im : v) if (im.name == nm) return true;
         return false;
     };
-    if (inImg(pr.vsImages) || inImg(pr.fsImages) || inImg(pr.computeImages)) return true;
+    if (inImg(pr.vsImages) || inImg(pr.fsImages) || inImg(pr.computeImages) ||
+        inImg(pr.tcsImages) || inImg(pr.tesImages)) return true;
     auto inAtom = [&](const std::vector<ProgramObject::AtomicSlot>& v) {
         for (auto& a : v) if (a.name == nm) return true;
         return false;

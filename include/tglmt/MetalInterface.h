@@ -123,7 +123,12 @@ struct StencilDesc {
     StencilFaceDesc front, back;
 };
 struct PipelineOpts {
-    bool depth = false;              // target có depth → depthAttachmentPixelFormat
+    bool depth = false;              // depth test bật (DSS: compare/write)
+    // Format depth attachment THẬT của target (Depth32Float hoặc Depth24Stencil8).
+    // Metal validation bắt pipeline/pass khớp CHÍNH XÁC format attachment; Invalid
+    // = pass không attach depth. Khi stencil bật (target D24S8) cả depth lẫn
+    // stencil đều phải là Depth32Float_Stencil8.
+    PixelFormat depthFmt = PixelFormat::Invalid;
     uint32_t samples = 1;            // rasterSampleCount (MSAA target)
     // MRT: số color attachment (draw slot) pipeline ghi. Slot không ghi
     // (GL_NONE / không có texture) → colorFmts[i] = Invalid (Metal cho phép slot
@@ -183,6 +188,10 @@ public:
     virtual PixelFormat pixelFormat() const = 0;
     // Số mip level trên GPU (quyết định lọc mip an toàn; default 1).
     virtual uint32_t levelCount() const { return 1; }
+    // FBO attachment của texture 3D: render pass dùng chính MTLTextureType3D +
+    // depthPlane/level (Metal không cho tạo view 2D từ 3D).
+    virtual uint32_t attachmentSlice() const { return 0; }
+    virtual uint32_t attachmentLevel() const { return 0; }
     // GL_EXT_texture_swizzle: trả view texture áp MTLTextureSwizzle (0=Zero,
     // 1=One, 2=Red, 3=Green, 4=Blue, 5=Alpha), cache theo combo.
     // r==2,g==3,b==4,a==5 (identity) hoặc backend không hỗ trợ → nullptr
@@ -250,8 +259,22 @@ public:
     virtual bool hasDepth() const { return false; }
     // Target có stencil attachment không (combined Depth24Stencil8).
     virtual bool hasStencil() const { return false; }
+    // Format CHÍNH XÁC của depth attachment (Metal bắt pipeline khớp tuyệt đối).
+    // Mặc định suy ra từ hasDepth()/hasStencil(); backend override nếu cần.
+    virtual PixelFormat depthFormat() const {
+        if (hasStencil()) return PixelFormat::Depth24Stencil8;
+        return hasDepth() ? PixelFormat::Depth32Float : PixelFormat::Invalid;
+    }
     // MSAA: số sample của attachment (1 = non-MSAA).
     virtual uint32_t sampleCount() const { return 1; }
+    // ARB_sample_locations: vị trí sample tuỳ biến theo pixel (x,y trong [0,1]).
+    // count=0 → dùng default của Metal. Backend không hỗ trợ: no-op.
+    virtual void setSamplePositions(const float* xy, uint32_t count) {
+        (void)xy; (void)count;
+    }
+    // MSAA 2D array: chọn layer cho attachment/resolve (array texture).
+    virtual void setColorAttachmentLayer(uint32_t slot, uint32_t layer) { (void)slot; (void)layer; }
+    virtual void setDepthAttachmentLayer(uint32_t layer) { (void)layer; }
     // Texture color đang render (MSAA: texture multisample, không phải resolve).
     virtual ITexture* colorTexture(uint32_t slot = 0) { (void)slot; return nullptr; }
     // Texture resolve của target MSAA (nullptr = không có/không hỗ trợ).
@@ -364,6 +387,13 @@ public:
         (void)gz; (void)tx; (void)ty; (void)tz;
         dispatch2D(gx, gy);
     }
+    // P-Tess T4: dispatch theo THREADGROUP (không phải thread) — TCS cần
+    // đúng 1 threadgroup/patch để barrier() đồng bộ N invocation.
+    virtual void dispatchGroups3D(uint32_t gx, uint32_t gy, uint32_t gz,
+                                  uint32_t tx, uint32_t ty, uint32_t tz) {
+        (void)gz; (void)tx; (void)ty; (void)tz;
+        dispatch2D(gx, gy);
+    }
     // P1 glDispatchComputeIndirect: dispatch với num_workgroups (3×uint32, GL ≡
     // MTLDispatchThreadgroupsIndirectArguments) đọc từ GPU buffer tại byte offset.
     // threadsPerThreadgroup từ layout(local_size) của shader. Default: no-op.
@@ -385,6 +415,19 @@ public:
     virtual ~IDevice() = default;
     virtual std::string name() const = 0;
     virtual bool isNull() const = 0;
+    // Bộ nhớ process còn dùng được (iOS: os_proc_available_memory). (size_t)-1 =
+    // backend không biết. Context dùng để trim shadow CPU trước alloc lớn thay vì
+    // để Jetsam giết app (iPhone 8 Plus, limit ~2.1GB).
+    virtual size_t availableMemoryBytes() const { return (size_t)-1; }
+    // Metal getDefaultSamplePositions (macOS 10.13/iOS 11): trả 2*count float
+    // (x,y) trong [0,1]. Null backend giữ nguyên out (caller default 0.5).
+    virtual void getDefaultSamplePositions(uint32_t count, float* outXY) {
+        (void)count; (void)outXY;
+    }
+    virtual bool supportsProgrammableSamplePositions() const { return false; }
+    // GL_MAX_TESS_GEN_LEVEL thật của backend: Apple3/4 (A9-A11) = 16,
+    // Apple5+/Mac = 64. Không clamp lên 64 vì PSO sẽ abort khi factor >16.
+    virtual uint32_t maxTessellationFactor() const { return 64; }
     virtual std::shared_ptr<IBuffer> newBuffer(size_t len, StorageMode m) = 0;
     virtual std::shared_ptr<IBuffer> newBufferWithBytes(const void* p, size_t len, StorageMode m) = 0;
     // Occlusion ANY_SAMPLES: buffer visibility dùng chung cho mọi render pass.
@@ -426,8 +469,9 @@ public:
     }
     // 6-arg: vs và fs từ 2 library riêng (chuẩn spirv-cross: mỗi stage 1 file MSL).
     virtual std::shared_ptr<IRenderPipeline> makeRenderPipeline(ILibrary* vsLib, const char* vsFn,
-            ILibrary* fsLib, const char* fsFn, PixelFormat colorFmt) {
-        (void)vsLib; (void)vsFn; (void)fsLib; (void)fsFn; (void)colorFmt; return nullptr;
+            ILibrary* fsLib, const char* fsFn, PixelFormat colorFmt, bool usesStageIn = true) {
+        (void)vsLib; (void)vsFn; (void)fsLib; (void)fsFn; (void)colorFmt; (void)usesStageIn;
+        return nullptr;
     }
     // 4-arg: cùng 1 library cho cả 2 stage (vd triangle.metal) — delegate, giữ tương thích.
     virtual std::shared_ptr<IRenderPipeline> makeRenderPipeline(ILibrary* lib, const char* vsFn,
@@ -449,9 +493,14 @@ public:
     // factors 1.0 = passthrough đúng hành vi GL tess level 1; TCS tính factors
     // động cần M5b thực thi program (ghi rõ, không giả).
     virtual std::shared_ptr<IRenderPipeline> makeTessPipeline(ILibrary* vsLib, const char* postTessFn,
-            ILibrary* fsLib, const char* fsFn, PixelFormat colorFmt, uint32_t controlPoints) {
+            ILibrary* fsLib, const char* fsFn, PixelFormat colorFmt, uint32_t controlPoints,
+            uint32_t samples = 1, const PixelFormat* colorFmts = nullptr,
+            uint32_t colorCount = 1, uint32_t partitionMode = 0, bool depth = false,
+            bool usesStageIn = true) {
         (void)vsLib; (void)postTessFn; (void)fsLib; (void)fsFn; (void)colorFmt;
-        (void)controlPoints; return nullptr;
+        (void)controlPoints; (void)samples; (void)colorFmts; (void)colorCount;
+        (void)partitionMode; (void)depth; (void)usesStageIn;
+        return nullptr;
     }
     // Depth/stencil state (glDepthFunc/glDepthMask → MTLCompareFunction + writeMask).
     virtual std::shared_ptr<IDepthStencilState> makeDepthStencilState(uint32_t func, bool writeMask) {
@@ -465,8 +514,9 @@ public:
     }
     // Pipeline cho target có depth (depthAttachmentPixelFormat=Depth32Float khớp pass).
     virtual std::shared_ptr<IRenderPipeline> makeDepthPipeline(ILibrary* vsLib, const char* vsFn,
-            ILibrary* fsLib, const char* fsFn, PixelFormat colorFmt) {
-        (void)vsLib; (void)vsFn; (void)fsLib; (void)fsFn; (void)colorFmt; return nullptr;
+            ILibrary* fsLib, const char* fsFn, PixelFormat colorFmt, bool usesStageIn = true) {
+        (void)vsLib; (void)vsFn; (void)fsLib; (void)fsFn; (void)colorFmt; (void)usesStageIn;
+        return nullptr;
     }
     // Render target kèm depth (color Shared + depth Private, store DontCare).
     virtual std::shared_ptr<IRenderTarget> makeRenderTargetWithDepth(uint32_t w, uint32_t h,
@@ -495,8 +545,14 @@ public:
         return newTexture(w, h, f);
     }
     // MSAA target (multisample Private + resolve Shared, storeActionMultisampleResolve).
-    virtual std::shared_ptr<IRenderTarget> makeMSAATarget(uint32_t w, uint32_t h, uint32_t samples) {
-        (void)w; (void)h; (void)samples; return nullptr;
+    virtual std::shared_ptr<IRenderTarget> makeMSAATarget(uint32_t w, uint32_t h,
+            uint32_t samples, PixelFormat fmt = PixelFormat::RGBA8Unorm) {
+        (void)w; (void)h; (void)samples; (void)fmt; return nullptr;
+    }
+    // MSAA 2D array: color/depth 2DMultisampleArray + resolve 2DArray.
+    virtual std::shared_ptr<IRenderTarget> makeMSAATargetLayered(uint32_t w, uint32_t h,
+            uint32_t layers, uint32_t samples, PixelFormat fmt = PixelFormat::RGBA8Unorm) {
+        (void)w; (void)h; (void)layers; (void)samples; (void)fmt; return nullptr;
     }
     // Mesh pipeline thay thế GS (Metal 3+, MTLMeshRenderPipelineDescriptor).
     // Trả nullptr khi thiết bị/OS không hỗ trợ (test SKIP, không crash).
@@ -667,11 +723,32 @@ public:
                                                         uint32_t layers, PixelFormat f) {
         return newTexture3D(w, h, layers, f);
     }
+    // Immutable/legacy mip chain cho array/3D. Default giữ hành vi cũ (1 level)
+    // để Null backend không cần cấp phát mip; Apple override tạo đủ level.
+    virtual std::shared_ptr<ITexture> newTexture2DArrayLevels(uint32_t w, uint32_t h,
+                                                              uint32_t layers,
+                                                              uint32_t levels, PixelFormat f) {
+        (void)levels;
+        return newTexture2DArray(w, h, layers, f);
+    }
+    virtual std::shared_ptr<ITexture> newTexture3DLevels(uint32_t w, uint32_t h,
+                                                         uint32_t d, uint32_t levels,
+                                                         PixelFormat f) {
+        (void)levels;
+        return newTexture3D(w, h, d, f);
+    }
     // Upload MỘT slice z của texture 3D (glTexSubImage3D lặp per-slice).
     virtual bool updateTexture3D(ITexture* tex, uint32_t z, uint32_t x, uint32_t y,
             uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) {
         (void)tex; (void)z; (void)x; (void)y; (void)w; (void)h; (void)data; (void)bytesPerRow;
         return false;
+    }
+    // Upload slice z ở mip level >0 (array: slice = layer; 3D: z trong origin).
+    virtual bool updateTexture3DLevel(ITexture* tex, uint32_t level, uint32_t z,
+            uint32_t x, uint32_t y, uint32_t w, uint32_t h, const void* data,
+            size_t bytesPerRow) {
+        (void)level;
+        return updateTexture3D(tex, z, x, y, w, h, data, bytesPerRow);
     }
     // Cubemap cho panorama vanilla (samplerCube + texturecube<float> MSL):
     // 6 faces RGBA8/R8, upload từng face. Không hỗ trợ → nullptr/false để
@@ -680,10 +757,20 @@ public:
     virtual std::shared_ptr<ITexture> newCubeTexture(uint32_t size, PixelFormat f) {
         (void)size; (void)f; return nullptr;
     }
+    virtual std::shared_ptr<ITexture> newCubeTextureLevels(uint32_t size, uint32_t levels,
+                                                            PixelFormat f) {
+        (void)levels;
+        return newCubeTexture(size, f);
+    }
     virtual bool updateCubeFace(ITexture* tex, uint32_t face, const void* data,
             size_t bytesPerRow) {
         (void)tex; (void)face; (void)data; (void)bytesPerRow;
         return false;
+    }
+    virtual bool updateCubeFaceLevel(ITexture* tex, uint32_t level, uint32_t face,
+            const void* data, size_t bytesPerRow) {
+        (void)level;
+        return updateCubeFace(tex, face, data, bytesPerRow);
     }
 };
 

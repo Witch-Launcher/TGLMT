@@ -86,6 +86,9 @@ def implemented_funcs():
         if f.name in ("gl_stubs_gen.cpp", "gl_ext_aliases_gen.cpp"):
             continue
         txt = f.read_text()
+        # extern "C" entry points are C symbols, not tglmt::gl methods.
+        if 'extern "C"' in txt:
+            continue
         for m in re.finditer(r"\b(gl[A-Za-z0-9_]+)\s*\(", txt):
             impl.add(m.group(1))
         for m in re.finditer(r"\b[A-Z][A-Z0-9_]+\s*\(\s*(gl[A-Za-z0-9_]+)", txt):
@@ -128,6 +131,13 @@ def src_defs():
             continue
         d = stub if f.name == "gl_stubs_gen.cpp" else real
         txt = f.read_text()
+        # extern "C" definitions already export the exact C symbol, so they are
+        # not C++ tglmt::gl targets. Treating them as `real` made the generator
+        # emit calls to non-existent tglmt::gl::glXxx (link errors for
+        # NV_path_rendering / ARB_imaging). Their aliases need a C forward, not
+        # this generator's namespace forward.
+        if 'extern "C"' in txt:
+            continue
         txt = re.sub(r"/\*.*?\*/", " ", txt, flags=re.S)
         txt = re.sub(r"//[^\n]*", " ", txt)
         for m in pat.finditer(txt):
@@ -151,7 +161,7 @@ def c_exported_names():
 
 
 def alias_base(fn):
-    m = re.match(r"^(gl.+?)(ARB|EXT|APPLE|OES|KHR|NV|AMD|ATI|MESA|SGIS)$", fn)
+    m = re.match(r"^(gl.+?)(ARB|EXT|APPLE|ANGLE|OES|KHR|NV|AMD|ATI|MESA|SGIS)$", fn)
     return m.group(1) if m else None
 
 

@@ -49,10 +49,11 @@ unset TGLMT_DIAG
 TGLMT_DIAG=1 ./build-ios-pkg/run.sh 2> latestlog.txt
 ```
 
-Expected `test_perf_deferred_apple` output (MacIntel, May 2026):
+Measured `test_perf_deferred_apple` output (MacIntel UHD 630, 2026-11-02, 5 runs):
 
 ```
-batch100: enc=1 (want 1) reuse=99 traceSkip=100 ring=2 tempFallback=0 us=~2000-3000
+batch100: enc=1 reuse=99 traceSkip=100 ring=2 tempFallback=0
+          us=16171, 8075, 4276, 8344, 20420  (median 8344)
 cond-flush: enc=1 flushAvoided>=5
 used-flush: enc=2 (split on used-buffer stage)
 multidraw: enc=1 batched=5
@@ -60,7 +61,10 @@ mid=(255,0,0)
 ```
 
 `ring=2` = first draw uploads VS+FS once, 99 draws reuse (steady-state 0 alloc).
-`us` varies by machine; assert is on counters, not wall-clock.
+The old `us=~2000-3000` claim was not reproduced on this host; wall-clock is
+currently high-variance (4.3–20.4 ms). The test asserts counters, not wall-clock,
+and there is still no performance gate. `test_perf_draw_apple` measured a median
+of 31.6 µs/draw over 5 runs (range 22.8–38.1 µs/draw) for a mixed-program loop.
 
 ## Budgets (A11 baseline, vanilla 64×64 → fullscreen extrapolates linearly)
 

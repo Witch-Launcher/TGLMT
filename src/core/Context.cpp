@@ -269,9 +269,10 @@ static uint64_t TexelBytes(metal::PixelFormat f) {
 }
 
 // P1: đọc nguyên level-0 từ GPU (bản tạm). Xem chú thích khai báo trong Context.h.
-bool Context::ReadTextureGPU(const TextureObject& tx, std::vector<uint8_t>& out) {
+bool Context::ReadTextureGPU(const TextureObject& tx, std::vector<uint8_t>& out, int face,
+                             int level) {
     out.clear();
-    if (!tx.gpu || !tx.w || !tx.h) return false;
+    if (!tx.gpu || !tx.w || !tx.h || level < 0) return false;
     if (!device || device->isNull()) return false;
     if (!TexReadableFromGPU(tx)) return false;
     // Contract cũ: out = RGBA8 4B/px (caller index i*4). Sau khi map HDR
@@ -288,10 +289,48 @@ bool Context::ReadTextureGPU(const TextureObject& tx, std::vector<uint8_t>& out)
     FlushAllBufferStaging();
     FlushAllTextureStaging();
     CommitAndWait(); // xả draws NoWait (không stale TBDR)
-    auto wrapped = device->wrapAsTarget(tx.gpu.get(), nullptr);
+    const uint32_t lw = (tx.w >> level) ? (tx.w >> level) : 1;
+    const uint32_t lh = (tx.h >> level) ? (tx.h >> level) : 1;
+    // 2D array: layer count KHÔNG co theo mip (d == layers); 3D: depth co.
+    const uint32_t ld = (tx.target == 0x8C1A)
+        ? (tx.d ? tx.d : 1)
+        : ((tx.d >> level) ? (tx.d >> level) : 1);
+    // Cubemap face / array layer: view 2D của (level, layer) rồi readback (cube
+    // không readback nguyên texture như 2D). Dùng cho glGetTexImage(cube face)
+    // và glReadPixels từ FBO gắn layer/face.
+    if (face >= 0) {
+        auto slice = tx.gpu->textureLayerView((uint32_t)level, (uint32_t)face);
+        if (!slice) return false;
+        auto wrapped = device->wrapAsTarget(slice.get(), nullptr);
+        if (!wrapped) return false;
+        out.assign((size_t)lw * lh * 4, 0);
+        if (!wrapped->readback(out.data(), (size_t)lw * 4)) { out.clear(); return false; }
+        return true;
+    }
+    // 2D array: Metal không cho view 3D→2D nhưng array/cube thì được. Đọc từng
+    // layer qua textureLayerView để GetTexImage/glReadPixels thấy đủ volume.
+    if (tx.d > 1) {
+        out.assign((size_t)lw * lh * ld * 4, 0);
+        for (uint32_t z = 0; z < ld; ++z) {
+            auto slice = tx.gpu->textureLayerView((uint32_t)level, z);
+            if (!slice) { out.clear(); return false; }
+            auto wrapped = device->wrapAsTarget(slice.get(), nullptr);
+            if (!wrapped ||
+                !wrapped->readback(out.data() + (size_t)z * lw * lh * 4,
+                                   (size_t)lw * 4)) {
+                out.clear();
+                return false;
+            }
+        }
+        return true;
+    }
+    std::shared_ptr<metal::ITexture> view;
+    if (level > 0)
+        view = tx.gpu->textureView(tx.gpu->pixelFormat(), (uint32_t)level, 1, 0, 1);
+    auto wrapped = device->wrapAsTarget(view ? view.get() : tx.gpu.get(), nullptr);
     if (!wrapped) return false;
-    out.assign((size_t)tx.w * tx.h * 4, 0);
-    if (!wrapped->readback(out.data(), (size_t)tx.w * 4)) { out.clear(); return false; }
+    out.assign((size_t)lw * lh * 4, 0);
+    if (!wrapped->readback(out.data(), (size_t)lw * 4)) { out.clear(); return false; }
     return true;
 }
 
@@ -301,6 +340,8 @@ void Context::RefreshMemStats() {
         const TextureObject& t = kv.second;
         tb += t.pixels.size();
         for (auto& m : t.mipData) mb += m.second.pixels.size();
+        for (auto& fm : t.faceMips)
+            for (auto& m : fm) mb += m.second.pixels.size();
         for (auto& f : t.faces) fb += f.size();
         if (t.gpu)
             gt += (uint64_t)t.gpu->width() * (uint64_t)t.gpu->height() *
@@ -346,6 +387,68 @@ void Context::RefreshMemStats() {
     appleStats.nBufferStaged = (uint64_t)pendingBufRanges.size();
     appleStats.nPool = npool;
     appleStats.maxBuf = maxb;
+}
+
+size_t Context::TrimCachedMemory() {
+    size_t freed = 0;
+    // Mip/face-mip shadow: chỉ bỏ khi GPU có đúng level (Promote/Storage đã cấp
+    // chain). Không có → shadow là nguồn duy nhất, giữ.
+    for (auto& kv : textures) {
+        TextureObject& t = kv.second;
+        if (!t.gpu) continue;
+        const uint32_t lv = t.gpu->levelCount();
+        auto drop = [&](std::map<GLint, TextureObject::MipLevel>& m) {
+            for (auto& mi : m) {
+                if (mi.first >= 0 && lv > (uint32_t)mi.first && !mi.second.pixels.empty()) {
+                    freed += mi.second.pixels.size();
+                    std::vector<uint8_t>().swap(mi.second.pixels);
+                }
+            }
+        };
+        drop(t.mipData);
+        for (auto& fm : t.faceMips) drop(fm);
+        // Cubemap: GPU cube giữ cả 6 face; faces[] chỉ là bản sao CPU (panorama
+        // 6×4MB + mirror face 0). Readback ưu tiên GPU → bỏ được.
+        if (t.isCube && lv > 0) {
+            for (auto& f : t.faces) {
+                freed += f.size();
+                std::vector<uint8_t>().swap(f);
+            }
+            freed += t.pixels.size();
+            std::vector<uint8_t>().swap(t.pixels);
+        }
+    }
+    // Wrap-target cache: AppleTarget giữ id<MTLTexture> strong → pin attachment
+    // texture đã bị xoá (objectGen chỉ làm entry cũ không tái dùng, KHÔNG release).
+    for (auto& e : wrapCache) {
+        if (e.tgt) e = WrapEntry{};
+    }
+    // Pool buffer xoay khi GPU bận: dữ liệu game thật nằm ở bo.gpu, pool là bản
+    // TGLMT giữ thêm. GPU đang đọc vẫn an toàn (MTLCommandBuffer retain resource).
+    for (auto& kv : buffers) {
+        BufferObject& b = kv.second;
+        if (b.pool.empty()) continue;
+        for (auto& sl : b.pool)
+            if (sl.buf) freed += sl.buf->length();
+        b.pool.clear();
+        b.poolNext = 0;
+    }
+    if (freed >= (4u << 20)) {
+        fprintf(stderr, "[TGLMT] trim freed=%.1fMB avail=%.0fMB\n",
+                (double)freed / 1048576.0,
+                device ? (double)device->availableMemoryBytes() / 1048576.0 : -1.0);
+        fflush(stderr);
+    }
+    return freed;
+}
+
+void Context::MaybeTrimForAllocation(size_t needBytes) {
+    if (!device || device->isNull() || needBytes < (32u << 20)) return;
+    const size_t avail = device->availableMemoryBytes();
+    if (avail == (size_t)-1) return;
+    // Headroom cho driver/Metal heap + cấu trúc game phát sinh trong frame.
+    const size_t headroom = (size_t)256 << 20;
+    if (avail < needBytes + headroom) TrimCachedMemory();
 }
 
 // Dump texring: 96 call bind gần nhất, chron order (cũ → mới) để thấy chuỗi

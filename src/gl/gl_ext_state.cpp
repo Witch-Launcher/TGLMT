@@ -29,19 +29,30 @@ static FramebufferObject* CurrentFBO(GLenum target) {
     GLuint id = (target == 0x8CA8) ? c.state.BoundReadFBO() : c.state.BoundDrawFBO();
     return FBOById(id);
 }
-static void SetSampleLocations(FramebufferObject* f, GLuint start, GLsizei count, const GLfloat* v) {
+static void SetSampleLocationTable(std::vector<GLfloat>& table, GLuint start, GLsizei count,
+                                   const GLfloat* v) {
     Context& c = Context::Current();
-    if (!f) { c.errors.Record(0x0502); return; }
     if (start > 32 || count < 0 || start + (GLuint)count > 32 || (count && !v)) {
         c.errors.Record(0x0501); return;
     }
-    if (f->sampleLocations.size() < (size_t)(start + count) * 2)
-        f->sampleLocations.resize((size_t)(start + count) * 2, 0.0f);
-    if (count) std::memcpy(f->sampleLocations.data() + (size_t)start * 2, v,
+    // Bảng chuẩn 32 entry; entry chưa set = (0.5,0.5) theo spec.
+    if (table.size() < 64) table.resize(64, 0.5f);
+    if (count) std::memcpy(table.data() + (size_t)start * 2, v,
                            (size_t)count * 2 * sizeof(GLfloat));
 }
+static void SetSampleLocations(FramebufferObject* f, GLuint start, GLsizei count, const GLfloat* v) {
+    Context& c = Context::Current();
+    if (!f) { c.errors.Record(0x0502); return; }
+    SetSampleLocationTable(f->sampleLocations, start, count, v);
+}
 void glFramebufferSampleLocationsfvARB(GLenum target, GLuint start, GLsizei count, const GLfloat* v) {
-    SetSampleLocations(CurrentFBO(target), start, count, v);
+    Context& c = Context::Current();
+    GLuint id = (target == 0x8CA8) ? c.state.BoundReadFBO() : c.state.BoundDrawFBO();
+    if (id == 0) {
+        SetSampleLocationTable(c.ext.defaultSampleLocations, start, count, v);
+        return;
+    }
+    SetSampleLocations(FBOById(id), start, count, v);
 }
 void glNamedFramebufferSampleLocationsfvARB(GLuint framebuffer, GLuint start, GLsizei count, const GLfloat* v) {
     SetSampleLocations(FBOById(framebuffer), start, count, v);

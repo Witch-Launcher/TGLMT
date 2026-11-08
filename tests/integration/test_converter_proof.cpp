@@ -167,7 +167,9 @@ int main() {
     auto sMvp = dev->newBufferWithBytes(ident, 64, StorageMode::Shared);
     auto sTime = dev->newBufferWithBytes(&tm0, 4, StorageMode::Shared);
     auto sWag = dev->newBufferWithBytes(&wf, 4, StorageMode::Shared);
-    auto sLight = dev->newBufferWithBytes(light, 12, StorageMode::Shared);
+    // vec3 trong MSL chiếm 16B (buffer argument length 16) → cấp đủ 16B.
+    float light4[4] = {light[0], light[1], light[2], 0.0f};
+    auto sLight = dev->newBufferWithBytes(light4, sizeof(light4), StorageMode::Shared);
 
     auto renderT = [&]() -> std::string {
         auto target = dev->makeRenderTarget(64, 64, PixelFormat::RGBA8Unorm);

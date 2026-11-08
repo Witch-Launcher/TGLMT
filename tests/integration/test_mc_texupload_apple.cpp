@@ -14,6 +14,7 @@
 #include "tglmt/Context.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -286,6 +287,48 @@ int main() {
         Check(px[0] < 50 && px[1] < 50 && px[2] < 50, "E thieu texture den");
     }
     if (gFails) return 1;
-    printf("test_mc_texupload_apple PASS (mip/RED8/rowlen/cube/fallback)\n");
+
+    // ---- F. CPU->GPU upload phải TẤT ĐỊNH qua nhiều chu kỳ upload+draw.
+    // Regression thật: trên macOS Managed, replaceRegion + synchronizeResource
+    // có thể chép GPU copy (rỗng) đè CPU copy → texture mất nội dung ngẫu nhiên
+    // ~10% lần (draw ra 0,0,0,0). Nay upload đi qua staging buffer + blit.
+    {
+        GLuint tex;
+        glGenTextures(1, &tex);
+        glActiveTexture(0x84C0);
+        glBindTexture(0x0DE1, tex);
+        glTexImage2D(0x0DE1, 0, 0x8058, 32, 32, 0, 0x1908, 0x1401, nullptr);
+        glTexParameteri(0x0DE1, 0x2801, 0x2600);
+        glTexParameteri(0x0DE1, 0x2800, 0x2600);
+        glUseProgram(progTex);
+        for (int i = 0; i < 12; ++i) {
+            unsigned char col[4] = {(unsigned char)((i * 37 + 20) & 0xFF),
+                                    (unsigned char)((i * 91 + 60) & 0xFF),
+                                    (unsigned char)((i * 13 + 100) & 0xFF), 255};
+            std::vector<unsigned char> pix((size_t)32 * 32 * 4);
+            for (size_t k = 0; k < 32 * 32; ++k) memcpy(&pix[k * 4], col, 4);
+            glTexSubImage2D(0x0DE1, 0, 0, 0, 32, 32, 0x1908, 0x1401, pix.data());
+            Check(glGetError() == 0, "F subimage gl error");
+            glBindFramebuffer(0x8CA9, 0);
+            glViewport(0, 0, 64, 64);
+            glClearColor(0, 0, 0, 1);
+            glClear(0x00004000);
+            DrawQuad();
+            unsigned char px[4];
+            ReadAt(32, 32, 64, px);
+            int d = abs((int)px[0] - col[0]) + abs((int)px[1] - col[1]) +
+                    abs((int)px[2] - col[2]);
+            if (d > 3) {
+                char b[96];
+                snprintf(b, sizeof(b), "F upload cycle %d visible", i);
+                Check(false, b);
+                printf("[F cycle %d] got=(%u,%u,%u) want=(%u,%u,%u)\n", i, px[0], px[1],
+                       px[2], col[0], col[1], col[2]);
+            }
+        }
+        glDeleteTextures(1, &tex);
+    }
+    if (gFails) return 1;
+    printf("test_mc_texupload_apple PASS (mip/RED8/rowlen/cube/fallback/upload-cycle)\n");
     return 0;
 }

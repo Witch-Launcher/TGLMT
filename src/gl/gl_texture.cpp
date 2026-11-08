@@ -353,9 +353,19 @@ static size_t Bpp(GLenum format, GLenum type) {
 // cho 3D float (R32F...) được.
 static size_t BppTyped3D(GLenum format, GLenum type) {
     size_t b = Bpp(format, type);
-    if (type == 0x1406 /*FLOAT*/ || type == 0x1405 /*UNSIGNED_INT*/ ||
-        type == 0x1404 /*INT*/)
-        return b * 4;
+    switch (type) {
+        // packed 32-bit types: 1 phần tử 4 byte bất kể format component.
+        case 0x8035: case 0x8367: case 0x8368: // 8_8_8_8(_REV) / 2_10_10_10_REV
+        case 0x8C3B: case 0x8C3E:             // 10F_11F_11F_REV / 5_9_9_9_REV
+        case 0x84FA:                           // UNSIGNED_INT_24_8
+            return 4;
+        case 0x1400: case 0x1401: return b;      // BYTE / UNSIGNED_BYTE
+        case 0x1402: case 0x1403: return b * 2;  // SHORT / UNSIGNED_SHORT
+        case 0x140B: return b * 2;               // HALF_FLOAT
+        case 0x1404: case 0x1405: case 0x1406: return b * 4; // INT/UINT/FLOAT
+        case 0x140A: return b * 8;               // DOUBLE
+        default: break;
+    }
     return b;
 }
 // Pitch unpack đúng spec §8.5: ROW_LENGTH (pixel, 0 = width) rồi align.
@@ -472,6 +482,10 @@ void glDeleteTextures(GLsizei n, const GLuint* t) {
     Context& c = Context::Current();
     c.registry.Delete(ObjectKind::Texture, n, t);
     ++c.objectGen; // cache wrap-target: texture có thể bị giải phóng/ID tái dùng
+    // P1b: entry cũ giữ shared_ptr<IRenderTarget> → AppleTarget giữ id<MTLTexture>
+    // strong, pin texture đã xoá tới khi bị round-robin ghi đè. Xoá ngay.
+    if (n > 0)
+        for (auto& e : c.wrapCache) e = Context::WrapEntry{};
     for (GLsizei i = 0; i < n; ++i) {
         c.RecordTexBind('D', 0, t[i], 0);
         c.textures.erase(t[i]);
@@ -605,15 +619,54 @@ static bool PromoteGpuMipChain(Context& c, TextureObject& t, uint32_t want) {
     return true;
 }
 
+// Legacy cube face level>0: realloc cube GPU mip chain, giữ base 6 face, upload
+// shadow mip riêng từng face. Tránh PromoteGpuMipChain 2D làm mất cube type.
+static bool PromoteGpuMipChainCube(Context& c, TextureObject& t, uint32_t want) {
+    if (c.device->isNull() || !t.gpu || t.wasRT || !t.w || !t.h) return false;
+    if (t.target != 0x8513 || !t.isCube) return false;
+    uint32_t oldLevels = t.gpu->levelCount();
+    if (oldLevels >= want) return true;
+    c.FlushPendingEncoder();
+    c.FlushAllTextureStaging();
+    auto ng = c.device->newCubeTextureLevels(t.w, want, ToMetalFormat(t.internalFormat));
+    if (!ng) return false;
+    bool ok = true;
+    for (uint32_t face = 0; face < 6 && ok; ++face) {
+        if (t.faces[face].size() >= (size_t)t.w * t.h * 4)
+            ok = c.device->updateCubeFaceLevel(ng.get(), 0, face, t.faces[face].data(),
+                                               (size_t)t.w * 4);
+        for (uint32_t lv = 1; lv < want && ok; ++lv) {
+            auto it = t.faceMips[face].find((GLint)lv);
+            if (it == t.faceMips[face].end() || it->second.pixels.empty()) continue;
+            uint32_t lw = t.w >> lv, lh = t.h >> lv;
+            if (!lw) lw = 1;
+            if (!lh) lh = 1;
+            if (it->second.pixels.size() < (size_t)lw * lh * 4) continue;
+            ok = c.device->updateCubeFaceLevel(ng.get(), lv, face,
+                                               it->second.pixels.data(), (size_t)lw * 4);
+        }
+    }
+    if (!ok) return false;
+    t.gpu = ng;
+    t.levelViews.clear();
+    t.layerViews.clear();
+    return true;
+}
+
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void* pixels) {
     Context& c = Context::Current();
     if (w < 0 || h < 0) { c.errors.Record(0x0501); return; }
+    // GL_TEXTURE_CUBE_MAP không phải target hợp lệ của glTexImage2D (phải dùng
+    // từng face POSITIVE_X..NEGATIVE_Z). Trước đây bị nhầm với proxy → nuốt
+    // lệnh, app tưởng đã tạo storage.
+    if (target == 0x8513) { c.errors.Record(0x0500); return; }
     // Proxy texture (GlDevice probe max size): không đổi state, không lỗi
     // (đúng spec §8 — probe rồi fallback 8192 khi quá lớn). Lưu spec để query
     // GetTexLevelParameteriv trả lời (quá 8192 → 0), tránh lỗi oan tồn lỗi
     // pending mà vanilla quy cho call sau (crash copyTobuffer 1282).
     switch (target) {
-        case 0x8063: case 0x8064: case 0x8070: case 0x8071: case 0x8513: case 0x8C19: {
+        case 0x8063: case 0x8064: case 0x8070: case 0x84F7: case 0x851B:
+        case 0x8C19: case 0x8C1B: case 0x900B: {
             ProxyTex px;
             if (w > 0 && h > 0 && w <= 8192 && h <= 8192) {
                 px.w = w; px.h = h; px.ifmt = (GLenum)internalformat;
@@ -661,42 +714,104 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     // GetTexImage(level>0)/CPU fallback + mipmapped tương lai. Bug cũ: chỉ đếm
     // levels, SubImage level>0 bị drop câm → readback mip đen.
     if (level > 0) {
+        // Cubemap face: mip phải lưu theo FACE, không dùng mipData 2D và không
+        // được PromoteGpuMipChain (sẽ thay cube bằng texture 2D).
+        if (IsCubeFace(target) && tx.target == 0x8513) {
+            int face = (int)(target - 0x8515);
+            tx.isCube = true;
+            if (!tx.w && w > 0) { tx.w = (uint32_t)w << level; tx.h = (uint32_t)h << level; }
+            if (level + 1 > tx.levels) tx.levels = level + 1;
+            if (w > 0 && h > 0) {
+                auto& ml = tx.faceMips[face][level];
+                ml.w = w; ml.h = h; ml.d = 0;
+                size_t bpp = Bpp(format, type);
+                ml.pixels.assign((size_t)w * h * bpp, 0);
+                if (hasData && (format == 0x1908 || format == 0x1903 || format == 0x8227) &&
+                    type == 0x1401) {
+                    size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+                    size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                                  (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+                    const uint8_t* src = pixBase + skip;
+                    for (GLsizei r = 0; r < h; ++r)
+                        memcpy(ml.pixels.data() + (size_t)r * w * bpp, src + r * rowLen,
+                               (size_t)w * bpp);
+                }
+            }
+            if (!tx.gpu && tx.w)
+                tx.gpu = c.device->newCubeTextureLevels(tx.w, (uint32_t)tx.levels,
+                                                        ToMetalFormat(tx.internalFormat));
+            if (!c.device->isNull() && tx.gpu && !tx.wasRT && tx.w && tx.h)
+                PromoteGpuMipChainCube(c, tx, (uint32_t)tx.levels);
+            if (tx.gpu && hasData && tx.gpu->levelCount() > (uint32_t)level &&
+                w > 0 && h > 0 && type == 0x1401 &&
+                (format == 0x1908 || format == 0x1903 || format == 0x8227)) {
+                auto& ml = tx.faceMips[face][level];
+                size_t bpp = Bpp(format, type);
+                if (!ml.pixels.empty())
+                    c.device->updateCubeFaceLevel(tx.gpu.get(), (uint32_t)level,
+                                                  (uint32_t)face, ml.pixels.data(),
+                                                  (size_t)w * bpp);
+            }
+            (void)border;
+            return;
+        }
         if (level + 1 > tx.levels) tx.levels = level + 1;
+        bool gpuFmt = hasData && type == 0x1401 &&
+                      (format == 0x1908 || format == 0x1903 || format == 0x8227);
+        std::vector<uint8_t> unpacked;
         if (w > 0 && h > 0) {
             auto& ml = tx.mipData[level];
             ml.w = w; ml.h = h;
             size_t bpp = Bpp(format, type);
-            ml.pixels.assign((size_t)w * h * bpp, 0);
-            if (hasData && (format == 0x1908 || format == 0x1903 || format == 0x8227) &&
-                type == 0x1401) {
+            if (gpuFmt) {
+                unpacked.resize((size_t)w * h * bpp);
                 size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
                 size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
                               (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
                 const uint8_t* src = pixBase + skip;
                 for (GLsizei r = 0; r < h; ++r)
-                    memcpy(ml.pixels.data() + (size_t)r * w * bpp, src + r * rowLen,
+                    memcpy(unpacked.data() + (size_t)r * w * bpp, src + r * rowLen,
                            (size_t)w * bpp);
+            } else {
+                // Format không lên GPU được (hoặc pixels=NULL): shadow là bản
+                // duy nhất, giữ nguyên hành vi cũ.
+                ml.pixels.assign((size_t)w * h * bpp, 0);
+                if (hasData) {
+                    size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+                    size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                                  (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+                    const uint8_t* src = pixBase + skip;
+                    for (GLsizei r = 0; r < h; ++r)
+                        memcpy(ml.pixels.data() + (size_t)r * w * bpp, src + r * rowLen,
+                               (size_t)w * bpp);
+                }
             }
         }
-        // Legacy glTexImage2D level>0: nâng texture GPU lên mip chain ngay khi
-        // level 0 đã tồn tại (MC 26.x alloc từng level bằng TexImage2D NULL).
-        // Texture đang là render target (wasRT) thì không realloc giữa pass.
-        // Chỉ nâng khi level này có data thật: TexImage2D NULL từng mip (MC)
-        // không được biến texture single-level thành mip chain toàn mip đen —
-        // default MIN_FILTER=MIPMAP sẽ sample mip rỗng → mất texture.
-        if (hasData && !c.device->isNull() && tx.gpu && !tx.wasRT &&
+        // Legacy glTexImage2D level>0: nâng texture GPU lên mip chain. Spec
+        // §8.5: TexImage2D level>0 định nghĩa storage cho level đó, kể cả
+        // pixels=NULL (nội dung chưa xác định); GPU phải có đủ level để FBO
+        // attach/readback level>0 không assert. Trước đây chỉ nâng khi có data
+        // thật nên `TexImage2D(NULL)` + `glFramebufferTexture2D(level=1)` làm
+        // Metal view vượt mipmapLevelCount. Texture đang là render target
+        // (wasRT) thì không realloc giữa pass — vẫn giữ guard đó.
+        if (!c.device->isNull() && tx.gpu && !tx.wasRT &&
             w > 0 && h > 0 && tx.w > 0 && tx.h > 0) {
             PromoteGpuMipChain(c, tx, (uint32_t)tx.levels);
             if (tx.gpu && tx.gpu->levelCount() > (uint32_t)level &&
                 hasData && type == 0x1401 &&
                 (format == 0x1908 || format == 0x1903 || format == 0x8227)) {
-                auto& ml = tx.mipData[level];
                 size_t bpp = Bpp(format, type);
-                if (!ml.pixels.empty())
-                    c.device->updateTextureLevel(tx.gpu.get(), (uint32_t)level,
-                                                 0, 0, (uint32_t)w, (uint32_t)h,
-                                                 ml.pixels.data(), (size_t)w * bpp);
+                bool upOk = bpp && unpacked.size() >= (size_t)w * h * bpp &&
+                            c.device->updateTextureLevel(tx.gpu.get(), (uint32_t)level,
+                                                         0, 0, (uint32_t)w, (uint32_t)h,
+                                                         unpacked.data(), (size_t)w * bpp);
+                // P1b: GPU đã giữ level → bỏ bản sao CPU (mip chain 126MB).
+                if (!upOk) tx.mipData[level].pixels = std::move(unpacked);
+            } else if (!unpacked.empty()) {
+                tx.mipData[level].pixels = std::move(unpacked);
             }
+        } else if (!unpacked.empty()) {
+            tx.mipData[level].pixels = std::move(unpacked);
         }
         (void)border;
         return;
@@ -775,6 +890,9 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
                     nSwap, tp->id, w, h, (int)wasRTBefore, (int)wasCurrentRT,
                     (int)(hasData != 0));
     }
+    // Trước khi cấp GPU texture lớn (Voxy world re-create): nếu RAM trống thấp,
+    // trả shadow/pool TGLMT giữ thêm thay vì để Jetsam giết app.
+    c.MaybeTrimForAllocation(n);
     tx.gpu = c.device->newTexture(w, h, ToMetalFormat(internalformat));
     c.pendingTexRegions.erase(tp->id); // realloc GPU mới đã có full data → staging cũ vô nghĩa
     // Upload base level lên GPU (bug cũ: tạo texture rỗng → sampling đen).
@@ -859,8 +977,79 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
 void glTexImage1D(GLenum t, GLint l, GLint inf, GLsizei w, GLint b, GLenum f, GLenum ty, const void* p) {
     glTexImage2D(t, l, inf, w, 1, b, f, ty, p);
 }
+// Legacy glTexImage3D(level>0) trên 3D base 1-level: realloc GPU mip chain và
+// upload lại từ shadow (3D shadow luôn được giữ). 2D array không giữ shadow nên
+// đọc lại base từ GPU một lần rồi upload vào chain mới.
+static bool PromoteGpuMipChain3D(Context& c, TextureObject& t, uint32_t want) {
+    if (c.device->isNull() || !t.gpu || t.wasRT || !t.w || !t.h || !t.d) return false;
+    if (t.target != 0x806F) return false;
+    if (t.gpu->levelCount() >= want) return true;
+    const size_t bpp = 4;
+    if (t.pixels.size() < (size_t)t.w * t.h * t.d * bpp) return false;
+    c.FlushPendingEncoder();
+    c.FlushAllTextureStaging();
+    auto ng = c.device->newTexture3DLevels(t.w, t.h, t.d, want,
+                                           ToMetalFormat(t.internalFormat));
+    if (!ng) return false;
+    bool ok = true;
+    for (uint32_t lv = 0; lv < want && ok; ++lv) {
+        uint32_t lw = t.w >> lv, lh = t.h >> lv, ld = t.d >> lv;
+        if (!lw) lw = 1;
+        if (!lh) lh = 1;
+        if (!ld) ld = 1;
+        const uint8_t* base = nullptr;
+        if (lv == 0) base = t.pixels.data();
+        else {
+            auto it = t.mipData.find((GLint)lv);
+            if (it == t.mipData.end() || it->second.pixels.empty()) continue;
+            base = it->second.pixels.data();
+        }
+        for (uint32_t z = 0; z < ld && ok; ++z)
+            ok = c.device->updateTexture3DLevel(ng.get(), lv, z, 0, 0, lw, lh,
+                    base + (size_t)z * lw * lh * bpp, (size_t)lw * bpp);
+    }
+    if (!ok) return false;
+    t.gpu = ng;
+    t.levelViews.clear();
+    t.layerViews.clear();
+    return true;
+}
+static bool PromoteGpuMipChainArray(Context& c, TextureObject& t, uint32_t want) {
+    if (c.device->isNull() || !t.gpu || t.wasRT || !t.w || !t.h || !t.d) return false;
+    if (t.target != 0x8C1A) return false;
+    if (t.gpu->levelCount() >= want) return true;
+    if (!TexReadableFromGPU(t)) return false;
+    std::vector<uint8_t> base;
+    if (!c.ReadTextureGPU(t, base, -1, 0)) return false;
+    if (base.size() < (size_t)t.w * t.h * t.d * 4) return false;
+    auto ng = c.device->newTexture2DArrayLevels(t.w, t.h, t.d, want,
+                                                ToMetalFormat(t.internalFormat));
+    if (!ng) return false;
+    bool ok = true;
+    for (uint32_t z = 0; z < t.d && ok; ++z)
+        ok = c.device->updateTexture3DLevel(ng.get(), 0, z, 0, 0, t.w, t.h,
+                base.data() + (size_t)z * t.w * t.h * 4, (size_t)t.w * 4);
+    for (uint32_t lv = 1; lv < want && ok; ++lv) {
+        uint32_t lw = t.w >> lv, lh = t.h >> lv;
+        if (!lw) lw = 1;
+        if (!lh) lh = 1;
+        auto it = t.mipData.find((GLint)lv);
+        if (it == t.mipData.end() || it->second.pixels.empty()) continue;
+        if (it->second.pixels.size() < (size_t)lw * lh * t.d * 4) continue;
+        for (uint32_t z = 0; z < t.d && ok; ++z)
+            ok = c.device->updateTexture3DLevel(ng.get(), lv, z, 0, 0, lw, lh,
+                    it->second.pixels.data() + (size_t)z * lw * lh * 4, (size_t)lw * 4);
+    }
+    if (!ok) return false;
+    t.gpu = ng;
+    t.levelViews.clear();
+    t.layerViews.clear();
+    return true;
+}
+
 void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, GLsizei d, GLint b, GLenum f, GLenum ty, const void* p) {
-    if (target == 0x8070 || target == 0x8C19) return; // PROXY_3D/PROXY_2D_ARRAY: probe, no-op
+    if (target == 0x8070 || target == 0x8C1B || target == 0x900B)
+        return; // PROXY_3D/PROXY_2D_ARRAY/PROXY_CUBE_MAP_ARRAY: probe, no-op
     Context& c = Context::Current();
     if (target != 0x806F && target != 0x8C1A) { // 3D hoặc 2D_ARRAY; CUBE_MAP_ARRAY chưa hỗ trợ
         c.LogDebug(0,0,0,0,"glTexImage3D: target chưa hỗ trợ (chỉ 3D/2D_ARRAY)");
@@ -890,10 +1079,24 @@ void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, G
     // Mip level>0: GPU giữ base (như 2D) → shadow per-level phục vụ readback.
     if (level > 0) {
         if (level + 1 > tx.levels) tx.levels = level + 1;
-        if (w > 0 && h > 0 && d > 0) {
+        const size_t bpp = BppTyped3D(f, ty);
+        const bool gpuFmt =
+            (ty == 0x1401 && (f == 0x1908 || f == 0x1903 || f == 0x8227)) ||
+            (ty == 0x1406 && (f == 0x1903 || f == 0x1908));
+        std::vector<uint8_t> unpacked;
+        if (hasData && w > 0 && h > 0 && d > 0 && gpuFmt) {
+            unpacked.resize((size_t)w * h * d * bpp);
+            size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+            size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                          (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+            const uint8_t* src = pixBase + skip;
+            for (GLsizei z = 0; z < d; ++z)
+                for (GLsizei r = 0; r < h; ++r)
+                    memcpy(unpacked.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
+                           src + ((size_t)z * h + r) * rowLen, (size_t)w * bpp);
+        } else if (w > 0 && h > 0 && d > 0) {
             auto& ml = tx.mipData[level];
             ml.w = w; ml.h = h; ml.d = d;
-            size_t bpp = BppTyped3D(f, ty);
             ml.pixels.assign((size_t)w * h * d * bpp, 0);
             if (hasData && ty == 0x1401 && (f == 0x1908 || f == 0x1903 || f == 0x8227)) {
                 size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
@@ -906,7 +1109,32 @@ void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, G
                                src + ((size_t)z * h + r) * rowLen, (size_t)w * bpp);
             }
         }
-        c.LogDebug(0, 0, 0, 0, "glTexImage3D: mip level>0 lưu shadow (GPU base-level)");
+        // Immutable storage (glTexStorage3D) đã cấp đủ GPU level. Legacy
+        // TexImage3D level>0: realloc GPU mip chain từ shadow (3D).
+        if (!c.device->isNull() && tx.gpu && tx.levels > tx.gpu->levelCount()) {
+            if (tx.target == 0x806F)
+                PromoteGpuMipChain3D(c, tx, (uint32_t)tx.levels);
+            else if (tx.target == 0x8C1A)
+                PromoteGpuMipChainArray(c, tx, (uint32_t)tx.levels);
+        }
+        if (c.device && !c.device->isNull() && tx.gpu && hasData && w > 0 && h > 0 && d > 0 &&
+            tx.gpu->levelCount() > (uint32_t)level && gpuFmt) {
+            for (GLsizei z = 0; z < d; ++z)
+                c.device->updateTexture3DLevel(
+                    tx.gpu.get(), (uint32_t)level, (uint32_t)z,
+                    0, 0, (uint32_t)w, (uint32_t)h,
+                    unpacked.data() + (size_t)z * (size_t)h * (size_t)w * bpp,
+                    (size_t)w * bpp);
+            // P1b: GPU đã giữ level → bỏ shadow CPU.
+            auto& ml = tx.mipData[level];
+            ml.w = w; ml.h = h; ml.d = d;
+            std::vector<uint8_t>().swap(ml.pixels);
+        } else if (!unpacked.empty()) {
+            auto& ml = tx.mipData[level];
+            ml.w = w; ml.h = h; ml.d = d;
+            ml.pixels = std::move(unpacked);
+        }
+        c.LogDebug(0, 0, 0, 0, "glTexImage3D: mip level>0 (GPU chain)");
         (void)b;
         return;
     }
@@ -930,6 +1158,7 @@ void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, G
                 memcpy(unpacked.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
                        src + ((size_t)z * h + r) * rowLen, (size_t)w * bpp);
     }
+    c.MaybeTrimForAllocation(n);
     tx.gpu = (target == 0x8C1A)
         ? c.device->newTexture2DArray((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf))
         : c.device->newTexture3D((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf));
@@ -954,7 +1183,10 @@ void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, G
                     nUnh3, tp->id, w, h, d, f, ty);
         c.LogDebug(0, 0, 0, 0, "glTexImage3D: format/type chưa upload GPU (giữ shadow)");
     }
-    if (c.device->isNull() || !tx.gpu || !gpuFmt)
+    // 3D giữ shadow để GetTexImage/GetTexSubImage trả đúng volume: Metal không
+    // cho view 3D→2D nên không thể readback từng slice như 2D array. 3D texture
+    // của shader pack thường nhỏ; 2D array vẫn bỏ shadow và đọc GPU theo layer.
+    if (c.device->isNull() || !tx.gpu || !gpuFmt || target == 0x806F)
         tx.pixels = std::move(unpacked);
     else
         std::vector<uint8_t>().swap(tx.pixels);
@@ -983,6 +1215,56 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     // dữ liệu riêng, GetTexImage(level) đọc được) thay vì drop câm như trước.
     // Không sync GPU (texture non-mipmapped, sampler NotMipmapped → không sample).
     if (level > 0) {
+        // Cubemap face mip: shadow RIÊNG face; không dùng mipData/Promote 2D
+        // (sẽ đổi cube thành texture 2D và upload nhầm slice 0).
+        if (IsCubeFace(target) && t.target == 0x8513) {
+            int face = (int)(target - 0x8515);
+            t.isCube = true;
+            GLsizei lw = std::max(1, (GLsizei)t.w >> level);
+            GLsizei lh = std::max(1, (GLsizei)t.h >> level);
+            if (xoff < 0 || yoff < 0 || w < 0 || h < 0 ||
+                xoff + w > lw || yoff + h > lh) { c.errors.Record(0x0501); return; }
+            if (level + 1 > t.levels) t.levels = level + 1;
+            auto& ml = t.faceMips[face][level];
+            ml.w = lw; ml.h = lh; ml.d = 0;
+            size_t bpp = Bpp(format, type);
+            bool okBase = true;
+            size_t rowLen = UnpackRowLen(c, (size_t)w, bpp);
+            size_t skip = (size_t)c.state.PixelStore().unpackSkipRows * rowLen +
+                          (size_t)c.state.PixelStore().unpackSkipPixels * bpp;
+            size_t total = skip + (h > 0 ? ((size_t)(h - 1) * rowLen + (size_t)w * bpp) : 0);
+            const uint8_t* pixBase = UnpackBase(c, pixels, total, okBase);
+            if (!okBase) { c.errors.Record(0x0501); return; }
+            const uint8_t* src = pixBase + skip;
+            const size_t fullBytes = (size_t)lw * lh * bpp;
+            const bool fullLevel = (xoff == 0 && yoff == 0 && w == lw && h == lh);
+            std::vector<uint8_t> upload;
+            const bool gpuFmt = (format == 0x1908 || format == 0x1903) && type == 0x1401;
+            if (!fullLevel && ml.pixels.empty() && gpuFmt && !c.device->isNull() &&
+                t.gpu && t.gpu->levelCount() > (uint32_t)level) {
+                std::vector<uint8_t> cur;
+                if (c.ReadTextureGPU(t, cur, face, level) &&
+                    cur.size() >= (size_t)lw * lh * 4)
+                    upload.swap(cur);
+            }
+            std::vector<uint8_t>& dstBuf =
+                upload.empty() ? ml.pixels : upload;
+            if (dstBuf.size() < fullBytes) dstBuf.resize(fullBytes, 0);
+            for (GLsizei r = 0; r < h; ++r) {
+                uint8_t* dst = dstBuf.data() +
+                    ((size_t)(yoff + r) * lw + (size_t)xoff) * bpp;
+                memcpy(dst, src + r * rowLen, (size_t)w * bpp);
+            }
+            if (!upload.empty()) ml.pixels.clear();
+            const uint8_t* up = upload.empty() ? ml.pixels.data() : upload.data();
+            if (!c.device->isNull() && t.gpu && !t.wasRT)
+                PromoteGpuMipChainCube(c, t, (uint32_t)t.levels);
+            if (t.gpu && t.gpu->levelCount() > (uint32_t)level && gpuFmt)
+                c.device->updateCubeFaceLevel(t.gpu.get(), (uint32_t)level,
+                                              (uint32_t)face, up, (size_t)lw * bpp);
+            ++c.appleStats.mipStaged;
+            return;
+        }
         auto it = t.mipData.find(level);
         if (it == t.mipData.end()) { c.errors.Record(0x0501); return; }
         auto& ml = it->second;
@@ -999,25 +1281,53 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
         const uint8_t* pixBase = UnpackBase(c, pixels, total, okBase);
         if (!okBase) { c.errors.Record(0x0501); return; }
         const uint8_t* src = pixBase + skip;
-        if (ml.pixels.size() < (size_t)ml.w * ml.h * bpp)
-            ml.pixels.resize((size_t)ml.w * ml.h * bpp, 0);
+        const size_t fullBytes = (size_t)ml.w * ml.h * bpp;
+        // P1b: texture immutable (glTexStorage2D) đã có ĐỦ mip chain trên GPU →
+        // shadow CPU per-level chỉ là bản sao (Voxy upload mọi mip qua
+        // glTexSubImage2D ⇒ 126MB mip shadow, xem jetsam). updateTextureLevel
+        // nhận offset nên KHÔNG cần đọc lại GPU để patch: chỉ upload vùng, bỏ shadow.
+        const bool gpuFmt = (format == 0x1908 || format == 0x1903 || format == 0x8227) &&
+                            type == 0x1401;
+        const bool gpuHasLevel = c.device && !c.device->isNull() && t.gpu &&
+                                 t.gpu->levelCount() > (uint32_t)level;
+        const bool keepShadow = !(gpuFmt && gpuHasLevel);
         std::vector<uint8_t> tight((size_t)w * h * bpp);
-        for (GLsizei r = 0; r < h; ++r) {
-            uint8_t* dst = ml.pixels.data() + ((size_t)(yoff + r) * ml.w + (size_t)xoff) * bpp;
-            memcpy(dst, src + r * rowLen, (size_t)w * bpp);
+        for (GLsizei r = 0; r < h; ++r)
             memcpy(tight.data() + (size_t)r * w * bpp, src + r * rowLen, (size_t)w * bpp);
+        if (keepShadow) {
+            // GPU không giữ level → shadow là nguồn duy nhất cho readback.
+            if (ml.pixels.size() < fullBytes) ml.pixels.resize(fullBytes, 0);
+            for (GLsizei r = 0; r < h; ++r) {
+                uint8_t* dst = ml.pixels.data() +
+                    ((size_t)(yoff + r) * ml.w + (size_t)xoff) * bpp;
+                memcpy(dst, tight.data() + (size_t)r * w * bpp, (size_t)w * bpp);
+            }
         }
         if (level + 1 > t.levels) t.levels = level + 1;
+        bool upOk = false;
         if (c.device && !c.device->isNull() && t.gpu) {
             PromoteGpuMipChain(c, t, (uint32_t)t.levels);
             if (t.gpu->levelCount() > (uint32_t)level)
-                c.device->updateTextureLevel(t.gpu.get(), (uint32_t)level,
-                                             (uint32_t)xoff, (uint32_t)yoff,
-                                             (uint32_t)w, (uint32_t)h, tight.data(),
-                                             (size_t)w * bpp);
+                upOk = c.device->updateTextureLevel(t.gpu.get(), (uint32_t)level,
+                                                    (uint32_t)xoff, (uint32_t)yoff,
+                                                    (uint32_t)w, (uint32_t)h, tight.data(),
+                                                    (size_t)w * bpp);
+        }
+        if (!keepShadow) {
+            if (upOk) {
+                std::vector<uint8_t>().swap(ml.pixels);
+            } else {
+                // GPU từ chối level → giữ shadow (vùng ngoài patch coi như chưa xác định).
+                ml.pixels.assign(fullBytes, 0);
+                for (GLsizei r = 0; r < h; ++r) {
+                    uint8_t* dst = ml.pixels.data() +
+                        ((size_t)(yoff + r) * ml.w + (size_t)xoff) * bpp;
+                    memcpy(dst, tight.data() + (size_t)r * w * bpp, (size_t)w * bpp);
+                }
+            }
         }
         ++c.appleStats.mipStaged;
-        c.LogDebug(0, 0, 0, 0, "glTexSubImage2D: mip level>0 lưu shadow (GPU base-level)");
+        c.LogDebug(0, 0, 0, 0, "glTexSubImage2D: mip level>0 (GPU chain, drop shadow)");
         return;
     }
     // SubImage lên face cubemap: ghi vào face slot + sync GPU face đó.
@@ -1111,16 +1421,33 @@ static void TexSubImage3DCore(Context& c, TextureObject& t, GLint level,
         auto& ml = it->second;
         if ((size_t)(xoff + w) > (size_t)ml.w || (size_t)(yoff + h) > (size_t)ml.h ||
             (size_t)(zoff + d) > (size_t)ml.d) { c.errors.Record(0x0501); return; }
-        if (ml.pixels.size() < (size_t)ml.w * ml.h * ml.d * bpp)
-            ml.pixels.resize((size_t)ml.w * ml.h * ml.d * bpp, 0);
-        for (GLsizei z = 0; z < d; ++z)
-            for (GLsizei r = 0; r < h; ++r) {
-                uint8_t* dst = ml.pixels.data() +
-                    ((((size_t)(zoff + z) * ml.h + (yoff + r)) * ml.w + (size_t)xoff)) * bpp;
-                memcpy(dst, payload.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
-                       (size_t)w * bpp);
-            }
         if (level + 1 > t.levels) t.levels = level + 1;
+        const bool gpuFmt =
+            (type == 0x1401 && (format == 0x1908 || format == 0x1903 || format == 0x8227)) ||
+            (type == 0x1406 && (format == 0x1903 || format == 0x1908));
+        const bool gpuHas = c.device && !c.device->isNull() && t.gpu && gpuFmt &&
+                            t.gpu->levelCount() > (uint32_t)level;
+        // P1b: GPU đã có level → shadow CPU là bản sao, không materialize (jetsam).
+        if (!gpuHas) {
+            if (ml.pixels.size() < (size_t)ml.w * ml.h * ml.d * bpp)
+                ml.pixels.resize((size_t)ml.w * ml.h * ml.d * bpp, 0);
+            for (GLsizei z = 0; z < d; ++z)
+                for (GLsizei r = 0; r < h; ++r) {
+                    uint8_t* dst = ml.pixels.data() +
+                        ((((size_t)(zoff + z) * ml.h + (yoff + r)) * ml.w + (size_t)xoff)) * bpp;
+                    memcpy(dst, payload.data() + (((size_t)z * h + r) * (size_t)w) * bpp,
+                           (size_t)w * bpp);
+                }
+        }
+        if (gpuHas) {
+            for (GLsizei z = 0; z < d; ++z)
+                c.device->updateTexture3DLevel(
+                    t.gpu.get(), (uint32_t)level, (uint32_t)(zoff + z),
+                    (uint32_t)xoff, (uint32_t)yoff, (uint32_t)w, (uint32_t)h,
+                    payload.data() + (size_t)z * (size_t)h * (size_t)w * bpp,
+                    (size_t)w * bpp);
+            std::vector<uint8_t>().swap(ml.pixels);
+        }
         ++c.appleStats.mipStaged;
         return;
     }
@@ -1259,6 +1586,8 @@ void glPixelStorei(GLenum pname, GLint param) {
         case 0x0D03: ps.packSkipRows = param; break;      // PACK_SKIP_ROWS
         case 0x0D04: ps.packSkipPixels = param; break;    // PACK_SKIP_PIXELS
         case 0x0D05: ps.packAlignment = param; break;     // PACK_ALIGNMENT
+        case 0x806B: ps.packSkipImages = param; break;    // PACK_SKIP_IMAGES
+        case 0x806C: ps.packImageHeight = param; break;   // PACK_IMAGE_HEIGHT
         default: c.state.SetShadow(pname, &param, 4); break;
     }
 }
@@ -1679,10 +2008,19 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff,
 static void CopyFBToTexture3D(Context& c, TextureObject& dst, GLint level,
                               GLint xoff, GLint yoff, GLint zoff,
                               GLint x, GLint y, GLsizei w, GLsizei h) {
-    if (level != 0) { c.errors.Record(0x0502); return; }
+    if (level < 0) { c.errors.Record(0x0501); return; }
+    GLint lw = (GLint)dst.w, lh = (GLint)dst.h;
+    GLint ld = dst.d ? (GLint)dst.d : 1;
+    if (level > 0) {
+        auto mit = dst.mipData.find(level);
+        if (mit == dst.mipData.end() || mit->second.d == 0) {
+            c.errors.Record(0x0501); return;
+        }
+        lw = mit->second.w; lh = mit->second.h; ld = mit->second.d;
+    }
     if (w <= 0 || h <= 0 || xoff < 0 || yoff < 0 || zoff < 0 ||
-        (size_t)(xoff + w) > dst.w || (size_t)(yoff + h) > dst.h ||
-        (size_t)zoff >= dst.d) {
+        (size_t)(xoff + w) > (size_t)lw || (size_t)(yoff + h) > (size_t)lh ||
+        (size_t)zoff >= (size_t)ld) {
         c.errors.Record(0x0501); return;
     }
     GLuint readFbo = c.state.BoundReadFBO();
@@ -1697,11 +2035,19 @@ static void CopyFBToTexture3D(Context& c, TextureObject& dst, GLint level,
         if (sit == c.textures.end() || sit->second.pixels.empty()) return;
         auto& src = sit->second;
         if (src.pixels.size() < (size_t)src.w * src.h * 4) return;
-        size_t need = (size_t)dst.w * dst.h * dst.d * 4;
-        if (dst.pixels.size() < need) dst.pixels.resize(need, 0);
+        std::vector<uint8_t>* dstPix = nullptr;
+        if (level > 0) {
+            dstPix = &dst.mipData[level].pixels;
+            if (dstPix->size() < (size_t)lw * lh * ld * 4)
+                dstPix->assign((size_t)lw * lh * ld * 4, 0);
+        } else {
+            dstPix = &dst.pixels;
+            if (dstPix->size() < (size_t)lw * lh * ld * 4)
+                dstPix->resize((size_t)lw * lh * ld * 4, 0);
+        }
         for (GLsizei r = 0; r < h; ++r) {
             if ((size_t)(y + r) >= src.h) break;
-            memcpy(dst.pixels.data() + (((size_t)zoff * dst.h + (yoff + r)) * dst.w + xoff) * 4,
+            memcpy(dstPix->data() + (((size_t)zoff * lh + (yoff + r)) * lw + xoff) * 4,
                    src.pixels.data() + ((size_t)(y + r) * src.w + x) * 4,
                    (size_t)w * 4);
         }
@@ -1712,7 +2058,7 @@ static void CopyFBToTexture3D(Context& c, TextureObject& dst, GLint level,
         c.LogDebug(0, 0, 0, 0, "glCopyTexSubImage3D: readback fail");
         return;
     }
-    glTextureSubImage3D(dst.id, 0, xoff, yoff, zoff, w, h, 1,
+    glTextureSubImage3D(dst.id, level, xoff, yoff, zoff, w, h, 1,
                         0x1908 /*RGBA*/, 0x1401 /*UNSIGNED_BYTE*/, reg.data());
 }
 void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoff, GLint yoff, GLint zoff,
@@ -1742,15 +2088,42 @@ void glCopyTextureSubImage3D(GLuint tex, GLint level, GLint xoff, GLint yoff, GL
     if (it->second.target != 0x806F) { c.errors.Record(0x0500); return; }
     CopyFBToTexture3D(c, it->second, level, xoff, yoff, zoff, x, y, w, h);
 }
+struct CopyTargetInfo {
+    bool cube = false;   // cube map hoặc cube face
+    bool array = false;  // 2D array
+    bool volume = false; // 3D
+    int face = -1;       // cube face target (0..5), -1 = cube map/khác
+};
+static bool ParseCopyTarget(GLenum t, CopyTargetInfo& o) {
+    switch (t) {
+        case 0x0DE1: return true;                 // TEXTURE_2D
+        case 0x8C1A: o.array = true; return true; // TEXTURE_2D_ARRAY
+        case 0x806F: o.volume = true; return true;// TEXTURE_3D
+        case 0x8513: o.cube = true; return true;  // TEXTURE_CUBE_MAP
+        case 0x8515: case 0x8516: case 0x8517:
+        case 0x8518: case 0x8519: case 0x851A:
+            o.cube = true; o.face = (int)(t - 0x8515); return true;
+        default: return false;
+    }
+}
+static bool CopyObjectMatches(const TextureObject& tx, const CopyTargetInfo& ti) {
+    if (ti.cube) return tx.isCube;                 // cube map / face
+    if (ti.array) return tx.target == 0x8C1A;
+    if (ti.volume) return tx.target == 0x806F;
+    return tx.target == 0x0DE1 && !tx.isCube;      // 2D
+}
 void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
                         GLint srcX, GLint srcY, GLint srcZ,
                         GLuint dstName, GLenum dstTarget, GLint dstLevel,
                         GLint dstX, GLint dstY, GLint dstZ,
                         GLsizei w, GLsizei h, GLsizei d) {
     Context& c = Context::Current();
-    (void)srcTarget; (void)dstTarget;
     if (w <= 0 || h <= 0 || d <= 0) { c.errors.Record(0x0501); return; }
     if (srcLevel < 0 || dstLevel < 0) { c.errors.Record(0x0501); return; }
+    CopyTargetInfo sti, dti;
+    if (!ParseCopyTarget(srcTarget, sti) || !ParseCopyTarget(dstTarget, dti)) {
+        c.errors.Record(0x0500); return;
+    }
     auto sit = c.textures.find(srcName);
     auto dit = c.textures.find(dstName);
     if (sit == c.textures.end() || dit == c.textures.end()) {
@@ -1758,126 +2131,135 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
     }
     auto& src = sit->second;
     auto& dst = dit->second;
+    if (!CopyObjectMatches(src, sti) || !CopyObjectMatches(dst, dti)) {
+        c.errors.Record(0x0502); return;
+    }
+    // Cube face mip chưa có shadow/GPU face-mip; reject thay vì đọc face 0.
+    if ((src.isCube || dst.isCube) && (srcLevel > 0 || dstLevel > 0)) {
+        c.errors.Record(0x0502); return;
+    }
     auto dimAt = [](uint32_t base, GLint level) -> uint32_t {
         uint32_t v = base >> level; return v ? v : 1;
     };
     uint32_t sw = dimAt(src.w, srcLevel), sh = dimAt(src.h, srcLevel);
     uint32_t dw = dimAt(dst.w, dstLevel), dh = dimAt(dst.h, dstLevel);
-    uint32_t sd = dimAt(src.d ? src.d : 1, srcLevel);
-    uint32_t dd = dimAt(dst.d ? dst.d : 1, dstLevel);
+    uint32_t sd = src.isCube ? 6 : (src.d ? src.d : 1);
+    uint32_t dd = dst.isCube ? 6 : (dst.d ? dst.d : 1);
+    if (srcLevel > 0) {
+        auto mit = src.mipData.find(srcLevel);
+        if (mit == src.mipData.end()) { c.errors.Record(0x0501); return; }
+        sw = (uint32_t)mit->second.w; sh = (uint32_t)mit->second.h;
+        sd = mit->second.d ? (uint32_t)mit->second.d : (src.d ? src.d : 1);
+    }
+    if (dstLevel > 0) {
+        auto mit = dst.mipData.find(dstLevel);
+        if (mit == dst.mipData.end()) { c.errors.Record(0x0501); return; }
+        dw = (uint32_t)mit->second.w; dh = (uint32_t)mit->second.h;
+        dd = mit->second.d ? (uint32_t)mit->second.d : (dst.d ? dst.d : 1);
+    }
+    // Với cube-face target, z là 0 và depth chỉ 1 (face chỉ định nằm trong target).
+    int szBase = sti.face >= 0 ? sti.face : 0;
+    int dzBase = dti.face >= 0 ? dti.face : 0;
+    uint32_t sdz = sti.face >= 0 ? 1 : sd;
+    uint32_t ddz = dti.face >= 0 ? 1 : dd;
     if (srcX < 0 || srcY < 0 || srcZ < 0 || dstX < 0 || dstY < 0 || dstZ < 0 ||
         (size_t)(srcX + w) > sw || (size_t)(srcY + h) > sh ||
-        (size_t)(srcZ + d) > sd || (size_t)(dstX + w) > dw ||
-        (size_t)(dstY + h) > dh || (size_t)(dstZ + d) > dd) {
+        (size_t)(srcZ + d) > sdz || (size_t)(dstX + w) > dw ||
+        (size_t)(dstY + h) > dh || (size_t)(dstZ + d) > ddz) {
         c.errors.Record(0x0501); return;
     }
-    std::shared_ptr<metal::ITexture> srcView, dstView;
-    if (!c.device->isNull() && (srcLevel > 0 || dstLevel > 0)) {
-        if (!src.gpu || !dst.gpu ||
-            src.gpu->levelCount() <= (uint32_t)srcLevel ||
-            dst.gpu->levelCount() <= (uint32_t)dstLevel) {
-            c.errors.Record(0x0502); return;
+    // GPU path: cube copy từng face qua textureLayerView (không dùng blit 3D
+    // vì MTLTextureTypeCube không có slice z). 3D/array giữ blit slice cũ.
+    if (c.device && !c.device->isNull()) {
+        if (src.isCube) {
+            if (!src.gpu || !dst.gpu) { c.errors.Record(0x0502); return; }
+            bool ok = true;
+            for (GLsizei k = 0; k < d && ok; ++k) {
+                auto sv = src.gpu->textureLayerView(0, (uint32_t)(szBase + srcZ + k));
+                auto dv = dst.gpu->textureLayerView(0, (uint32_t)(dzBase + dstZ + k));
+                ok = sv && dv && c.device->blitCopy(
+                    sv.get(), dv.get(), (uint32_t)srcX, (uint32_t)srcY,
+                    (uint32_t)w, (uint32_t)h, (uint32_t)dstX, (uint32_t)dstY);
+            }
+            if (ok) return;
+            c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: cube blit fail -> CPU shadow");
+        } else {
+            std::shared_ptr<metal::ITexture> srcView, dstView;
+            if (srcLevel > 0 || dstLevel > 0) {
+                if (!src.gpu || !dst.gpu ||
+                    src.gpu->levelCount() <= (uint32_t)srcLevel ||
+                    dst.gpu->levelCount() <= (uint32_t)dstLevel) {
+                    c.errors.Record(0x0502); return;
+                }
+                srcView = src.gpu->textureView(src.gpu->pixelFormat(),
+                                               (uint32_t)srcLevel, 1, 0, 1);
+                dstView = dst.gpu->textureView(dst.gpu->pixelFormat(),
+                                               (uint32_t)dstLevel, 1, 0, 1);
+                if (!srcView || !dstView) { c.errors.Record(0x0502); return; }
+            }
+            metal::ITexture* srcGpu = srcView ? srcView.get() : src.gpu.get();
+            metal::ITexture* dstGpu = dstView ? dstView.get() : dst.gpu.get();
+            if (!srcGpu || !dstGpu) { c.errors.Record(0x0502); return; }
+            if (srcGpu->pixelFormat() == dstGpu->pixelFormat()) {
+                const bool multiSlice = d > 1 || srcZ != 0 || dstZ != 0;
+                bool blitOk = multiSlice
+                    ? c.device->blitCopySlices(srcGpu, dstGpu,
+                        (uint32_t)srcX, (uint32_t)srcY, (uint32_t)srcZ,
+                        (uint32_t)dstX, (uint32_t)dstY, (uint32_t)dstZ,
+                        (uint32_t)w, (uint32_t)h, (uint32_t)d)
+                    : c.device->blitCopy(srcGpu, dstGpu,
+                        (uint32_t)srcX, (uint32_t)srcY, (uint32_t)w, (uint32_t)h,
+                        (uint32_t)dstX, (uint32_t)dstY);
+                if (blitOk) return;
+            }
+            c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: blit fail -> CPU shadow");
         }
-        srcView = src.gpu->textureView(src.gpu->pixelFormat(), (uint32_t)srcLevel, 1, 0, 1);
-        dstView = dst.gpu->textureView(dst.gpu->pixelFormat(), (uint32_t)dstLevel, 1, 0, 1);
-        if (!srcView || !dstView) { c.errors.Record(0x0502); return; }
     }
-    if (!c.device || c.device->isNull()) {
-        if (!src.pixels.empty() && !dst.pixels.empty() &&
-            src.pixels.size() >= (size_t)src.w * src.h * 4 &&
-            dst.pixels.size() >= (size_t)dst.w * dst.h * 4) {
-            for (GLsizei r = 0; r < h; ++r)
-                memcpy(dst.pixels.data() + ((size_t)(dstY + r) * dst.w + dstX) * 4,
-                       src.pixels.data() + ((size_t)(srcY + r) * src.w + srcX) * 4,
-                       (size_t)w * 4);
+    // CPU shadow fallback: volume/array/cube, đúng z/face. Chỉ copy khi cả hai
+    // phía có slice hợp lệ; thiếu shadow (GPU-only) → bỏ qua trung thực.
+    auto shadowSlice = [](const TextureObject& t, GLint level, int z,
+                          uint32_t lw, uint32_t lh, uint32_t ld)
+        -> const std::vector<uint8_t>* {
+        if (level > 0) {
+            auto it = t.mipData.find(level);
+            if (it == t.mipData.end()) return nullptr;
+            return &it->second.pixels;
         }
-        return;
-    }
-    metal::ITexture* srcGpu = srcView ? srcView.get() : src.gpu.get();
-    metal::ITexture* dstGpu = dstView ? dstView.get() : dst.gpu.get();
-    if (!srcGpu || !dstGpu) { c.errors.Record(0x0502); return; }
-    int diagCopyNo = 0;
-    {
-        static int nCopy = 0;
-        if (c.DiagOn() && nCopy < 40) {
-            diagCopyNo = ++nCopy;
-            fprintf(stderr,
-                    "[TGLMT] cimg#%d src=%u(ifmt=0x%x %ux%u) dst=%u(ifmt=0x%x %ux%u) "
-                    "region=%d,%d %dx%d\n",
-                    diagCopyNo, srcName, (unsigned)src.internalFormat, src.w, src.h,
-                    dstName, (unsigned)dst.internalFormat, dst.w, dst.h,
-                    srcX, srcY, w, h);
-            fflush(stderr);
+        if (t.isCube) {
+            if (z < 0 || z >= 6) return nullptr;
+            return &t.faces[z];
+        }
+        (void)ld;
+        return &t.pixels;
+    };
+    auto shadowOffset = [](const TextureObject& t, GLint level, int z,
+                           uint32_t lw, uint32_t lh) -> size_t {
+        if (t.isCube || level > 0) return 0; // cube: face vector; mip: base của level
+        return (size_t)z * lw * lh * 4;
+    };
+    for (GLsizei k = 0; k < d; ++k) {
+        const int sz = szBase + srcZ + k, dz = dzBase + dstZ + k;
+        const std::vector<uint8_t>* sSlice = shadowSlice(src, srcLevel, sz, sw, sh, sd);
+        std::vector<uint8_t>* dSlice = const_cast<std::vector<uint8_t>*>(
+            shadowSlice(dst, dstLevel, dz, dw, dh, dd));
+        if (!sSlice || !dSlice) {
+            c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: shadow thiếu slice (bỏ qua)");
+            return;
+        }
+        const size_t sOff = shadowOffset(src, srcLevel, sz, sw, sh);
+        const size_t dOff = shadowOffset(dst, dstLevel, dz, dw, dh);
+        const size_t sNeed = sOff + (size_t)sh * sw * 4;
+        const size_t dNeed = dOff + (size_t)dh * dw * 4;
+        if (sSlice->size() < sNeed || dSlice->size() < dNeed) {
+            c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: shadow slice ngắn (bỏ qua)");
+            return;
+        }
+        for (GLsizei r = 0; r < h; ++r) {
+            memcpy(dSlice->data() + dOff + ((size_t)(dstY + r) * dw + dstX) * 4,
+                   sSlice->data() + sOff + ((size_t)(srcY + r) * sw + srcX) * 4,
+                   (size_t)w * 4);
         }
     }
-    c.FlushPendingEncoder(); // end encoder để draws đi trước blit trong queue
-    c.FlushAllBufferStaging();
-    c.FlushAllTextureStaging();
-    // Không chờ GPU: blitCopy tự commit CB trên cùng serial queue (thứ tự đúng).
-    // CommitAndWait ở đây là stall đồng bộ mỗi lần copy (gltop#1 9.9s/1872 calls).
-    const bool multiSlice = d > 1 || srcZ != 0 || dstZ != 0;
-    bool blitOk = false;
-    if (srcGpu->pixelFormat() == dstGpu->pixelFormat()) {
-        if (multiSlice)
-            blitOk = c.device->blitCopySlices(
-                srcGpu, dstGpu, (uint32_t)srcX, (uint32_t)srcY, (uint32_t)srcZ,
-                (uint32_t)dstX, (uint32_t)dstY, (uint32_t)dstZ,
-                (uint32_t)w, (uint32_t)h, (uint32_t)d);
-        else
-            blitOk = c.device->blitCopy(
-                srcGpu, dstGpu, (uint32_t)srcX, (uint32_t)srcY,
-                (uint32_t)w, (uint32_t)h, (uint32_t)dstX, (uint32_t)dstY);
-    }
-    if (blitOk) {
-        // GPU-only, không readback (giữ fps; sampling dùng GPU).
-        if (diagCopyNo) {
-            fprintf(stderr, "[TGLMT] cimg#%d GPU blit OK\n", diagCopyNo);
-            fflush(stderr);
-        }
-        return;
-    }
-    if (diagCopyNo) {
-        fprintf(stderr, "[TGLMT] cimg#%d GPU blit FAIL -> CPU fallback\n", diagCopyNo);
-        fflush(stderr);
-    }
-    if (srcLevel > 0 || dstLevel > 0 || multiSlice) {
-        c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: mip/slice blit fail (bỏ qua CPU fallback)");
-        return;
-    }
-    c.LogDebug(0, 0, 0, 0, "glCopyImageSubData: khác format/fail, CPU shadow");
-    // P1: nguồn đọc từ GPU (shadow base-level có thể rỗng trên Apple); bản ghi
-    // chỉ quay lại tx.pixels khi format không đọc được từ GPU (không hồi sinh).
-    std::vector<uint8_t> srcOwn;
-    const std::vector<uint8_t>* sPx = nullptr;
-    if (c.ReadTextureGPU(src, srcOwn)) sPx = &srcOwn;
-    else if (src.pixels.size() >= (size_t)src.w * src.h * 4) sPx = &src.pixels;
-    if (!sPx) {
-        if (diagCopyNo) {
-            // Depth32F không đọc được RGBA → copy shadow no-op = shadow map rỗng
-            // (CR tối, MakeUp mất bóng). In rõ để không "im lặng".
-            fprintf(stderr, "[TGLMT] cimg#%d NO SOURCE PIXELS (ifmt=0x%x) -> copy no-op\n",
-                    diagCopyNo, (unsigned)src.internalFormat);
-            fflush(stderr);
-        }
-        return;
-    }
-    std::vector<uint8_t> own;
-    std::vector<uint8_t>* dPx = &dst.pixels;
-    if (dPx->size() < (size_t)dst.w * dst.h * 4) {
-        own.assign((size_t)dst.w * dst.h * 4, 0);
-        if (!dPx->empty()) memcpy(own.data(), dPx->data(), dPx->size());
-        dPx = &own;
-    }
-    for (GLsizei r = 0; r < h; ++r) {
-        if ((size_t)(srcY + r) >= src.h || (size_t)(dstY + r) >= dst.h) break;
-        memcpy(dPx->data() + ((size_t)(dstY + r) * dst.w + dstX) * 4,
-               sPx->data() + ((size_t)(srcY + r) * src.w + srcX) * 4,
-               (size_t)w * 4);
-    }
-    if (dPx->size() >= (size_t)dst.w * dst.h * 4)
-        c.device->updateTexture(dst.gpu.get(), 0, 0, dst.w, dst.h,
-                                dPx->data(), (size_t)dst.w * 4);
-    if (dPx == &own && !TexReadableFromGPU(dst)) dst.pixels = std::move(own);
 }
 // TGLMT chưa map compressed texture format nào: GL_NUM_COMPRESSED_TEXTURE_FORMATS
 // = 0. Theo spec, internalformat/format nén không hỗ trợ → INVALID_ENUM; không
@@ -1972,6 +2354,26 @@ static void ClearTexLevel(Context& c, TextureObject& t, GLint level, GLint xoff,
     if (!WriteClearTexel(format, type, data, texel, srcBpp)) {
         c.errors.Record(0x0500); return; // INVALID_ENUM — format/type không hỗ trợ
     }
+    // Upload GPU (base level hoặc mip). P1b: mip chain của texture immutable
+    // đã nằm trên GPU → clear thẳng lên GPU, không materialize lại shadow CPU
+    // (else sẽ hồi sinh đúng 126MB vừa bỏ).
+    const bool gpuFmt = (format == 0x1908 || format == 0x1903 || format == 0x8227) &&
+                        type == 0x1401;
+    const bool gpuLevel = c.device && !c.device->isNull() && t.gpu &&
+                          t.gpu->levelCount() > (uint32_t)level;
+    if (level > 0 && gpuFmt && gpuLevel) {
+        std::vector<uint8_t> tight((size_t)w * h * srcBpp, 0);
+        for (GLsizei r = 0; r < h; ++r)
+            for (GLsizei x = 0; x < w; ++x)
+                memcpy(tight.data() + ((size_t)r * w + x) * srcBpp, texel, srcBpp);
+        if (c.device->updateTextureLevel(t.gpu.get(), (uint32_t)level,
+                                         (uint32_t)xoff, (uint32_t)yoff,
+                                         (uint32_t)w, (uint32_t)h, tight.data(),
+                                         (size_t)w * srcBpp)) {
+            ++c.appleStats.mipStaged;
+            return;
+        }
+    }
     // Điền shadow tight (row-major, bpp theo src format)
     if (dstPix->size() < (size_t)lw * lh * srcBpp)
         dstPix->resize((size_t)lw * lh * srcBpp, 0);
@@ -1979,7 +2381,6 @@ static void ClearTexLevel(Context& c, TextureObject& t, GLint level, GLint xoff,
         uint8_t* row = dstPix->data() + ((size_t)(yoff + r) * lw + (size_t)xoff) * srcBpp;
         for (GLsizei x = 0; x < w; ++x) memcpy(row + (size_t)x * srcBpp, texel, srcBpp);
     }
-    // Upload GPU (base level hoặc mip — mip GPU không giữ, chỉ shadow).
     if (level == 0) {
         std::vector<uint8_t> tight((size_t)w * h * srcBpp);
         for (GLsizei r = 0; r < h; ++r)
@@ -1991,26 +2392,116 @@ static void ClearTexLevel(Context& c, TextureObject& t, GLint level, GLint xoff,
         ++c.appleStats.mipStaged;
     }
 }
+// Cube map: zoffset là face (0..5), depth phải = 1. Mỗi face có shadow riêng
+// (t.faces[face]); GPU upload cả face qua updateCubeFace sau khi clear.
+static void ClearTexFace(Context& c, TextureObject& t, GLint face, GLint xoff, GLint yoff,
+                         GLsizei w, GLsizei h, GLenum format, GLenum type, const void* data) {
+    if (face < 0 || face > 5 || !t.isCube) { c.errors.Record(0x0501); return; }
+    if (xoff < 0 || yoff < 0 || w < 0 || h < 0 ||
+        (size_t)(xoff + w) > (size_t)t.w || (size_t)(yoff + h) > (size_t)t.h) {
+        c.errors.Record(0x0501); return;
+    }
+    if (!w || !h) return;
+    size_t bpp = Bpp(format, type);
+    uint8_t texel[16] = {0};
+    if (!WriteClearTexel(format, type, data, texel, bpp)) {
+        c.errors.Record(0x0500); return;
+    }
+    auto& facePix = t.faces[face];
+    if (facePix.size() < (size_t)t.w * t.h * bpp)
+        facePix.resize((size_t)t.w * t.h * bpp, 0);
+    for (GLsizei r = 0; r < h; ++r) {
+        uint8_t* row = facePix.data() +
+            ((size_t)(yoff + r) * (size_t)t.w + (size_t)xoff) * bpp;
+        for (GLsizei x = 0; x < w; ++x) memcpy(row + (size_t)x * bpp, texel, bpp);
+    }
+    if (face == 0) t.pixels = facePix;
+    if (t.gpu && (format == 0x1908 || format == 0x1903 || format == 0x80E1) &&
+        type == 0x1401) {
+        c.device->updateCubeFace(t.gpu.get(), (uint32_t)face, facePix.data(),
+                                 (size_t)t.w * bpp);
+    }
+}
+static bool ClearTexLevelDims(const TextureObject& t, GLint level,
+                              GLint* lw, GLint* lh, GLint* ld) {
+    if (level < 0) return false;
+    if (level == 0) {
+        *lw = (GLint)t.w; *lh = (GLint)t.h;
+        *ld = t.d ? (GLint)t.d : 1;
+        return true;
+    }
+    auto it = t.mipData.find(level);
+    if (it == t.mipData.end()) return false;
+    *lw = it->second.w; *lh = it->second.h;
+    *ld = it->second.d ? (GLint)it->second.d : 1;
+    return true;
+}
+static bool IsVolumeTexture(const TextureObject& t) {
+    return t.d > 1 || t.target == 0x806F /*TEXTURE_3D*/ ||
+           t.target == 0x8C1A /*TEXTURE_2D_ARRAY*/;
+}
+static void ClearTexVolume(Context& c, TextureObject& t, GLint level,
+                           GLint xoff, GLint yoff, GLint zoff,
+                           GLsizei w, GLsizei h, GLsizei d,
+                           GLenum format, GLenum type, const void* data) {
+    GLint lw = 0, lh = 0, ld = 0;
+    if (!ClearTexLevelDims(t, level, &lw, &lh, &ld)) {
+        c.errors.Record(0x0501); return;
+    }
+    if (w < 0 || h < 0 || d < 0 || xoff < 0 || yoff < 0 || zoff < 0 ||
+        (size_t)(xoff + w) > (size_t)lw || (size_t)(yoff + h) > (size_t)lh ||
+        (size_t)(zoff + d) > (size_t)ld) {
+        c.errors.Record(0x0501); return;
+    }
+    if (!w || !h || !d) return;
+    size_t bpp = BppTyped3D(format, type);
+    uint8_t texel[16] = {0};
+    if (!WriteClearTexel(format, type, data, texel, bpp)) {
+        c.errors.Record(0x0500); return;
+    }
+    std::vector<uint8_t> payload((size_t)w * h * d * bpp);
+    for (size_t i = 0; i < (size_t)w * h * d; ++i)
+        memcpy(payload.data() + i * bpp, texel, bpp);
+    TexSubImage3DCore(c, t, level, xoff, yoff, zoff, w, h, d, format, type, payload.data());
+}
 void glClearTexImage(GLuint tex, GLint level, GLenum format, GLenum type, const void* data) {
     Context& c = Context::Current();
     auto it = c.textures.find(tex);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
-    // Level 0: full; level>0: full theo dims level đó.
-    GLsizei w = (level == 0) ? (GLsizei)it->second.w : 0, h = w;
-    if (level > 0) {
-        auto m = it->second.mipData.find(level);
-        if (m == it->second.mipData.end()) { c.errors.Record(0x0500); return; }
-        w = m->second.w; h = m->second.h;
+    GLint w = 0, h = 0, d = 0;
+    if (!ClearTexLevelDims(it->second, level, &w, &h, &d)) {
+        c.errors.Record(0x0501); return;
     }
-    ClearTexLevel(c, it->second, level, 0, 0, w, h, format, type, data);
+    if (it->second.isCube) {
+        if (level == 0) {
+            for (int face = 0; face < 6; ++face)
+                ClearTexFace(c, it->second, face, 0, 0, w, h, format, type, data);
+        } else {
+            ClearTexLevel(c, it->second, level, 0, 0, w, h, format, type, data);
+        }
+        return;
+    }
+    if (IsVolumeTexture(it->second))
+        ClearTexVolume(c, it->second, level, 0, 0, 0, w, h, d, format, type, data);
+    else
+        ClearTexLevel(c, it->second, level, 0, 0, w, h, format, type, data);
 }
 void glClearTexSubImage(GLuint tex, GLint level, GLint x, GLint y, GLint z,
                         GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type,
                         const void* data) {
-    (void)z; (void)d; // 2D/level hiện tại (TGLMT không giữ 3D texture)
     Context& c = Context::Current();
     auto it = c.textures.find(tex);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    if (it->second.isCube) {
+        if (level != 0 || d != 1) { c.errors.Record(0x0502); return; }
+        ClearTexFace(c, it->second, z, x, y, w, h, format, type, data);
+        return;
+    }
+    if (IsVolumeTexture(it->second)) {
+        ClearTexVolume(c, it->second, level, x, y, z, w, h, d, format, type, data);
+        return;
+    }
+    if (z != 0 || d != 1) { c.errors.Record(0x0501); return; }
     ClearTexLevel(c, it->second, level, x, y, w, h, format, type, data);
 }
 void glInvalidateTexImage(GLuint a, GLint b) { (void)a;(void)b; }
@@ -2061,6 +2552,9 @@ void glTextureStorage2D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h) {
     c.pendingTexRegions.erase(t);
     it->second.levelViews.clear();
     it->second.layerViews.clear();
+    // Voxy world re-create: texture immutable 384MB + full mip chain. Trim trước
+    // nếu RAM trống thấp (xem Context::MaybeTrimForAllocation).
+    c.MaybeTrimForAllocation((size_t)w * (size_t)h * 4 * 4 / 3);
     it->second.gpu = c.device->newTextureLevels(
         (uint32_t)w, (uint32_t)h, ToMetalFormat(it->second.internalFormat), (uint32_t)l);
     // P1: storage chỉ cấp chỗ → shadow toàn số 0, không thông tin. Cùng luật với
@@ -2076,16 +2570,34 @@ void glTextureStorage3D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h, G
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
     if (w < 1 || h < 1 || d < 1 || l < 1) { c.errors.Record(0x0501); return; }
+    GLsizei maxDim = w > h ? w : h;
+    if (d > maxDim) maxDim = d;
+    GLsizei maxL = 1;
+    for (GLsizei m = maxDim; m > 1; m >>= 1) ++maxL;
+    if (l > maxL) { c.errors.Record(0x0501); return; }
+    const bool isArray = (it->second.target == 0x8C1A);
     it->second.w = w; it->second.h = h; it->second.d = d;
     it->second.internalFormat = inf; it->second.levels = l;
     it->second.isCube = false;
     it->second.wasRT = false;
     it->second.levelViews.clear();
     it->second.layerViews.clear();
+    // Immutable storage cấp đủ mip chain; shadow per-level (rỗng) để
+    // glTexSubImage3D(level>0) có đích hợp lệ, giống glTextureStorage2D.
+    it->second.mipData.clear();
+    for (GLint lv = 1; lv < l; ++lv) {
+        auto& ml = it->second.mipData[lv];
+        ml.w = (GLsizei)w >> lv; if (ml.w < 1) ml.w = 1;
+        ml.h = (GLsizei)h >> lv; if (ml.h < 1) ml.h = 1;
+        ml.d = isArray ? d : ((GLsizei)d >> lv);
+        if (ml.d < 1) ml.d = 1;
+    }
     c.pendingTexRegions.erase(t);
-    it->second.gpu = (it->second.target == 0x8C1A)
-        ? c.device->newTexture2DArray((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf))
-        : c.device->newTexture3D((uint32_t)w, (uint32_t)h, (uint32_t)d, ToMetalFormat(inf));
+    it->second.gpu = isArray
+        ? c.device->newTexture2DArrayLevels((uint32_t)w, (uint32_t)h, (uint32_t)d,
+                                            (uint32_t)l, ToMetalFormat(inf))
+        : c.device->newTexture3DLevels((uint32_t)w, (uint32_t)h, (uint32_t)d,
+                                       (uint32_t)l, ToMetalFormat(inf));
     // Cùng luật shadow với glTextureStorage2D: chỉ giữ khi Null / không gpu /
     // format không đọc được từ GPU.
     if (c.device->isNull() || !it->second.gpu || !TexReadableFromGPU(it->second))
@@ -2099,6 +2611,7 @@ void glTextureStorage3D(GLuint t, GLsizei l, GLenum inf, GLsizei w, GLsizei h, G
 static bool MSAAFormatOK(GLenum inf) { return inf == 0x8058 || inf == 0x8C43; }
 static bool SetupMSAA2D(Context& c, TextureObject& tx, GLsizei samples, GLenum inf,
                         GLsizei w, GLsizei h) {
+    if (tx.immutableFormat) { c.errors.Record(0x0502); return false; }
     if (samples < 1 || samples > 4) { c.errors.Record(0x0501); return false; }
     if (w < 0 || h < 0) { c.errors.Record(0x0501); return false; }
     if (!MSAAFormatOK(inf)) { c.errors.Record(0x0502); return false; }
@@ -2115,7 +2628,35 @@ static bool SetupMSAA2D(Context& c, TextureObject& tx, GLsizei samples, GLenum i
         tx.pixels.assign((size_t)w * (size_t)h * 4, 0);
         return true;
     }
-    auto t = c.device->makeMSAATarget((uint32_t)w, (uint32_t)h, (uint32_t)samples);
+    auto t = c.device->makeMSAATarget((uint32_t)w, (uint32_t)h, (uint32_t)samples,
+                                     ToMetalFormat(inf));
+    if (!t) { c.errors.Record(0x0502); return false; }
+    tx.msaaTarget = t;
+    tx.gpu = t->resolvedTexture();
+    if (!tx.gpu) { c.errors.Record(0x0502); return false; }
+    return true;
+}
+static bool SetupMSAA2DArray(Context& c, TextureObject& tx, GLsizei samples, GLenum inf,
+                             GLsizei w, GLsizei h, GLsizei d) {
+    if (tx.immutableFormat) { c.errors.Record(0x0502); return false; }
+    if (samples < 1 || samples > 4) { c.errors.Record(0x0501); return false; }
+    if (w < 0 || h < 0 || d < 0) { c.errors.Record(0x0501); return false; }
+    if (!MSAAFormatOK(inf)) { c.errors.Record(0x0502); return false; }
+    GLuint keepId = tx.id;
+    tx = TextureObject{};
+    tx.id = keepId;
+    tx.target = 0x9102; // TEXTURE_2D_MULTISAMPLE_ARRAY
+    tx.levels = 1;
+    tx.internalFormat = inf;
+    tx.w = (uint32_t)w; tx.h = (uint32_t)h; tx.d = (uint32_t)d;
+    tx.samples = samples;
+    if (w == 0 || h == 0 || d == 0) return true;
+    if (!c.device || c.device->isNull()) {
+        tx.pixels.assign((size_t)w * (size_t)h * (size_t)d * 4, 0);
+        return true;
+    }
+    auto t = c.device->makeMSAATargetLayered((uint32_t)w, (uint32_t)h, (uint32_t)d,
+                                              (uint32_t)samples, ToMetalFormat(inf));
     if (!t) { c.errors.Record(0x0502); return false; }
     tx.msaaTarget = t;
     tx.gpu = t->resolvedTexture();
@@ -2127,12 +2668,18 @@ void glTextureStorage2DMultisample(GLuint a, GLsizei b, GLenum d, GLsizei e, GLs
     (void)g;
     auto it = c.textures.find(a);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
-    SetupMSAA2D(c, it->second, b, d, e, f);
+    if (it->second.target != 0x9100) { c.errors.Record(0x0500); return; }
+    if (SetupMSAA2D(c, it->second, b, d, e, f))
+        it->second.immutableFormat = true;
 }
 void glTextureStorage3DMultisample(GLuint a, GLsizei b, GLenum d, GLsizei e, GLsizei f, GLsizei g, GLboolean h) {
-    (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;(void)h;
-    // 2D_MULTISAMPLE_ARRAY chưa có backend resolve theo layer.
-    Context::Current().errors.Record(0x0502);
+    Context& c = Context::Current();
+    (void)h;
+    auto it = c.textures.find(a);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    if (it->second.target != 0x9102) { c.errors.Record(0x0500); return; }
+    if (SetupMSAA2DArray(c, it->second, b, d, e, f, g))
+        it->second.immutableFormat = true;
 }
 void glTexImage2DMultisample(GLenum t, GLsizei s, GLenum inf, GLsizei w, GLsizei h, GLboolean f) {
     Context& c = Context::Current();
@@ -2143,8 +2690,12 @@ void glTexImage2DMultisample(GLenum t, GLsizei s, GLenum inf, GLsizei w, GLsizei
     SetupMSAA2D(c, *tp, s, inf, w, h);
 }
 void glTexImage3DMultisample(GLenum t, GLsizei s, GLenum inf, GLsizei w, GLsizei h, GLsizei d, GLboolean f) {
-    (void)t;(void)s;(void)inf;(void)w;(void)h;(void)d;(void)f;
-    Context::Current().errors.Record(0x0502);
+    Context& c = Context::Current();
+    (void)f;
+    if (t != 0x9102) { c.errors.Record(0x0500); return; }
+    TextureObject* tp = BoundTex(c, t);
+    if (!tp) return;
+    SetupMSAA2DArray(c, *tp, s, inf, w, h, d);
 }
 // glTexStorage* (non-DSA, GL 4.2/4.3): resolve texture đang bind trên active unit
 // rồi gọi DSA thật. HÀNH VI CŨ LÀ NO-OP → texture không bao giờ có GPU allocation

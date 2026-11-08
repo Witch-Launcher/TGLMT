@@ -23,26 +23,26 @@ alone would hide the difference between real GPU work and a CPU fallback.
 |---|---|---|
 | Depth test, depth write, depth function | GPU | encoded as `MTLDepthStencilState`, cached (16 states) |
 | Stencil test and stencil ops | GPU | enabled state, front/back func/ref/mask/ops, write mask and FBO depth-stencil attachment are encoded into the Metal depth-stencil state and render pass. Metal has a single reference value shared by both faces. Verified by `test_stencil_apple`. |
-| Blending, blend colour, all 15 factors and 5 equations | GPU | attachment 0 on the draw path |
-| `glColorMask` / `glColorMaski` | GPU | baked into the pipeline key as `colorWriteMask` |
+| Blending, blend colour, all 15 factors and 5 equations | GPU | per-attachment blend and `glColorMaski` are baked into the MRT pipeline and verified by `test_mrt_apple` (attachment 1) |
+| `glColorMask` / `glColorMaski` | GPU | per-attachment write mask is baked into the pipeline key; verified by `test_mrt_apple` and `test_water_translucent_apple` case 4 |
 | Face culling, front-face orientation | GPU | verified by a dedicated orientation test |
 | Scissor test | GPU | scissor rectangle is passed through unmodified |
 | Viewport, multiple viewports | GPU | converted for GL's lower-left origin |
 | `glClipControl` | GPU | affects both viewport depth conversion and the appended shader Z conversion |
 | Polygon mode (fill / line) | GPU | mapped to `setTriangleFillModeLines` |
-| Polygon offset (`glPolygonOffset`, `glPolygonOffsetClamp`) | Trace only | tracked and it dirties the pipeline key, but no depth bias is passed to Metal |
+| Polygon offset (`glPolygonOffset`, `glPolygonOffsetClamp`) | GPU | encoded with `setDepthBias`/`setDepthBiasSlopeScale`/`setDepthBiasClamp` (`src/gl/gl_apple_draw.cpp`); shadow state is queried back |
 | Line width | Trace only | recorded in the state shadow; `MTLRenderCommandEncoder` has no line-width control and Metal lines are always 1 pixel |
-| `glLogicOp` | Trace only | stored in the shadow; there is no logic-op stage in the render path |
+| `glLogicOp` | Trace only (GL path) | stored in the shadow; no logic-op stage in the GL draw path. A native Metal compute-ROP kernel exists and is tested by `test_rop_apple`, but it is not wired to `glDraw*`. |
 | Primitive restart | GPU | fixed and custom restart indices split the draw correctly |
 | MSAA via the `metal::` interface | GPU | `makeMSAATarget`, `makeMSAAPipeline`, resolve — verified by test |
-| MSAA via the GL API (`glRenderbufferStorageMultisample`, `glTexImage2DMultisample`, `glTexStorage2DMultisample`) | GPU | multisample colour + multisample depth target and resolve; 2D only. MSAA 3D/array is rejected. Verified by `test_msaa_gl_apple`, `test_msaa_depth_apple`. |
+| MSAA via the GL API (`glRenderbufferStorageMultisample`, `glTexImage2DMultisample`, `glTexStorage2DMultisample`, `glTexImage3DMultisample`, `glTexStorage3DMultisample`) | GPU | multisample colour + multisample depth target and resolve, RGBA8 and sRGB8_ALPHA8 colour formats; 2D and 2D-array layers (`GL_TEXTURE_2D_MULTISAMPLE_ARRAY`). There is no 3D multisample texture target in OpenGL; the `3DMultisample` entry points take the 2D-array target. Verified by `test_msaa_gl_apple`, `test_msaa_depth_apple`, `test_msaa_array_apple`. |
 | Renderbuffers (`glRenderbufferStorage*`, `glFramebufferRenderbuffer`) | GPU | colour/depth/stencil renderbuffers, including multisample colour; verified by `test_renderbuffer`. |
-| `glInvalidateFramebuffer` and friends | No-op accepted | explicitly documented as not implemented |
+| `glInvalidateFramebuffer` | GPU (partial) | marks named attachments as `contentUndefined`, so the next pass uses `MTLLoadActionDontCare` (`src/gl/gl_framebuffer.cpp`, `src/gl/gl_apple_draw.cpp`); `glInvalidateTexImage` / `glInvalidateTexSubImage` are still no-ops. |
 | `glBlitFramebuffer` | GPU, CPU fallback | GPU blit when formats match; CPU copy when scaling, filtering, or format differs |
-| FBO completeness, attachment with mip level | GPU | target size is `base >> level` |
-| FBO attachment to a 2D-array layer | GPU | `glFramebufferTextureLayer` creates a per-layer Metal view for colour and depth attachments; verified by `test_texture_array_apple`. A single slice of a 3D texture remains unsupported because Metal cannot create a 2D view of a 3D texture. |
+| FBO completeness, attachment with mip level | CPU validation | checks attachment existence, equal effective mip dimensions, layered/non-layered consistency and draw-buffer image references (`INCOMPLETE_ATTACHMENT`/`DIMENSIONS`/`LAYER_TARGETS`/`DRAW_BUFFER`); target size is `base >> level`. Verified by `test_fbo_completeness`. |
+| FBO attachment to a 2D-array layer / 3D slice | GPU | `glFramebufferTextureLayer` creates a per-layer Metal view for 2D arrays; for 3D textures the pass renders directly to `MTLTextureType3D` with `depthPlane`/`level` because Metal cannot create a 2D view of 3D. Verified by `test_texture_array_apple` and `test_fbo_3d_slice_apple`. |
 | `glClear` | GPU | immediate clear, or deferred to the next draw as `loadAction = Clear` |
-| `glClearTexImage` / `glClearTexSubImage` | No-op accepted | |
+| `glClearTexImage` / `glClearTexSubImage` | GPU + shadow | clears level/region and keeps the CPU shadow coherent; verified by `test_clear_tex_3d`, `test_clear_tex_cube`, `test_enum_behavior` |
 
 ## Texture and buffer functionality
 
@@ -54,11 +54,11 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | Mip filtering on a single-level texture | CPU emulated | falls back to the base level and counts `mipBase` |
 | Drawing or clearing into mip level greater than 0 of a single-level texture | Trace only | skipped and counted as `mipLevelSkipped` |
 | Cubemaps, `samplerCube` | GPU | faces are uploaded immediately rather than staged |
-| `sampler2DArray` | GPU | `GL_TEXTURE_2D_ARRAY` storage (`glTexImage3D`/`glTexStorage3D`/`glTexSubImage3D`) uses a real `MTLTextureType2DArray`; sampler maps to `texture2d_array`. MSAA 2D array is rejected. Verified by `test_texture_array_apple`. |
+| `sampler2DArray` | GPU | `GL_TEXTURE_2D_ARRAY` storage (`glTexImage3D`/`glTexStorage3D`/`glTexSubImage3D`) uses a real `MTLTextureType2DArray`; sampler maps to `texture2d_array`. MSAA 2D array has a separate multisample storage/resolve path. Verified by `test_texture_array_apple`, `test_msaa_array_apple`. |
 | `glTexBuffer` / `samplerBuffer` | CPU emulated, GPU read | `glTexBuffer` materialises the buffer into a texture when it is bound (`BindBufTex`); the shader then reads it with `.read()` on the GPU |
-| Compressed texture upload (`glCompressedTexImage*`) | No-op accepted | no decompression, no error |
+| Compressed texture upload (`glCompressedTexImage*`) | Rejected | no compressed-format support; uploads and reads raise `GL_INVALID_ENUM`/`GL_INVALID_OPERATION`; verified by `test_compressed_contract` |
 | `glCopyImageSubData` | GPU | 2D copy between textures, including source/destination mip levels via texture views, plus 3D/array multi-slice copies through `blitCopySlices` (3D uses origin.z, arrays use slices). Same-format GPU blit, otherwise CPU shadow fallback for level-0 2D. |
-| `glCopyTexSubImage2D` / `glCopyTextureSubImage2D` | GPU | read framebuffer → texture copy, then the shadow is refreshed from the GPU. Level 0 uses a GPU blit; level > 0 reads the source region and uploads that mip (RGBA8/sRGB) through `updateTextureLevel`. |
+| `glCopyTexSubImage2D` / `glCopyTextureSubImage2D` | GPU | read framebuffer → texture copy, then the shadow is refreshed from the GPU. Level 0 uses a GPU blit; level > 0 reads the source region and uploads that mip (RGBA8/sRGB) through `updateTextureLevel`; verified by `test_core41_contract`. |
 | `glCopyTexImage*`, `glCopyTexSubImage1D`, `glCopyTexSubImage3D` | No-op accepted | |
 | `glPixelStorei` pack/unpack row length, skip, alignment | CPU emulated | exact spec enums; applied at upload and readback |
 | PBO unpack and pack as byte offsets | CPU emulated | `GL_PIXEL_UNPACK_BUFFER` / `GL_PIXEL_PACK_BUFFER` offsets are honoured |
@@ -80,10 +80,10 @@ alone would hide the difference between real GPU work and a CPU fallback.
 | Indirect draws | CPU emulated | the command is read from `GL_DRAW_INDIRECT_BUFFER` (or from the host pointer) on the CPU, then issued as an ordinary draw; `glMultiDraw*Indirect` loops over that |
 | `glMultiDraw*` | CPU emulated | expanded into sub-draws that share one open encoder; each sub-draw increments `multidrawBatched` (tracked in the context, not printed in the frame summary) |
 | `GL_TRIANGLE_FAN`, `GL_LINE_LOOP` | CPU emulated | expanded to triangles / closed strips on the CPU; combined with `baseVertex != 0` these become trace-only |
-| `GL_PATCHES` | Trace only | the draw path returns before encoding |
-| Transform feedback | Trace only | object creation, binding, begin/end, pause/resume, buffer binding, varyings query and active/paused queries are implemented; nothing is captured because no program executes, and `glGetTransformFeedbackVarying` reports type `GL_FLOAT` and size 1 regardless of the real declaration |
-| Geometry shader draws | Trace only | programs with a geometry stage link, then the draw path declines to encode |
-| Tessellation draws | Trace only | as above for tessellation stages |
+| `GL_PATCHES` | GPU (tessellation subset) | real Metal `drawPatches` for triangle/quad domains; non-tessellation programs reject the mode. Isolines/point mode are not implemented. Verified by `test_tess_draw_apple`, `test_tess_quad_apple`, `test_tess_tri_cp_apple`. |
+| Transform feedback | GPU (VS-only) | object creation, binding, begin/end, pause/resume, buffer binding, varying enumeration and active/paused queries are implemented. Capture is a compute prepass of the vertex stage; GS/TES capture and fp64 varyings are not implemented. Verified by `test_xfb_capture_apple`, `test_xfb_array_matrix_apple`, `test_xfb_overflow_apple`; `glGetTransformFeedbackVarying` reflects the declared type/size (`src/gl/gl_tess_xfb.cpp`). |
+| Geometry shader draws | Rejected | `glCompileShader` fails with an explicit geometry-stage message (`src/gl/gl_shader.cpp`); no draw path is reached. |
+| Tessellation draws | GPU (triangle/quad subset) | TCS/TES compile and encode via Metal tessellation; isolines, point mode, tessellation factors above 16 on A11, multi-index clip and TCS clip distance are not implemented. Verified by `test_tess_*`. |
 | Compute dispatch | GPU | compute encoder, SSBO, image load/store and dispatch are implemented; verified by `test_compute_dispatch` |
 
 ## Shader converter boundaries
@@ -96,12 +96,13 @@ strict: anything it does not understand produces `ok = false` and a message, whi
 
 | Area | Supported |
 |---|---|
-| Stages | vertex and fragment only |
+| Stages | vertex, fragment, compute, tessellation control and tessellation evaluation; geometry is rejected |
 | Versions | `100`, `120`, `130`, `140`, `150`, `300` (including `300 es`), `330`, `400`, `410`, `440`, `450`, `460` |
 | Preprocessor | `#version`, object-like `#define` / `#undef`, `#ifdef` / `#ifndef` / `#if` / `#elif` / `#else` / `#endif` with `defined()`, integer literals and numeric single-token macros; `#line`, `#pragma`, `#extension`, `precision` are discarded |
 | Declarations | `in` / `out` / `uniform`, with or without `layout(location=N)`; multiple declarators per statement; interpolation and precision qualifiers parsed and dropped |
 | Types | `float`, `vec2`–`vec4`, `mat2`–`mat4`, `int`, `ivec2`–`ivec4`, `uint`, `uvec2`–`uvec4`, `bool`; `struct`; arrays on uniforms, uniform-block members (size 1–1024), and `const` arrays written as `T[] name = T[](...)` |
 | Uniform blocks | `layout(std140) uniform Block { … }` with optional `layout(binding=N)`; offsets computed by the converter; reported through `GL_ACTIVE_UNIFORM_BLOCKS` |
+| Storage blocks | `buffer Block { … }` for vertex/fragment stages, including `layout(std430, binding=N)`; reported through `GL_SHADER_STORAGE_BLOCK` and verified by `test_ssbo_graphics_apple` |
 | Samplers | `sampler2D`, `samplerCube`, `sampler2DArray`, `samplerBuffer` (+ `i`/`u` variants), `sampler2DShadow` |
 | Texture built-ins | `texture` (with optional bias), `texelFetch`, `textureGrad`, `textureLod`, `textureProj` |
 | Built-in variables | `gl_Position`, `gl_PointSize`, `gl_PointCoord`, `gl_FragCoord`, `gl_FrontFacing`, `gl_VertexID`, `gl_InstanceID`, `gl_FragColor`, `gl_FragData[0]` |
@@ -113,7 +114,7 @@ strict: anything it does not understand produces `ok = false` and a message, whi
 
 | Construct | Reason |
 |---|---|
-| Tessellation control, tessellation evaluation, geometry, compute stages | compile fails with an explicit stage name; these have no GLSL translation path |
+| Geometry stage | compile fails with an explicit stage name; Metal has no geometry stage and no compute fallback is wired to GL draws |
 | Unknown or missing `#version` | explicit message |
 | Function-like macros, unparseable `#if`, stray `#elif` / `#else` / `#endif`, other directives | explicit message |
 | Types outside the list above, including `double`, `dvec*`, `mat2x3` and friends, `isampler2D`, `usampler2D`, `sampler1D`, `sampler2DMS` | explicit message |
@@ -125,7 +126,6 @@ strict: anything it does not understand produces `ok = false` and a message, whi
 | `layout(binding=N)` on a plain (non-block) uniform | explicit message |
 | Uniform block redeclared with different members | explicit message |
 | `layout(push_constant)` / other non-`location` layouts on plain declarations, `shared` variables | explicit message |
-| `buffer { … }` (SSBO) blocks | not recognised: they are passed through to MSL and surface as an MSL compile error on a real device, not as a converter error |
 | Subroutines | not parsed |
 | Declarations that appear after a function body | explicit message |
 
@@ -135,7 +135,6 @@ These compile successfully but are not equivalent to the OpenGL behaviour:
 
 | Construct | Approximation |
 |---|---|
-| `sampler2DShadow` | mapped to an ordinary `texture2d<float>`; the compare reference is dropped |
 | `textureGrad`, `textureLod`, `textureProj` | restricted to `sampler2D`; other sampler types are rejected |
 | Default-block uniform layout | laid out with MSL natural alignment, not strict std140 |
 | `flat` / `smooth` / `noperspective` | parsed and discarded; flatness is inferred from the type |
@@ -191,11 +190,11 @@ These are properties of Metal itself, not gaps in a code path.
 | OpenGL concept | Metal reality | TGLMT behaviour |
 |---|---|---|
 | Geometry shaders | none | a hand-written mesh-shader path exists (`shaders/gs_mesh.metal`, `makeMeshPipeline`, `drawMesh`) but is reachable only from native Metal code and tests, gated on `supportsMesh()` (Apple7 and newer). GLSL geometry shaders do not compile. |
-| Tessellation stages | no GL-style TCS/TES | a hand-written path exists (`shaders/tess_triangle.metal`, `makeTessPipeline`, `drawPatches`) reachable only from native Metal code and tests. GLSL tessellation shaders do not compile, and `GL_PATCHES` draws are not encoded. |
-| Compute shaders with `image` load/store | supported by Metal | not reachable from the GL path; `glDispatchCompute` logs only |
-| Transform feedback | none | state plumbing only, no capture |
-| Logic operations | none in the render path | shadow only |
-| Stencil | fully supported by Metal | tracked, but not encoded |
+| Tessellation stages | Metal post-tessellation vertex + tessellation factors | GLSL TCS/TES compile and `GL_PATCHES` encodes real `drawPatches` for triangle/quad domains. Isolines, point mode and factors above 16 on A11 are not implemented. |
+| Compute shaders with `image` load/store | supported by Metal | compute dispatch, SSBO and image load/store are reachable from the GL path (`test_compute_dispatch`, `test_ssbo_graphics_apple`) |
+| Transform feedback | no fixed-function stage | real VS-only capture via compute prepass; GS/TES capture and fp64 varyings are not implemented |
+| Logic operations | none in the Metal render pipeline | shadow only on the GL path; a native compute-ROP kernel is tested by `test_rop_apple` but is not wired to GL draws |
+| Stencil | fully supported by Metal | enabled state, front/back ops, masks and FBO depth-stencil are encoded; Metal shares one reference value between faces |
 | Read/write hazard within one render pass | not tracked automatically | TGLMT pre-scans each draw and splits the pass (`hazardSplits`) when a program samples the texture it renders into |
 | Render command buffer with mixed load/store semantics | explicit | one encoder stays open across draws of the same pass; it ends on any pass-identity change |
 
@@ -209,7 +208,7 @@ These are properties of Metal itself, not gaps in a code path.
 | `MAX_SAMPLES` reported | 4 |
 | Depth-stencil format on iOS | `Depth24Stencil8` requests are mapped to `Depth32Float_Stencil8` |
 | Layer pixel format | must be `MTLPixelFormatRGBA8Unorm` |
-| Extension string | fixed at six entries: `GL_ARB_gl_spirv`, `GL_ARB_indirect_parameters`, `GL_ARB_pipeline_statistics_query`, `GL_ARB_polygon_offset_clamp`, `GL_ARB_texture_filter_anisotropic`, `GL_KHR_no_error` |
+| Extension string | generated from `kExts[]` (133 entries); e.g. `GL_ARB_indirect_parameters`, `GL_ARB_polygon_offset_clamp`, `GL_ARB_texture_filter_anisotropic`, `GL_KHR_no_error`, `GL_ARB_sample_locations`, `GL_ARB_base_instance`, `GL_ARB_ES3_1_compatibility`, `GL_ARB_conservative_depth` |
 
 The extension list is intentionally frozen. LWJGL builds its capability set from
 `glGetString(GL_EXTENSIONS)`, so advertising an extension whose path is not exercised end

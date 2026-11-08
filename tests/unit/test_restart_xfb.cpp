@@ -37,6 +37,9 @@ int main() {
     tglmt::GLuint x;
     glGenTransformFeedbacks(1, &x);
     glBindTransformFeedback(0x8E22, x);
+    tglmt::GLuint q = 0;
+    glGenQueries(1, &q);
+    glBeginQuery(0x8C88 /*TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN*/, q);
     glBeginTransformFeedback(0x0004); // TRIANGLES
     tglmt::GLint av = 0;
     glGetTransformFeedbackiv(x, 0x8E24, &av); // ACTIVE
@@ -50,11 +53,26 @@ int main() {
     glDrawArrays(0x0004, 0, 9); // paused → không đếm
     glResumeTransformFeedback();
     glEndTransformFeedback();
+    glEndQuery(0x8C88);
     assert(ctx.xfbs[x].capturedCount == 7);
+    tglmt::GLuint primsWritten = 0;
+    glGetQueryObjectuiv(q, 0x8866 /*QUERY_RESULT*/, &primsWritten);
+    assert(primsWritten == 2);
+    glDeleteQueries(1, &q);
+    // Draw mode không tương thích với primitive mode của XFB → INVALID_OPERATION
+    glBeginTransformFeedback(0x0001); // LINES
+    ctx.device->clearTrace();
+    glDrawArrays(0x0004, 0, 3); // TRIANGLES: không hợp lệ
+    assert(glGetError() == 0x0502);
+    assert(ctx.device->drawTrace().empty());
+    glDrawArrays(0x0001, 0, 4); // LINES: hợp lệ
+    assert(ctx.device->drawTrace().size() == 1);
+    glEndTransformFeedback();
+    assert(ctx.xfbs[x].capturedCount == 4);
     ctx.device->clearTrace();
     glDrawTransformFeedback(0x0004, x);
     assert(ctx.device->drawTrace().size() == 1);
-    assert(ctx.device->drawTrace()[0].count == 7);
+    assert(ctx.device->drawTrace()[0].count == 4);
     // varyings roundtrip
     tglmt::GLuint p = glCreateProgram();
     const char* vars[2] = {"gl_Position", "vColor"};

@@ -343,6 +343,18 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     } else if (target == 0x92C0 /*ATOMIC_COUNTER_BUFFER*/) {
         // P9: atomic counter binding (offset lấy từ layout(offset) shader, không phải bind).
         c.atomicBindPoints[index] = BufferRange{buffer, 0, 0};
+    } else if (target == 0x8C8E /*TRANSFORM_FEEDBACK_BUFFER*/) {
+        if (index >= 4) { c.errors.Record(0x0501); return; }
+        GLuint xid = c.state.BoundXFB();
+        auto xit = c.xfbs.find(xid);
+        if (xit == c.xfbs.end() && xid == 0) {
+            XfbObject x; x.id = 0; xit = c.xfbs.emplace(0, x).first;
+        }
+        if (xit == c.xfbs.end()) { c.errors.Record(0x0502); return; }
+        xit->second.buffers[index] = buffer;
+        xit->second.offsets[index] = 0;
+        xit->second.sizes[index] = 0;
+        return; // TRANSFORM_FEEDBACK_BUFFER không phải target của glBindBuffer
     }
     glBindBuffer(target, buffer);
 }
@@ -362,6 +374,18 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr o, G
         c.storageBindPoints[index] = BufferRange{buffer, o, s};
     } else if (target == 0x92C0 /*ATOMIC_COUNTER_BUFFER*/) {
         c.atomicBindPoints[index] = BufferRange{buffer, o, s};
+    } else if (target == 0x8C8E /*TRANSFORM_FEEDBACK_BUFFER*/) {
+        if (index >= 4) { c.errors.Record(0x0501); return; }
+        GLuint xid = c.state.BoundXFB();
+        auto xit = c.xfbs.find(xid);
+        if (xit == c.xfbs.end() && xid == 0) {
+            XfbObject x; x.id = 0; xit = c.xfbs.emplace(0, x).first;
+        }
+        if (xit == c.xfbs.end()) { c.errors.Record(0x0502); return; }
+        xit->second.buffers[index] = buffer;
+        xit->second.offsets[index] = o;
+        xit->second.sizes[index] = s;
+        return;
     }
     glBindBuffer(target, buffer);
 }
@@ -380,6 +404,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     if (bo->immutable) { c.errors.Record(0x0502); return; } // Storage rồi → INVALID_OPERATION
     bo->size = (size_t)size;
     bo->usage = usage;
+    c.MaybeTrimForAllocation((size_t)size);
     bo->gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                    : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
     // P1 (bỏ nhân bản CPU): GPU buffer là Shared memory → bản của GPU đã là bản
@@ -406,6 +431,7 @@ void glNamedBufferData(GLuint b, GLsizeiptr size, const void* data, GLenum usage
     // trực tiếp không qua target
     it->second.size = (size_t)size;
     it->second.usage = usage;
+    c.MaybeTrimForAllocation((size_t)size);
     it->second.gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                           : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
     if (it->second.gpu && !c.device->isNull()) {
@@ -427,6 +453,7 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     bo->size = (size_t)size;
     bo->storageFlags = flags;
     bo->immutable = true;
+    c.MaybeTrimForAllocation((size_t)size);
     bo->gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                    : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
     if (bo->gpu && !c.device->isNull()) {
@@ -446,6 +473,7 @@ void glNamedBufferStorage(GLuint b, GLsizeiptr size, const void* data, GLbitfiel
     it->second.size = (size_t)size;
     it->second.storageFlags = flags;
     it->second.immutable = true;
+    c.MaybeTrimForAllocation((size_t)size);
     it->second.gpu = data ? c.device->newBufferWithBytes(data, (size_t)size, metal::StorageMode::Shared)
                           : c.device->newBuffer((size_t)size, metal::StorageMode::Shared);
     if (it->second.gpu && !c.device->isNull()) {
@@ -675,9 +703,13 @@ static size_t ClearPatternBytes(GLenum inf) {
         default: return 0;
     }
 }
+static bool ClearFormatSupported(GLenum inf) {
+    const size_t es = ClearPatternBytes(inf);
+    return es >= 1 && es <= 16;
+}
 static void FillClearRange(void* dst, size_t n, GLenum inf, const void* d) {
     size_t es = ClearPatternBytes(inf);
-    if (es == 0 || es > 16) { // format lạ: giữ hành vi cũ (byte đầu)
+    if (es == 0 || es > 16) { // caller đã reject format lạ
         uint8_t f = d ? *(const uint8_t*)d : 0;
         memset(dst, f, n);
         return;
@@ -691,6 +723,7 @@ static void FillClearRange(void* dst, size_t n, GLenum inf, const void* d) {
 void glClearBufferData(GLenum t, GLenum inf, GLenum f, GLenum ty, const void* d) {
     (void)f; (void)ty;
     Context& c = Context::Current();
+    if (!ClearFormatSupported(inf)) { c.errors.Record(0x0500); return; }
     GLuint bid = c.state.BoundBuffer(t);
     BufferObject* bo = BoundBuf(t);
     if (!bo) return;
@@ -707,6 +740,7 @@ void glClearBufferData(GLenum t, GLenum inf, GLenum f, GLenum ty, const void* d)
 void glClearBufferSubData(GLenum t, GLenum inf, GLintptr off, GLsizeiptr size, GLenum f, GLenum ty, const void* d) {
     (void)f; (void)ty;
     Context& c = Context::Current();
+    if (!ClearFormatSupported(inf)) { c.errors.Record(0x0500); return; }
     GLuint bid = c.state.BoundBuffer(t);
     BufferObject* bo = BoundBuf(t);
     if (!bo) return;
@@ -726,6 +760,7 @@ void glClearBufferSubData(GLenum t, GLenum inf, GLintptr off, GLsizeiptr size, G
 void glClearNamedBufferData(GLuint b, GLenum inf, GLenum f, GLenum ty, const void* d) {
     (void)f; (void)ty;
     Context& c = Context::Current();
+    if (!ClearFormatSupported(inf)) { c.errors.Record(0x0500); return; }
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     const size_t n = std::min(BufferLen(it->second),
@@ -741,6 +776,7 @@ void glClearNamedBufferData(GLuint b, GLenum inf, GLenum f, GLenum ty, const voi
 void glClearNamedBufferSubData(GLuint b, GLenum inf, GLintptr off, GLsizeiptr size, GLenum f, GLenum ty, const void* d) {
     (void)f; (void)ty;
     Context& c = Context::Current();
+    if (!ClearFormatSupported(inf)) { c.errors.Record(0x0500); return; }
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     if (off < 0 || size < 0 || (size_t)(off + size) > BufferLen(it->second)) { c.errors.Record(0x0501); return; }

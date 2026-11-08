@@ -13,6 +13,14 @@ static void OutI(Context& c, GLenum p, GLint* v, GLuint idx = 0) {
     switch (p) {
         case 0x0D33: *v = 4; break; // MAX_TEXTURE_SIZE default expose
         case 0x0B70: *v = 0; break;
+        case 0x8E7D: *v = 32; break; // MAX_PATCH_VERTICES (GL 4.6 minimum)
+        case 0x8E7E: *v = (GLint)(c.device ? c.device->maxTessellationFactor() : 16); break;
+        case 0x886C: *v = 120; break; // MAX_TESS_CONTROL_INPUT_COMPONENTS
+        case 0x8E83: *v = 120; break; // MAX_TESS_CONTROL_OUTPUT_COMPONENTS
+        case 0x8E85: *v = 3960; break; // MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS
+        case 0x886D: *v = 120; break; // MAX_TESS_EVALUATION_INPUT_COMPONENTS
+        case 0x8E86: *v = 120; break; // MAX_TESS_EVALUATION_OUTPUT_COMPONENTS
+        case 0x8E84: *v = 120; break; // MAX_TESS_PATCH_COMPONENTS
         // P6f compute indexed limits (ARB_compute_shader): theo dimension (idx 0/1/2).
         case 0x91BE: // MAX_COMPUTE_WORK_GROUP_COUNT
             *v = (idx == 0) ? 65535 : (idx == 1) ? 65535 : 65535; break;
@@ -97,6 +105,19 @@ static bool StaticLimit(GLenum p, GLint* v) {
         case 0x910E: *v = 4; break;      // MAX_COLOR_TEXTURE_SAMPLES
         case 0x910F: *v = 4; break;      // MAX_DEPTH_TEXTURE_SAMPLES
         case 0x9110: *v = 4; break;      // MAX_INTEGER_SAMPLES
+        // ===== ARB_sample_locations (Metal: getDefaultSamplePositions 1/16 px) =====
+        case 0x933D: *v = 4; break;      // SAMPLE_LOCATION_SUBPIXEL_BITS_ARB
+        case 0x933E: *v = 1; break;      // SAMPLE_LOCATION_PIXEL_GRID_WIDTH_ARB
+        case 0x933F: *v = 1; break;      // SAMPLE_LOCATION_PIXEL_GRID_HEIGHT_ARB
+        case 0x9340: *v = 32; break;     // PROGRAMMABLE_SAMPLE_LOCATION_TABLE_SIZE_ARB
+        // ===== GL 4.1 / ARB_ES2_compatibility queries =====
+        case 0x8DFA: *v = 1; break;      // SHADER_COMPILER
+        case 0x8DF9: *v = 0; break;      // NUM_SHADER_BINARY_FORMATS (không binary format)
+        case 0x8DFB: *v = 1024; break;   // MAX_VERTEX_UNIFORM_VECTORS
+        case 0x8DFC: *v = 32; break;     // MAX_VARYING_VECTORS
+        case 0x8DFD: *v = 1024; break;   // MAX_FRAGMENT_UNIFORM_VECTORS
+        case 0x8B9A: *v = 0x1401; break; // IMPLEMENTATION_COLOR_READ_TYPE = UNSIGNED_BYTE
+        case 0x8B9B: *v = 0x1908; break; // IMPLEMENTATION_COLOR_READ_FORMAT = RGBA
         case 0x8A2F: *v = 36; break;     // MAX_UNIFORM_BUFFER_BINDINGS
         case 0x8A30: *v = 65536; break;  // MAX_UNIFORM_BLOCK_SIZE
         case 0x8A34: *v = 256; break;    // UNIFORM_BUFFER_OFFSET_ALIGNMENT (0 = crash MC)
@@ -193,6 +214,12 @@ void glGetIntegerv(GLenum p, GLint* v) {
         // rồi restore; trả 0 sẽ rebind nhầm khiến texture/FBO lệch cache của MC.
         case 0x8CA6: *v = (GLint)c.state.BoundDrawFBO(); return;   // FRAMEBUFFER_BINDING (= DRAW_FRAMEBUFFER_BINDING)
         case 0x8CAA: *v = (GLint)c.state.BoundReadFBO(); return;   // READ_FRAMEBUFFER_BINDING
+        // Per-FBO (hoặc default FB shadow): DRAW_BUFFER/READ_BUFFER/DRAW_BUFFERi.
+        case 0x0C01: *v = (GLint)c.CurrentDrawBuffer(0); return;   // DRAW_BUFFER (= DRAW_BUFFER0)
+        case 0x0C02: *v = (GLint)c.CurrentReadBuffer(); return;    // READ_BUFFER
+        case 0x8825: case 0x8826: case 0x8827: case 0x8828:        // DRAW_BUFFER0..3
+        case 0x8829: case 0x882A: case 0x882B: case 0x882C:        // DRAW_BUFFER4..7
+            *v = (GLint)c.CurrentDrawBuffer(p - 0x8825); return;
         case 0x84E0: *v = (GLint)c.state.ActiveTexture(); return;  // ACTIVE_TEXTURE
         case 0x8069: *v = (GLint)c.state.BoundTexture(c.state.ActiveTexture(), 0x0DE1); return; // TEXTURE_BINDING_2D
         case 0x8516: *v = (GLint)c.state.BoundTexture(c.state.ActiveTexture(), 0x8513); return; // TEXTURE_BINDING_CUBE_MAP
@@ -216,6 +243,9 @@ void glGetInteger64v(GLenum p, GLint64* v) {
     if (c.state.GetShadow(p, v, 8)) return;      // 8-byte shadow (timestamp/size thật)
     GLint t = 0;
     if (c.state.GetShadow(p, &t, 4)) { *v = t; return; }
+    if (p == 0x0C01) { *v = c.CurrentDrawBuffer(0); return; }
+    if (p == 0x0C02) { *v = c.CurrentReadBuffer(); return; }
+    if (p >= 0x8825 && p <= 0x882C) { *v = c.CurrentDrawBuffer(p - 0x8825); return; }
     if (StaticLimit(p, &t)) { *v = t; return; }
     // Các pname 64-bit spec mà shadow/StaticLimit chưa cover.
     if (p == 0x8E28) { // GL_TIMESTAMP (glQueryCounter đã lưu shadow 8-byte)
@@ -239,6 +269,9 @@ void glGetFloatv(GLenum p, GLfloat* v) {
     if (p == 0x0B66) { // DEPTH_CLEAR_VALUE
         *v = (GLfloat)c.clearDepth; return;
     }
+    if (p == 0x0C01) { *v = (GLfloat)c.CurrentDrawBuffer(0); return; }
+    if (p == 0x0C02) { *v = (GLfloat)c.CurrentReadBuffer(); return; }
+    if (p >= 0x8825 && p <= 0x882C) { *v = (GLfloat)c.CurrentDrawBuffer(p - 0x8825); return; }
     if (p == 0x0C22) { // COLOR_CLEAR_VALUE
         for (int i=0;i<4;i++) v[i]=c.clearColor[i]; return;
     }
@@ -248,6 +281,16 @@ void glGetFloatv(GLenum p, GLfloat* v) {
     if (p == 0x80AA) {                               // SAMPLE_COVERAGE_VALUE mặc định
         if (!c.state.GetShadow(p, &t, 4)) t = 1.0f;
         *v = t; return;
+    }
+    if (p == 0x8E74) { // PATCH_DEFAULT_OUTER_LEVEL (mặc định 1,1,1,1)
+        const float* d = c.state.PatchDefaultOuter();
+        for (int i = 0; i < 4; ++i) v[i] = d[i];
+        return;
+    }
+    if (p == 0x8E73) { // PATCH_DEFAULT_INNER_LEVEL (mặc định 1,1)
+        const float* d = c.state.PatchDefaultInner();
+        v[0] = d[0]; v[1] = d[1];
+        return;
     }
     if (c.state.GetShadow(p, &t, 4)) { *v = t; return; }
     *v = 0;

@@ -93,6 +93,28 @@ int main() {
     Pixel(ctx, px);
     Check(px[1] > 200 && px[0] < 50, "EQUAL 1 passes, green");
 
+    // Case 2: depth test ON + stencil ON cùng FBO D24S8 — đúng combo làm Metal
+    // abort trên A11: "depthAttachmentPixelFormat (D32F) and
+    // stencilAttachmentPixelFormat (D32S8) must match" (pipeline phải khai báo
+    // CẢ HAI là Depth32Float_Stencil8 và pass attach cả hai cùng texture).
+    {
+        glEnable(0x0B71);              // GL_DEPTH_TEST
+        glDepthFunc(0x0201);           // GL_LESS
+        glDepthMask(0xFF);
+        glClearDepthf(1.0f);
+        glClear(0x00000100 /*DEPTH*/ | 0x00000400 /*STENCIL*/);
+        Check(glGetError() == GL_NO_ERROR, "clear depth+stencil");
+        glUseProgram(red);
+        glStencilFunc(0x0207 /*ALWAYS*/, 1, 0xFF);
+        glStencilOp(0x1E00, 0x1E00, 0x1E01 /*REPLACE*/);
+        glDrawArrays(0x0004, 0, 3);
+        Check(glGetError() == GL_NO_ERROR, "depth+stencil draw");
+        unsigned char px2[4] = {};
+        Pixel(ctx, px2);
+        Check(px2[0] > 200 && px2[1] < 50, "depth+stencil red");
+        glDisable(0x0B71);
+    }
+
     glDeleteProgram(red); glDeleteProgram(green);
     glDeleteFramebuffers(1, &fbo);
     glDeleteTextures(1, &ds); glDeleteTextures(1, &tex);

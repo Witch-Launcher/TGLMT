@@ -7,6 +7,11 @@ using namespace tglmt;
 namespace tglmt { namespace gl {
 void glMultiDrawArraysIndirect(GLenum a0, const void * a1, GLsizei a2, GLsizei a3);
 void glMultiDrawElementsIndirect(GLenum a0, GLenum a1, const void * a2, GLsizei a3, GLsizei a4);
+void glBlitFramebuffer(GLint a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLint a7, GLbitfield a8, GLenum a9);
+void glRenderbufferStorageMultisample(GLenum a0, GLsizei a1, GLenum a2, GLsizei a3, GLsizei a4);
+void glDrawArraysInstanced(GLenum a0, GLint a1, GLsizei a2, GLsizei a3);
+void glDrawElementsInstanced(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4);
+void glVertexAttribDivisor(GLuint a0, GLuint a1);
 void glFlushMappedBufferRange(GLenum a0, GLintptr a1, GLsizeiptr a2);
 void glRenderbufferStorageMultisample(GLenum a0, GLsizei a1, GLenum a2, GLsizei a3, GLsizei a4);
 GLenum glClientWaitSync(GLsync a0, GLbitfield a1, GLuint64 a2);
@@ -760,6 +765,11 @@ void glDepthRangeIndexedfOES(GLuint a0, GLfloat a1, GLfloat a2);
 extern "C" {
 void glMultiDrawArraysIndirectAMD(GLenum a0, const void * a1, GLsizei a2, GLsizei a3) { tglmt::gl::glMultiDrawArraysIndirect(a0, a1, a2, a3); }
 void glMultiDrawElementsIndirectAMD(GLenum a0, GLenum a1, const void * a2, GLsizei a3, GLsizei a4) { tglmt::gl::glMultiDrawElementsIndirect(a0, a1, a2, a3, a4); }
+void glBlitFramebufferANGLE(GLint a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLint a6, GLint a7, GLbitfield a8, GLenum a9) { tglmt::gl::glBlitFramebuffer(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9); }
+void glRenderbufferStorageMultisampleANGLE(GLenum a0, GLsizei a1, GLenum a2, GLsizei a3, GLsizei a4) { tglmt::gl::glRenderbufferStorageMultisample(a0, a1, a2, a3, a4); }
+void glDrawArraysInstancedANGLE(GLenum a0, GLint a1, GLsizei a2, GLsizei a3) { tglmt::gl::glDrawArraysInstanced(a0, a1, a2, a3); }
+void glDrawElementsInstancedANGLE(GLenum a0, GLsizei a1, GLenum a2, const void * a3, GLsizei a4) { tglmt::gl::glDrawElementsInstanced(a0, a1, a2, a3, a4); }
+void glVertexAttribDivisorANGLE(GLuint a0, GLuint a1) { tglmt::gl::glVertexAttribDivisor(a0, a1); }
 void glFlushMappedBufferRangeAPPLE(GLenum a0, GLintptr a1, GLsizeiptr a2) { tglmt::gl::glFlushMappedBufferRange(a0, a1, a2); }
 void glRenderbufferStorageMultisampleAPPLE(GLenum a0, GLsizei a1, GLenum a2, GLsizei a3, GLsizei a4) { tglmt::gl::glRenderbufferStorageMultisample(a0, a1, a2, a3, a4); }
 GLenum glClientWaitSyncAPPLE(GLsync a0, GLbitfield a1, GLuint64 a2) { return tglmt::gl::glClientWaitSync(a0, a1, a2); }

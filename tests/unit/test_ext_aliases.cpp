@@ -41,6 +41,18 @@ void glDrawElementsInstancedEXT(GLenum mode, GLsizei count, GLenum type,
 void* glMapBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length,
                           GLbitfield access);
 GLboolean glUnmapBufferARB(GLenum target);
+// ANGLE aliases
+void glBlitFramebufferANGLE(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                            GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                            GLbitfield mask, GLenum filter);
+void glRenderbufferStorageMultisampleANGLE(GLenum target, GLsizei samples,
+                                           GLenum internalformat, GLsizei width,
+                                           GLsizei height);
+void glDrawArraysInstancedANGLE(GLenum mode, GLint first, GLsizei count,
+                                GLsizei primcount);
+void glDrawElementsInstancedANGLE(GLenum mode, GLsizei count, GLenum type,
+                                  const void* indices, GLsizei primcount);
+void glVertexAttribDivisorANGLE(GLuint index, GLuint divisor);
 }
 
 static const char* kBatch1[] = {
@@ -70,6 +82,8 @@ static const char* kBatch2[] = {
     "GL_OES_texture_border_clamp", "GL_OES_texture_buffer",
     "GL_OES_texture_view",
     "GL_OES_vertex_array_object",
+    "GL_ANGLE_framebuffer_blit", "GL_ANGLE_framebuffer_multisample",
+    "GL_ANGLE_instanced_arrays",
 };
 
 int main() {
@@ -155,7 +169,20 @@ int main() {
     Check(mapped != nullptr, "glMapBufferRangeEXT map được");
     glUnmapBufferARB(0x8892);
 
+    // --- ANGLE aliases: resolve + forward sang core (không crash).
+    GLuint rb = 0;
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(0x8D41 /*RENDERBUFFER*/, rb);
+    glRenderbufferStorageMultisampleANGLE(0x8D41, 4, 0x8058 /*RGBA8*/, 8, 8);
+    glBlitFramebufferANGLE(0, 0, 0, 0, 0, 0, 0, 0, 0x4000 /*COLOR_BUFFER_BIT*/,
+                           0x2600 /*NEAREST*/);
+    glVertexAttribDivisorANGLE(0, 2);
+    glDrawArraysInstancedANGLE(0x0004 /*TRIANGLES*/, 0, 0, 2);
+    glDrawElementsInstancedANGLE(0x0004, 0, 0x1405 /*UNSIGNED_INT*/, nullptr, 2);
+
     glBindVertexArray(0);
+    glBindRenderbuffer(0x8D41, 0);
+    glDeleteRenderbuffers(1, &rb);
     glDeleteVertexArrays(1, &vao);
     glDeleteVertexArrays(1, &vao2);
     glDeleteBuffers(1, &buf);

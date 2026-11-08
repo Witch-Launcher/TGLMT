@@ -99,7 +99,7 @@ int main() {
 
     // ---------- Test 1: read() RGBA8 phải bằng sample() ----------
     auto fillPSO = dev->makeRenderPipeline(lib.get(), "quadVS", lib.get(), "fillFS",
-                                           PixelFormat::RGBA8Unorm);
+                                           PixelFormat::RGBA8Unorm, false);
     auto src = dev->newTexture(W, H, PixelFormat::RGBA8Unorm);
     auto srcRT = dev->wrapAsTarget(src.get(), nullptr);
     if (!fillPSO || !src || !srcRT) { printf("test_texel_fetch_apple FAIL: setup1\n"); return 1; }
@@ -111,7 +111,7 @@ int main() {
         if (!enc->endAndCommit()) { printf("test_texel_fetch_apple FAIL: commit1\n"); return 1; }
     }
     auto probePSO = dev->makeRenderPipeline(lib.get(), "quadVS", lib.get(), "probeFS",
-                                            PixelFormat::RGBA8Unorm);
+                                            PixelFormat::RGBA8Unorm, false);
     auto out1 = dev->newTexture(OW, OH, PixelFormat::RGBA8Unorm);
     auto out1RT = dev->wrapAsTarget(out1.get(), nullptr);
     if (!probePSO || !out1 || !out1RT) { printf("test_texel_fetch_apple FAIL: setup2\n"); return 1; }
@@ -135,7 +135,7 @@ int main() {
 
     // ---------- Test 2: read() đúng GIÁ TRỊ trên RGBA8 ----------
     auto probeRGBA = dev->makeRenderPipeline(lib.get(), "quadVS", lib.get(), "probeRGBA",
-                                             PixelFormat::RGBA8Unorm);
+                                             PixelFormat::RGBA8Unorm, false);
     auto out2 = dev->newTexture(OW, OH, PixelFormat::RGBA8Unorm);
     auto out2RT = dev->wrapAsTarget(out2.get(), nullptr);
     if (!probeRGBA || !out2RT) { printf("test_texel_fetch_apple FAIL: setup3\n"); return 1; }
@@ -157,7 +157,7 @@ int main() {
 
     // ---------- Test 3: read() HDR RGBA16Float (2.0,1.0,0.5) ----------
     auto fillHDR = dev->makeRenderPipeline(lib.get(), "quadVS", lib.get(), "fillHDRFS",
-                                            PixelFormat::RGBA16Float);
+                                            PixelFormat::RGBA16Float, false);
     auto hdr = dev->newTexture(W, H, PixelFormat::RGBA16Float);
     auto hdrRT = dev->wrapAsTarget(hdr.get(), nullptr);
     if (!fillHDR || !hdr || !hdrRT) { printf("test_texel_fetch_apple FAIL: setup4\n"); return 1; }
@@ -171,7 +171,7 @@ int main() {
     auto out3 = dev->newTexture(OW, OH, PixelFormat::RGBA8Unorm);
     auto out3RT = dev->wrapAsTarget(out3.get(), nullptr);
     auto probeHDR = dev->makeRenderPipeline(lib.get(), "quadVS", lib.get(), "probeFS",
-                                             PixelFormat::RGBA8Unorm);
+                                             PixelFormat::RGBA8Unorm, false);
     if (!out3RT || !probeHDR) { printf("test_texel_fetch_apple FAIL: setup5\n"); return 1; }
     {
         auto enc = dev->makeRenderEncoder(out3RT.get(), probeHDR.get(), black);
@@ -195,7 +195,7 @@ int main() {
     auto dColor = dev->newTexture(W, H, PixelFormat::RGBA8Unorm);
     auto dRT = dev->wrapAsTarget(dColor.get(), depth.get());
     auto depthPSO = dev->makeDepthPipeline(lib.get(), "depthVS", lib.get(), "fillFS",
-                                            PixelFormat::RGBA8Unorm);
+                                            PixelFormat::RGBA8Unorm, false);
     auto dss = dev->makeDepthStencilState(0x0203 /* LEQUAL */, true);
     if (!depth || !dRT || !depthPSO || !dss) { printf("test_texel_fetch_apple FAIL: setup6\n"); return 1; }
     {
@@ -207,7 +207,7 @@ int main() {
         if (!enc->endAndCommit()) { printf("test_texel_fetch_apple FAIL: commit6\n"); return 1; }
     }
     auto probeDepth = dev->makeRenderPipeline(lib.get(), "quadVS", lib.get(), "probeDepth",
-                                              PixelFormat::RGBA8Unorm);
+                                              PixelFormat::RGBA8Unorm, false);
     auto out4 = dev->newTexture(OW, OH, PixelFormat::RGBA8Unorm);
     auto out4RT = dev->wrapAsTarget(out4.get(), nullptr);
     if (!probeDepth || !out4RT) { printf("test_texel_fetch_apple FAIL: setup7\n"); return 1; }
@@ -230,7 +230,7 @@ int main() {
 
     // ---------- Test 5: RGBA8Snorm render + read (colortex4 normals CR) ----------
     auto fillSnorm = dev->makeRenderPipeline(lib.get(), "quadVS", lib.get(), "fillSnormFS",
-                                              PixelFormat::RGBA8Snorm);
+                                              PixelFormat::RGBA8Snorm, false);
     auto snm = dev->newTexture(W, H, PixelFormat::RGBA8Snorm);
     auto snmRT = dev->wrapAsTarget(snm.get(), nullptr);
     if (!fillSnorm || !snm || !snmRT) { printf("test_texel_fetch_apple FAIL: setup8\n"); return 1; }
@@ -242,7 +242,7 @@ int main() {
         if (!enc->endAndCommit()) { printf("test_texel_fetch_apple FAIL: commit8\n"); return 1; }
     }
     auto probeSnorm = dev->makeRenderPipeline(lib.get(), "quadVS", lib.get(), "probeSnormFS",
-                                               PixelFormat::RGBA8Unorm);
+                                               PixelFormat::RGBA8Unorm, false);
     auto out5 = dev->newTexture(OW, OH, PixelFormat::RGBA8Unorm);
     auto out5RT = dev->wrapAsTarget(out5.get(), nullptr);
     if (!probeSnorm || !out5RT) { printf("test_texel_fetch_apple FAIL: setup9\n"); return 1; }

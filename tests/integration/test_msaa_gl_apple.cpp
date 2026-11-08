@@ -96,8 +96,28 @@ int main() {
     glCreateTextures(0x9100, 1, &tex2);
     glTextureStorage2DMultisample(tex2, 4, 0x8058, 32, 32, GL_TRUE);
     Check(glGetError() == GL_NO_ERROR, "DSA MSAA storage");
+    glBindTexture(0x9100, tex2);
+    glTexStorage2DMultisample(0x9100, 4, 0x8058, 32, 32, GL_TRUE);
+    Check(glGetError() == 0x0502, "MSAA storage immutable");
+    glTexImage2DMultisample(0x9100, 4, 0x8058, 32, 32, GL_TRUE);
+    Check(glGetError() == 0x0502, "MSAA TexImage after storage immutable");
     auto t2 = ctx.textures.find(tex2);
     Check(t2 != ctx.textures.end() && t2->second.msaaTarget != nullptr, "DSA MSAA target");
+
+    // sRGB MSAA: target/resolve phải giữ đúng format, không hard-code RGBA8.
+    GLuint stex = 0;
+    glGenTextures(1, &stex);
+    glBindTexture(0x9100, stex);
+    glTexImage2DMultisample(0x9100, 4, 0x8C43 /*SRGB8_ALPHA8*/, 32, 32, GL_TRUE);
+    Check(glGetError() == GL_NO_ERROR, "sRGB MSAA storage");
+    auto st = ctx.textures.find(stex);
+    Check(st != ctx.textures.end() && st->second.msaaTarget != nullptr, "sRGB MSAA target");
+    if (st != ctx.textures.end() && st->second.msaaTarget) {
+        auto* sct = st->second.msaaTarget->colorTexture(0);
+        Check(sct && sct->pixelFormat() == metal::PixelFormat::RGBA8Unorm_sRGB,
+              "sRGB MSAA color format đúng");
+    }
+    glDeleteTextures(1, &stex);
 
     GLuint rbo = 0, fbo2 = 0;
     glGenRenderbuffers(1, &rbo);

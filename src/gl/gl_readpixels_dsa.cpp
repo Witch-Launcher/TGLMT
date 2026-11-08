@@ -16,48 +16,128 @@ namespace tglmt::gl {
 // --- ReadPixels: đọc từ READ framebuffer (spec §18.2). GPU path khi có device thật:
 // bọc texture/default-target rồi readback (toàn bộ vùng; x/y/offset vùng M5b tinh chỉnh).
 // Chỉ RGBA/UNSIGNED_BYTE (format/type khác → INVALID_OPERATION trung thực, M5b mở rộng).
+static size_t ReadPixelsBpp(GLenum format, GLenum type) {
+    size_t comps = 0;
+    switch (format) {
+        case 0x1908: case 0x80E1: comps = 4; break; // RGBA / BGRA
+        case 0x1907: comps = 3; break;              // RGB
+        case 0x8227: comps = 2; break;              // RG
+        case 0x1903: comps = 1; break;              // RED
+        default: return 0;
+    }
+    switch (type) {
+        case 0x1401: return comps;              // UNSIGNED_BYTE
+        case 0x1403: return comps * 2;          // UNSIGNED_SHORT
+        case 0x1406: return comps * 4;          // FLOAT
+        case 0x8035: case 0x8367:               // UNSIGNED_INT_8_8_8_8(_REV)
+            return comps == 4 ? 4 : 0;
+        default: return 0;
+    }
+}
+static size_t ReadPixelsRowLen(Context& c, size_t w, size_t bpp) {
+    GLint rl = c.state.PixelStore().packRowLength;
+    size_t elems = (rl > 0) ? (size_t)rl : w;
+    GLint al = c.state.PixelStore().packAlignment;
+    size_t align = (al == 1 || al == 2 || al == 4 || al == 8) ? (size_t)al : 4;
+    return ((elems * bpp + align - 1) / align) * align;
+}
+static void StoreReadPixels(uint8_t* d, const uint8_t* s, GLenum format, GLenum type) {
+    uint8_t r = s[0], g = s[1], b = s[2], a = s[3];
+    uint8_t comps[4] = {r, g, b, a};
+    size_t n = 4;
+    switch (format) {
+        case 0x80E1: comps[0] = b; comps[2] = r; n = 4; break; // BGRA
+        case 0x1907: n = 3; break;                            // RGB
+        case 0x8227: n = 2; break;                            // RG
+        case 0x1903: n = 1; break;                            // RED
+        default: break;
+    }
+    if (type == 0x1401) {
+        for (size_t i = 0; i < n; ++i) d[i] = comps[i];
+    } else if (type == 0x1403) {
+        uint16_t* o = (uint16_t*)d;
+        for (size_t i = 0; i < n; ++i) o[i] = (uint16_t)(comps[i] * 257);
+    } else if (type == 0x1406) {
+        float* o = (float*)d;
+        for (size_t i = 0; i < n; ++i) o[i] = comps[i] / 255.0f;
+    } else if (type == 0x8035) { // UNSIGNED_INT_8_8_8_8
+        uint32_t v = 0;
+        for (size_t i = 0; i < n; ++i) v |= (uint32_t)comps[i] << (8 * i);
+        memcpy(d, &v, 4);
+    } else if (type == 0x8367) { // UNSIGNED_INT_8_8_8_8_REV
+        uint32_t v = 0;
+        for (size_t i = 0; i < n; ++i) v |= (uint32_t)comps[i] << (8 * (n - 1 - i));
+        memcpy(d, &v, 4);
+    }
+}
+static void CopyReadRegion(std::vector<uint8_t>& out, const uint8_t* full,
+                           size_t tw, size_t th, GLint x, GLint y,
+                           GLsizei w, GLsizei h) {
+    out.assign((size_t)w * (size_t)h * 4, 0);
+    for (GLsizei r = 0; r < h; ++r) {
+        GLint srcRow = y + r;
+        if (srcRow < 0 || (size_t)srcRow >= th) continue;
+        GLint sx = std::max<GLint>(x, 0);
+        GLint ex = std::min<GLint>(x + w, (GLint)tw);
+        if (ex <= sx) continue;
+        size_t copyW = (size_t)(ex - sx);
+        size_t dstX = (size_t)(sx - x);
+        memcpy(out.data() + ((size_t)r * w + dstX) * 4,
+               full + ((size_t)srcRow * tw + (size_t)sx) * 4, copyW * 4);
+    }
+}
 void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, void* p) {
     Context& c = Context::Current();
     if (w < 0 || h < 0) { c.errors.Record(0x0501); return; }
     // PACK PBO bound → p là offset (offset 0 hợp lệ). Không PBO + NULL mới lỗi.
     GLuint packBuf = c.state.BoundBuffer(0x88EB /*PIXEL_PACK_BUFFER*/);
     if (!p && !packBuf) { c.errors.Record(0x0501); return; }
-    if ((f != 0x1908 /*RGBA*/ && f != 0x80E1 /*BGRA*/) || ty != 0x1401 /*UNSIGNED_BYTE*/) {
-        c.errors.Record(0x0502); // M5b mở rộng FLOAT/DEPTH reads
-        return;
-    }
-    (void)x; (void)y;
+    size_t outBpp = ReadPixelsBpp(f, ty);
+    if (!outBpp) { c.errors.Record(0x0502); return; }
+    if (!w || !h) return;
+
+    // Đọc vùng (x,y,w,h) thành RGBA8 tight; ngoài biên giữ 0.
+    std::vector<uint8_t> rgba((size_t)w * h * 4, 0);
+    bool got = false;
     GLuint readFbo = c.state.BoundReadFBO();
     const TextureObject* tex = nullptr;
+    GLint fboLevel = 0, fboLayer = -1;
     if (readFbo != 0) {
         auto fit = c.fbos.find(readFbo);
         if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
-        GLint slot = c.ReadBufferSlot(); // READ_BUFFER (mặc định COLOR_ATTACHMENT0)
+        GLint slot = c.ReadBufferSlot();
         if (slot < 0) { c.errors.Record(0x0502); return; } // READ_BUFFER=GL_NONE
         auto cit = fit->second.colorTex.find(slot);
         if (cit == fit->second.colorTex.end()) { c.errors.Record(0x0502); return; }
         auto tit = c.textures.find(cit->second);
         if (tit == c.textures.end()) { c.errors.Record(0x0502); return; }
         tex = &tit->second;
+        auto lit = fit->second.colorLevel.find(slot);
+        if (lit != fit->second.colorLevel.end()) fboLevel = lit->second;
+        auto yit = fit->second.colorLayer.find(slot);
+        if (yit != fit->second.colorLayer.end()) fboLayer = yit->second;
     }
-    // GPU path: bọc rồi readback toàn target (x/y/w/h đầy đủ ở M5b)
     if (c.device && !c.device->isNull()) {
-        c.FlushPendingEncoder(); // IR: commit batch encoder mở trước khi đọc
+        c.FlushPendingEncoder();
         c.FlushAllBufferStaging();
         c.FlushAllTextureStaging();
-        c.CommitAndWait(); // xả draws NoWait trước khi đọc (đúng, không stale)
+        c.CommitAndWait();
         std::shared_ptr<metal::IRenderTarget> tgt;
         if (tex) {
             if (!tex->gpu) { c.errors.Record(0x0502); return; }
-            tgt = c.device->wrapAsTarget(tex->gpu.get(), nullptr);
+            std::shared_ptr<metal::ITexture> view;
+            if (tex->isCube || tex->d > 1) {
+                GLint layer = fboLayer >= 0 ? fboLayer : 0;
+                view = tex->gpu->textureLayerView((uint32_t)fboLevel, (uint32_t)layer);
+            } else if (fboLevel > 0) {
+                view = tex->gpu->textureView(tex->gpu->pixelFormat(),
+                                             (uint32_t)fboLevel, 1, 0, 1);
+            }
+            tgt = c.device->wrapAsTarget(view ? view.get() : tex->gpu.get(), nullptr);
         } else {
             tgt = c.device->defaultRenderTarget();
         }
         if (tgt) {
-            size_t need = (size_t)w * h * 4;
-            // Guard: tgt HDR (RGBA16F 8B/px từ pack format) → buffer full 4B/px
-            // sẽ bị GPU ghi TRÀN. Chỉ GPU-readback khi đúng 4B/px; còn lại rơi
-            // shadow path (log) — glReadPixels vào colortex HDR không dùng.
             size_t tgtBpp = 4;
             if (tex && tex->gpu) {
                 tgtBpp = metal::PixelFormatBytes(tex->gpu->pixelFormat());
@@ -66,78 +146,96 @@ void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, v
             if (tgtBpp != 4) {
                 c.LogDebug(0, 0, 0, 0,
                            "glReadPixels: target HDR/không 4B/px → dùng shadow");
-                tgt = nullptr;
             } else {
-            std::vector<uint8_t> full((size_t)tgt->width() * tgt->height() * 4, 0);
-            if (tgt->readback(full.data(), (size_t)tgt->width() * 4)) {
-                // Đọc vào buffer tạm tight trước, rồi mới ghi ra đích (con trỏ
-                // thật hoặc PBO offset). Memory target = GL-order (hàng 0 = đáy
-                // GL — do viewport GL-correct h<0) → đọc thẳng hàng y+r,
-                // không lật (spec §18.2 đạt được nhờ quy ước memory).
-                std::vector<uint8_t> out((size_t)w * h * 4, 0);
-                size_t tw = tgt->width(), th = tgt->height();
-                for (GLsizei r = 0; r < h; ++r) {
-                    GLsizei srcRow = y + r;
-                    if (srcRow < 0 || (size_t)srcRow >= th) continue; // hàng ngoài → giữ 0
-                    size_t copyW = std::min((size_t)w, tw > (size_t)x ? tw - (size_t)x : 0);
-                    if (copyW)
-                        memcpy(out.data() + (size_t)r * w * 4,
-                               full.data() + ((size_t)srcRow * tw + (size_t)x) * 4, copyW * 4);
+                std::vector<uint8_t> full((size_t)tgt->width() * tgt->height() * 4, 0);
+                if (tgt->readback(full.data(), (size_t)tgt->width() * 4)) {
+                    CopyReadRegion(rgba, full.data(), tgt->width(), tgt->height(),
+                                   x, y, w, h);
+                    got = true;
                 }
-                if (packBuf) {
-                    size_t pboOff = (size_t)p;
-                    std::vector<uint8_t>* pbo = c.MutablePbo(packBuf, pboOff + need);
-                    if (!pbo) { c.errors.Record(0x0502); return; }
-                    memcpy(pbo->data() + pboOff, out.data(), need);
-                    c.StageBufferRange(packBuf, pboOff, need);
-                } else {
-                    memcpy(p, out.data(), need);
-                }
-                return;
             }
-            } // tgtBpp == 4
         }
-        // GPU readback thất bại → rơi xuống shadow (ghi log, không im lặng)
-        c.LogDebug(0, 0, 0, 0, "glReadPixels: GPU readback fail, dùng shadow");
+        if (!got) c.LogDebug(0, 0, 0, 0, "glReadPixels: GPU readback fail, dùng shadow");
     }
-    // Shadow path (Null backend hoặc fallback)
-    // PBO bound → ghi vào PBO shadow + stage (spec §18: p là offset).
-    auto writeOut = [&](const uint8_t* srcBytes, size_t n) {
-        if (packBuf) {
-            size_t pboOff = (size_t)p;
-            std::vector<uint8_t>* pbo = c.MutablePbo(packBuf, pboOff + n);
-            if (!pbo) { c.errors.Record(0x0502); return; }
-            memcpy(pbo->data() + pboOff, srcBytes, n);
-            c.StageBufferRange(packBuf, pboOff, n);
+    if (!got) {
+        if (tex) {
+            const GLint lw = (GLint)((tex->w >> fboLevel) ? (tex->w >> fboLevel) : 1);
+            const GLint lh = (GLint)((tex->h >> fboLevel) ? (tex->h >> fboLevel) : 1);
+            const uint8_t* sp = nullptr;
+            std::vector<uint8_t> gpuPx;
+            const std::vector<uint8_t>* stored = nullptr;
+            if (tex->isCube && fboLayer >= 0 && fboLayer < 6) {
+                stored = &tex->faces[fboLayer];
+            } else if (tex->d > 1 && fboLayer >= 0 &&
+                       tex->pixels.size() >= (size_t)(fboLayer + 1) * lw * lh * 4) {
+                stored = &tex->pixels;
+            } else if (fboLevel > 0 && !tex->mipData.empty()) {
+                auto mit = tex->mipData.find(fboLevel);
+                if (mit != tex->mipData.end()) stored = &mit->second.pixels;
+            } else {
+                stored = &tex->pixels;
+            }
+            std::vector<uint8_t> layerOwn;
+            if (stored && tex->d > 1 && fboLayer >= 0 && stored == &tex->pixels) {
+                const size_t off = (size_t)fboLayer * lw * lh * 4;
+                if (stored->size() >= off + (size_t)lw * lh * 4) {
+                    layerOwn.assign(stored->begin() + off, stored->begin() + off + lw * lh * 4);
+                    stored = &layerOwn;
+                }
+            }
+            if (stored && stored->size() >= (size_t)lw * lh * 4) sp = stored->data();
+            if (!sp) {
+                GLint readLayer = (tex->isCube || tex->d > 1)
+                    ? (fboLayer >= 0 ? fboLayer : 0) : -1;
+                if (c.ReadTextureGPU(*tex, gpuPx, readLayer, fboLevel))
+                    sp = gpuPx.data();
+            }
+            if (sp) CopyReadRegion(rgba, sp, lw, lh, x, y, w, h);
         } else {
-            memcpy(p, srcBytes, n);
+            uint8_t c4[4] = {(uint8_t)(c.clearColor[0] * 255), (uint8_t)(c.clearColor[1] * 255),
+                             (uint8_t)(c.clearColor[2] * 255), (uint8_t)(c.clearColor[3] * 255)};
+            for (size_t i = 0; i < (size_t)w * h; ++i) memcpy(rgba.data() + i * 4, c4, 4);
         }
-    };
-    if (tex) {
-        // P1: shadow có thể rỗng (Apple) → thử đọc GPU trước; thiếu bao nhiêu
-        // thì bù 0 (đừng để rác trong pixel của game).
-        std::vector<uint8_t> gpuPx;
-        const std::vector<uint8_t>* sp = &tex->pixels;
-        if (sp->size() < (size_t)w * h * 4 && c.ReadTextureGPU(*tex, gpuPx)) sp = &gpuPx;
-        std::vector<uint8_t> need((size_t)w * h * 4, 0);
-        size_t k = std::min(sp->size(), need.size());
-        if (k) memcpy(need.data(), sp->data(), k);
-        writeOut(need.data(), need.size());
-        return;
     }
-    // default framebuffer trên Null: trả clear color
-    {
-        std::vector<uint8_t> px((size_t)w * h * 4);
-        uint8_t c4[4] = {(uint8_t)(c.clearColor[0]*255), (uint8_t)(c.clearColor[1]*255),
-                         (uint8_t)(c.clearColor[2]*255), (uint8_t)(c.clearColor[3]*255)};
-        for (GLsizei i = 0; i < w * h; ++i) memcpy(px.data() + i * 4, c4, 4);
-        writeOut(px.data(), px.size());
+
+    size_t dstRow = ReadPixelsRowLen(c, (size_t)w, outBpp);
+    size_t skip = (size_t)c.state.PixelStore().packSkipRows * dstRow +
+                  (size_t)c.state.PixelStore().packSkipPixels * outBpp;
+    size_t need = skip + (size_t)(h - 1) * dstRow + (size_t)w * outBpp;
+    uint8_t* dstBase = nullptr;
+    std::vector<uint8_t>* pboVec = nullptr;
+    size_t pboOff = 0;
+    if (packBuf) {
+        auto bit = c.buffers.find(packBuf);
+        if (bit == c.buffers.end()) { c.errors.Record(0x0502); return; }
+        pboOff = (size_t)p;
+        pboVec = c.MutablePbo(packBuf, pboOff + need);
+        if (!pboVec) { c.errors.Record(0x0502); return; }
+        dstBase = pboVec->data() + pboOff + skip;
+    } else {
+        dstBase = (uint8_t*)p + skip;
     }
+    for (GLsizei r = 0; r < h; ++r) {
+        uint8_t* drow = dstBase + (size_t)r * dstRow;
+        const uint8_t* srow = rgba.data() + (size_t)r * w * 4;
+        for (GLsizei i = 0; i < w; ++i)
+            StoreReadPixels(drow + (size_t)i * outBpp, srow + (size_t)i * 4, f, ty);
+    }
+    if (pboVec) c.StageBufferRange(packBuf, pboOff, need);
 }
 void glReadnPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, GLsizei n, void* p) {
-    if (n < 0) { Context::Current().errors.Record(0x0501); return; }
-    // robustness: KHR_robustness yêu cầu không ghi quá bufSize — ở đây RGBA8 ⇒ cần w*h*4
-    if ((size_t)n < (size_t)w * h * 4) { Context::Current().errors.Record(0x0502); return; }
+    Context& c = Context::Current();
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    if (w < 0 || h < 0) { c.errors.Record(0x0501); return; }
+    size_t bpp = ReadPixelsBpp(f, ty);
+    if (!bpp) { glReadPixels(x, y, w, h, f, ty, p); return; } // báo INVALID_OPERATION
+    // KHR_robustness: không được ghi quá bufSize; tính cả PACK_ROW_LENGTH/SKIP.
+    size_t row = ReadPixelsRowLen(c, (size_t)w, bpp);
+    size_t skip = (size_t)c.state.PixelStore().packSkipRows * row +
+                  (size_t)c.state.PixelStore().packSkipPixels * bpp;
+    size_t need = skip;
+    if (w > 0 && h > 0) need += (size_t)(h - 1) * row + (size_t)w * bpp;
+    if ((size_t)n < need) { c.errors.Record(0x0502); return; }
     glReadPixels(x, y, w, h, f, ty, p);
 }
 // --- misc state ---
@@ -153,8 +251,13 @@ void glTextureBarrier() {
 }
 void glReleaseShaderCompiler() {}
 void glShaderBinary(GLsizei n, const GLuint* s, GLenum f, const void* b, GLsizei l) {
-    (void)n;(void)s;(void)f;(void)b;(void)l;
-    Context::Current().LogDebug(0,0,0,0,"glShaderBinary: binary format lạ → dùng glShaderSource thay thế");
+    Context& c = Context::Current();
+    if (n < 0) { c.errors.Record(0x0501); return; }          // INVALID_VALUE
+    if (n && (!s || !b)) { c.errors.Record(0x0501); return; } // INVALID_VALUE
+    (void)l;
+    // Không có binary format nào (NUM_SHADER_BINARY_FORMATS = 0) → mọi format
+    // đều không được hỗ trợ; spec ARB_ES2_compatibility: INVALID_ENUM.
+    c.errors.Record(0x0500);
 }
 static GLuint PipeStage(const ProgramPipelineObject& pp, GLenum q) {
     GLbitfield bit = 0;

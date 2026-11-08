@@ -7,7 +7,9 @@
 #include "tglmt_buildinfo.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <cstdlib>
 #include <chrono>
 #include <cstdio>
 #include <memory>
@@ -80,10 +82,17 @@ void GLFWShim::ClearCurrent() {
     Context::MakeCurrent(nullptr);
 }
 
+// Trim yêu cầu từ thread khác (iOS memory warning / launcher) — Context là
+// thread_local và state GL không reentrant, nên chỉ ghi cờ rồi xử lý ở
+// SwapBuffers (render thread). Trễ tối đa 1 frame.
+static std::atomic<uint32_t> gTrimRequests{0};
+
 bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
     auto& st = State();
     if (!w || !st.renderer || st.win.get() != w) return false;
     Context::MakeCurrent(&st.renderer->context());
+    if (gTrimRequests.exchange(0, std::memory_order_relaxed))
+        st.renderer->context().TrimCachedMemory();
     // Xả draws NoWait trước present (đúng, không stale trên TBDR A11).
     // IR: flush batch encoder mở trước (nếu không present thiếu hình).
     if (st.renderer->hasRealGPU()) {
@@ -113,8 +122,18 @@ bool GLFWShim::SwapBuffers(TGLMT_Window* w, void* metalLayer) {
         static uint64_t pDraw = 0, pClr = 0, pEnd = 0, pStall = 0;
         static clock::time_point pT = clock::now();
         ++nSwap;
+        // TGLMT_MEM_EVERY=N: lấy mẫu mem mỗi N frame (mặc định 600). Khi điều
+        // tra Jetsam, đặt 60 để có số liệu sát thời điểm chết.
+        static const uint64_t kMemEvery = [] {
+            const char* e = std::getenv("TGLMT_MEM_EVERY");
+            long v = e ? std::strtol(e, nullptr, 10) : 0;
+            return (v >= 1 && v <= 100000) ? (uint64_t)v : 600ull;
+        }();
         bool first12 = nSwap <= 12;
-        if (first12 || nSwap % 600 == 0) {
+        // Giai đoạn khởi động (world load + mod như Voxy) là lúc RAM tăng mạnh
+        // nhất → lấy mẫu dày (60 frame) tới frame 1800 rồi mới thưa như cũ.
+        const uint64_t every = (nSwap < 1800) ? 60ull : kMemEvery;
+        if (first12 || nSwap % every == 0) {
             auto now = clock::now();
             long dt = (long)std::chrono::duration_cast<std::chrono::milliseconds>(now - pT).count();
             auto& a = st.renderer->context().appleStats;
@@ -403,6 +422,14 @@ void TGLMT_ResizeWindow(TGLMT_Window* w, uint32_t width, uint32_t height) {
     GLFWShim::Instance().Resize(w, width, height);
 }
 const char* TGLMT_BackendName(void) { return GLFWShim::Instance().BackendName(); }
+// Launcher (WitchMemoryPressure.m) dlsym khi iOS memory warning: trả lại phần
+// TGLMT giữ THÊM mà đọc lại được từ GPU (mip shadow, wrap cache, pool buffer).
+// Không đụng shadow base/face (có thể là bản duy nhất). Trả số byte đã giải phóng.
+size_t TGLMT_TrimMemory(int level) {
+    (void)level;
+    gTrimRequests.fetch_add(1, std::memory_order_relaxed);
+    return 0; // áp dụng ở SwapBuffers kế tiếp (render thread)
+}
 } // extern "C"
 
 } // namespace tglmt

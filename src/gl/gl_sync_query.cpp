@@ -72,6 +72,10 @@ static bool PipeStatOf(const Context::PipeStats& s, GLenum t, GLuint64* out) {
         case 0x82F3: *out = s.gsPrimsWritten; return true;      // GEOM_SHADER_PRIMITIVES_EMITTED_ARB
         case 0x82F4: *out = s.fsInvocations; return true;       // FRAGMENT_SHADER_INVOCATIONS_ARB
         case 0x82F5: *out = s.csInvocations; return true;       // COMPUTE_SHADER_INVOCATIONS_ARB
+        case 0x8C87: *out = s.primsSubmitted; return true;       // PRIMITIVES_GENERATED
+        case 0x8C88: *out = s.xfbPrimsWritten; return true;      // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN
+        case 0x82EC: *out = s.xfbOverflow; return true;          // TRANSFORM_FEEDBACK_OVERFLOW
+        case 0x82ED: *out = s.xfbStreamOverflow[0]; return true; // non-indexed = stream 0
         // TESS_CONTROL_SHADER_PATCHES / TESS_EVALUATION_SHADER_INVOCATIONS /
         // CLIPPING_* : chưa có counter thật (P6 tess) → 0, không quảng cáo ext.
         case 0x82F1: case 0x82F2: case 0x82F6: case 0x82F7:
@@ -141,13 +145,28 @@ void glEndQuery(GLenum t) {
         } else {
             q.ready = true;
             GLuint64 v = 0;
-            if (PipeStatOf(c.pipeStats, t, &v)) q.result = v - q.pipeSnapshot;
+            if (t == 0x82ED /*TRANSFORM_FEEDBACK_STREAM_OVERFLOW*/ && q.stream < 4)
+                q.result = c.pipeStats.xfbStreamOverflow[q.stream] - q.pipeSnapshot;
+            else if (PipeStatOf(c.pipeStats, t, &v)) q.result = v - q.pipeSnapshot;
             else q.result = 0;
         }
     }
     if (!found) c.errors.Record(0x0502); // no active query for target
 }
-void glBeginQueryIndexed(GLenum t, GLuint idx, GLuint id) { (void)idx; glBeginQuery(t, id); }
+void glBeginQueryIndexed(GLenum t, GLuint idx, GLuint id) {
+    if (t == 0x82ED /*TRANSFORM_FEEDBACK_STREAM_OVERFLOW*/) {
+        Context& c = Context::Current();
+        if (idx >= 4) { c.errors.Record(0x0501); return; }
+        glBeginQuery(t, id);
+        auto it = c.queries.find(id);
+        if (it != c.queries.end()) {
+            it->second.stream = idx;
+            it->second.pipeSnapshot = c.pipeStats.xfbStreamOverflow[idx];
+        }
+        return;
+    }
+    glBeginQuery(t, id);
+}
 void glEndQueryIndexed(GLenum t, GLuint idx) { (void)idx; glEndQuery(t); }
 void glQueryCounter(GLuint id, GLenum t) {
     Context& c = Context::Current();
@@ -213,7 +232,8 @@ static GLint QueryCounterBits(GLenum t) {
     if (t == 0x88BF || t == 0x8E28 || t == 0x8C87 || t == 0x8C88) return 64;
     if (t == 0x82EE || t == 0x82EF || t == 0x82F0 || t == 0x82F1 || t == 0x82F2 ||
         t == 0x82F3 || t == 0x82F4 || t == 0x82F5 || t == 0x82F6 || t == 0x82F7 ||
-        t == 0x887F || t == 0x82EC || t == 0x82ED) return 64;
+        t == 0x887F) return 64;
+    if (t == 0x82EC || t == 0x82ED) return 1;
     return 0;
 }
 static void QueryBufferWrite(GLuint id, GLuint buffer, GLenum p, GLintptr off, bool is64) {

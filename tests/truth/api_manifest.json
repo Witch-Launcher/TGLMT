@@ -1,19 +1,19 @@
 {
   "schema": 1,
   "generated_by": "tools/truth_manifest.py",
-  "git": "92d98f4+dirty",
+  "git": "d546de4+dirty",
   "library": "build/libtglmt.dylib",
   "summary": {
     "core_functions": 698,
     "core_missing_symbol": 0,
-    "core_without_test_refs": 409,
+    "core_without_test_refs": 383,
     "core_noop_or_constant": 7,
     "core_noop_static_gaps": 0,
-    "extension_rows": 317,
-    "advertised_extensions": 128,
+    "extension_rows": 320,
+    "advertised_extensions": 136,
     "advertised_missing_symbols": 0,
     "advertised_noop_or_constant": 0,
-    "advertised_without_test_refs": 79
+    "advertised_without_test_refs": 80
   },
   "core": [
     {
@@ -54,6 +54,7 @@
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
@@ -79,8 +80,12 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -102,19 +107,36 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
@@ -161,11 +183,14 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_conditional_render.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_framebuffer_state.cpp",
         "tests/unit/test_p0_honesty.cpp",
-        "tests/unit/test_query_objects.cpp"
+        "tests/unit/test_query_objects.cpp",
+        "tests/unit/test_restart_xfb.cpp"
       ]
     },
     {
@@ -177,7 +202,9 @@
       "impl_file": "src/gl/gl_sync_query.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_xfb_overflow_apple.cpp"
+      ]
     },
     {
       "name": "glBeginTransformFeedback",
@@ -189,6 +216,10 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
     },
@@ -240,9 +271,13 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -263,24 +298,34 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_core_registry.cpp",
         "tests/unit/test_elements_offset0.cpp",
         "tests/unit/test_enum_behavior.cpp",
@@ -317,6 +362,10 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_enum_exts.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp"
@@ -332,7 +381,9 @@
       "impl_file": "src/gl/gl_buffer.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_xfb_overflow_apple.cpp"
+      ]
     },
     {
       "name": "glBindBuffersBase",
@@ -398,8 +449,10 @@
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
         "tests/integration/test_mc_bake_depth_apple.cpp",
@@ -413,28 +466,40 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_draw_buffers2_p8.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mrt_apple.cpp",
         "tests/unit/test_p0_honesty.cpp",
         "tests/unit/test_p10_sodium_iris.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
+        "tests/unit/test_readpixels_region.cpp",
         "tests/unit/test_renderbuffer.cpp",
         "tests/unit/test_restart_xfb.cpp",
-        "tests/unit/test_ssbo_graphics_apple.cpp"
+        "tests/unit/test_ssbo_graphics_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -447,6 +512,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp"
       ]
     },
@@ -486,6 +552,8 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_msaa_gl_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/unit/test_ext_aliases.cpp",
         "tests/unit/test_renderbuffer.cpp"
       ]
     },
@@ -527,7 +595,9 @@
       "tests": [
         "tests/integration/test_bake_repro_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
@@ -542,38 +612,62 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_clear_tex_3d.cpp",
+        "tests/unit/test_clear_tex_cube.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_image_3d.cpp",
+        "tests/unit/test_copy_image_cube.cpp",
+        "tests/unit/test_copy_image_cube_apple.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_enum_exts.cpp",
         "tests/unit/test_ext_state_uniform64.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
         "tests/unit/test_formats.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_get_texture_cube.cpp",
+        "tests/unit/test_get_texture_formats.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mc_terrain_ubo_real.cpp",
         "tests/unit/test_mrt_apple.cpp",
         "tests/unit/test_p0_honesty.cpp",
         "tests/unit/test_p10_sodium_iris.cpp",
         "tests/unit/test_pbo_unpack.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
         "tests/unit/test_readpixels_packed.cpp",
+        "tests/unit/test_readpixels_region.cpp",
         "tests/unit/test_restart_xfb.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp",
+        "tests/unit/test_texture_3d_types.cpp",
         "tests/unit/test_texture_per_target_bind.cpp",
-        "tests/unit/test_texture_sampler.cpp"
+        "tests/unit/test_texture_sampler.cpp",
+        "tests/unit/test_texture_storage_3d_mip.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp",
+        "tests/unit/test_texture_target_validation.cpp"
       ]
     },
     {
@@ -613,6 +707,10 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
     },
@@ -628,9 +726,13 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -651,19 +753,35 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_elements_offset0.cpp",
@@ -691,6 +809,7 @@
         "tests/integration/test_mc_binding_apple.cpp",
         "tests/integration/test_mc_textured_apple.cpp",
         "tests/integration/test_mc_world_entry_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_enum_behavior.cpp"
       ]
     },
@@ -823,7 +942,8 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
-        "tests/integration/test_mc_blit_apple.cpp"
+        "tests/integration/test_mc_blit_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp"
       ]
     },
     {
@@ -849,9 +969,13 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -872,24 +996,34 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_core_registry.cpp",
         "tests/unit/test_elements_offset0.cpp",
         "tests/unit/test_enum_behavior.cpp",
@@ -944,20 +1078,32 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_draw_buffers2_p8.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
         "tests/unit/test_renderbuffer.cpp",
-        "tests/unit/test_restart_xfb.cpp"
+        "tests/unit/test_restart_xfb.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -996,8 +1142,12 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -1018,24 +1168,42 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mrt_apple.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
         "tests/unit/test_renderer.cpp",
-        "tests/unit/test_ssbo_graphics_apple.cpp"
+        "tests/unit/test_ssbo_graphics_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -1047,7 +1215,9 @@
       "impl_file": "src/gl/gl_buffer.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/unit/test_core41_contract.cpp"
+      ]
     },
     {
       "name": "glClearBufferSubData",
@@ -1058,7 +1228,9 @@
       "impl_file": "src/gl/gl_buffer.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/unit/test_core41_contract.cpp"
+      ]
     },
     {
       "name": "glClearBufferfi",
@@ -1117,8 +1289,12 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -1139,26 +1315,44 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mrt_apple.cpp",
         "tests/unit/test_pbo_unpack.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
         "tests/unit/test_readpixels_packed.cpp",
         "tests/unit/test_renderer.cpp",
-        "tests/unit/test_ssbo_graphics_apple.cpp"
+        "tests/unit/test_ssbo_graphics_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -1172,8 +1366,11 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_mc_bake_depth_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp"
       ]
@@ -1285,6 +1482,9 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_clear_tex_3d.cpp",
+        "tests/unit/test_clear_tex_cube.cpp",
         "tests/unit/test_enum_behavior.cpp"
       ]
     },
@@ -1298,6 +1498,9 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_clear_tex_3d.cpp",
+        "tests/unit/test_clear_tex_cube.cpp",
         "tests/unit/test_enum_behavior.cpp"
       ]
     },
@@ -1417,8 +1620,12 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -1440,23 +1647,41 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_frag_bind.cpp",
         "tests/unit/test_mc_terrain_ubo_real.cpp",
@@ -1619,6 +1844,9 @@
         "tests/integration/test_mip_storage_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_copy_image_3d.cpp",
+        "tests/unit/test_copy_image_cube.cpp",
+        "tests/unit/test_copy_image_cube_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_enum_behavior.cpp"
       ]
@@ -1683,7 +1911,8 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
-        "tests/integration/test_mip_storage_apple.cpp"
+        "tests/integration/test_mip_storage_apple.cpp",
+        "tests/unit/test_core41_contract.cpp"
       ]
     },
     {
@@ -1696,7 +1925,8 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
-        "tests/unit/test_copy_3d.cpp"
+        "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp"
       ]
     },
     {
@@ -1733,7 +1963,8 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
-        "tests/unit/test_copy_3d.cpp"
+        "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp"
       ]
     },
     {
@@ -1778,8 +2009,12 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -1801,19 +2036,36 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
@@ -1897,8 +2149,12 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -1920,23 +2176,41 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_frag_bind.cpp",
         "tests/unit/test_mc_terrain_ubo_real.cpp",
@@ -1978,6 +2252,7 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
         "tests/unit/test_draw_buffers2_p8.cpp",
@@ -2019,7 +2294,8 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_bake_repro_apple.cpp",
-        "tests/integration/test_cull_orientation_apple.cpp"
+        "tests/integration/test_cull_orientation_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp"
       ]
     },
     {
@@ -2071,9 +2347,14 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_core_registry.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_enum_exts.cpp",
@@ -2095,22 +2376,31 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_conservative_depth_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_draw_buffers2_p8.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_p0_honesty.cpp",
         "tests/unit/test_p10_sodium_iris.cpp",
-        "tests/unit/test_renderbuffer.cpp"
+        "tests/unit/test_readpixels_region.cpp",
+        "tests/unit/test_renderbuffer.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -2123,12 +2413,16 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_conservative_depth_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
@@ -2169,11 +2463,14 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_conditional_render.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_ext_aliases.cpp",
         "tests/unit/test_p0_honesty.cpp",
-        "tests/unit/test_query_objects.cpp"
+        "tests/unit/test_query_objects.cpp",
+        "tests/unit/test_restart_xfb.cpp"
       ]
     },
     {
@@ -2187,6 +2484,7 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_msaa_gl_apple.cpp",
+        "tests/unit/test_ext_aliases.cpp",
         "tests/unit/test_renderbuffer.cpp"
       ]
     },
@@ -2214,8 +2512,13 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_p0_honesty.cpp",
         "tests/unit/test_pipeline_sso.cpp",
         "tests/unit/test_subroutine_api.cpp",
@@ -2245,28 +2548,42 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_conservative_depth_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
+        "tests/unit/test_clear_tex_3d.cpp",
+        "tests/unit/test_clear_tex_cube.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_image_3d.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_draw_buffers2_p8.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_enum_exts.cpp",
         "tests/unit/test_ext_state_uniform64.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_modern_ext_objects.cpp",
         "tests/unit/test_p0_honesty.cpp",
         "tests/unit/test_p10_sodium_iris.cpp",
-        "tests/unit/test_texture_per_target_bind.cpp"
+        "tests/unit/test_readpixels_region.cpp",
+        "tests/unit/test_texture_per_target_bind.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -2290,8 +2607,11 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_enum_exts.cpp",
@@ -2311,10 +2631,13 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
         "tests/integration/test_mc_bake_depth_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp"
       ]
     },
@@ -2400,18 +2723,28 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_mc_blit_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_mrt_apple.cpp",
@@ -2439,7 +2772,9 @@
       "impl_file": "src/gl/gl_vertex.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_tess_vs_capture_apple.cpp"
+      ]
     },
     {
       "name": "glDisablei",
@@ -2495,8 +2830,11 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -2512,17 +2850,32 @@
         "tests/integration/test_mc_validate_apple.cpp",
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_conditional_render.cpp",
         "tests/unit/test_copy_tex_image.cpp",
@@ -2553,7 +2906,11 @@
       "impl_file": "src/gl/gl_draw.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp"
+      ]
     },
     {
       "name": "glDrawArraysInstancedBaseInstance",
@@ -2564,7 +2921,9 @@
       "impl_file": "src/gl/gl_draw.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_base_instance_apple.cpp"
+      ]
     },
     {
       "name": "glDrawBuffer",
@@ -2588,10 +2947,19 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_frag_bind_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mrt_apple.cpp",
-        "tests/unit/test_ssbo_graphics_apple.cpp"
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
+        "tests/unit/test_ssbo_graphics_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -2615,6 +2983,7 @@
         "tests/integration/test_mc_validate_apple.cpp",
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/unit/test_elements_offset0.cpp",
         "tests/unit/test_enum_exts.cpp",
@@ -2632,6 +3001,8 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_sodium_vertex_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_enum_behavior.cpp"
       ]
     },
@@ -2666,7 +3037,9 @@
       "impl_file": "src/gl/gl_draw.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_base_instance_apple.cpp"
+      ]
     },
     {
       "name": "glDrawElementsInstancedBaseVertex",
@@ -2688,7 +3061,9 @@
       "impl_file": "src/gl/gl_draw.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_base_instance_apple.cpp"
+      ]
     },
     {
       "name": "glDrawRangeElements",
@@ -2722,6 +3097,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
     },
@@ -2770,6 +3146,7 @@
       "tests": [
         "tests/integration/test_bake_repro_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
@@ -2779,9 +3156,16 @@
         "tests/integration/test_mc_textured_apple.cpp",
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_framebuffer_state.cpp",
@@ -2813,9 +3197,13 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -2836,19 +3224,28 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_elements_offset0.cpp",
@@ -2894,11 +3291,14 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_conditional_render.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_framebuffer_state.cpp",
         "tests/unit/test_p0_honesty.cpp",
-        "tests/unit/test_query_objects.cpp"
+        "tests/unit/test_query_objects.cpp",
+        "tests/unit/test_restart_xfb.cpp"
       ]
     },
     {
@@ -2910,7 +3310,9 @@
       "impl_file": "src/gl/gl_sync_query.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_xfb_overflow_apple.cpp"
+      ]
     },
     {
       "name": "glEndTransformFeedback",
@@ -2922,6 +3324,10 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
     },
@@ -2951,6 +3357,12 @@
       "tests": [
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_compute_query_indirect.cpp"
       ]
     },
@@ -2997,6 +3409,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/unit/test_p10_sodium_iris.cpp"
       ]
     },
@@ -3011,6 +3424,7 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_msaa_gl_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
         "tests/unit/test_renderbuffer.cpp"
       ]
     },
@@ -3023,7 +3437,9 @@
       "impl_file": "src/gl/gl_framebuffer.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/unit/test_fbo_completeness.cpp"
+      ]
     },
     {
       "name": "glFramebufferTexture1D",
@@ -3048,6 +3464,7 @@
       "tests": [
         "tests/integration/test_bake_repro_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
@@ -3062,20 +3479,30 @@
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mrt_apple.cpp",
         "tests/unit/test_p0_honesty.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
+        "tests/unit/test_readpixels_region.cpp",
         "tests/unit/test_restart_xfb.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp"
       ]
@@ -3101,7 +3528,13 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
-        "tests/integration/test_texture_array_apple.cpp"
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
+        "tests/integration/test_texture_array_apple.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -3114,7 +3547,8 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
-        "tests/integration/test_cull_orientation_apple.cpp"
+        "tests/integration/test_cull_orientation_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp"
       ]
     },
     {
@@ -3129,9 +3563,13 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -3152,24 +3590,34 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_core_registry.cpp",
         "tests/unit/test_elements_offset0.cpp",
         "tests/unit/test_enum_behavior.cpp",
@@ -3199,7 +3647,9 @@
       "tests": [
         "tests/integration/test_bake_repro_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
         "tests/integration/test_mc_bake_depth_apple.cpp",
@@ -3210,26 +3660,38 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mrt_apple.cpp",
         "tests/unit/test_p0_honesty.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
+        "tests/unit/test_readpixels_region.cpp",
         "tests/unit/test_renderbuffer.cpp",
         "tests/unit/test_restart_xfb.cpp",
-        "tests/unit/test_ssbo_graphics_apple.cpp"
+        "tests/unit/test_ssbo_graphics_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -3256,12 +3718,15 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_conditional_render.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_ext_aliases.cpp",
         "tests/unit/test_framebuffer_state.cpp",
         "tests/unit/test_p0_honesty.cpp",
-        "tests/unit/test_query_objects.cpp"
+        "tests/unit/test_query_objects.cpp",
+        "tests/unit/test_restart_xfb.cpp"
       ]
     },
     {
@@ -3275,6 +3740,8 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_msaa_gl_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/unit/test_ext_aliases.cpp",
         "tests/unit/test_renderbuffer.cpp"
       ]
     },
@@ -3306,7 +3773,9 @@
       "tests": [
         "tests/integration/test_bake_repro_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
@@ -3321,27 +3790,44 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_clear_tex_3d.cpp",
+        "tests/unit/test_clear_tex_cube.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_image_3d.cpp",
+        "tests/unit/test_copy_image_cube.cpp",
+        "tests/unit/test_copy_image_cube_apple.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_enum_exts.cpp",
         "tests/unit/test_ext_state_uniform64.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
         "tests/unit/test_formats.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_get_texture_cube.cpp",
+        "tests/unit/test_get_texture_formats.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mc_terrain_ubo_real.cpp",
         "tests/unit/test_modern_ext_objects.cpp",
@@ -3349,11 +3835,18 @@
         "tests/unit/test_p0_honesty.cpp",
         "tests/unit/test_p10_sodium_iris.cpp",
         "tests/unit/test_pbo_unpack.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
         "tests/unit/test_readpixels_packed.cpp",
+        "tests/unit/test_readpixels_region.cpp",
         "tests/unit/test_restart_xfb.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp",
+        "tests/unit/test_texture_3d_types.cpp",
         "tests/unit/test_texture_per_target_bind.cpp",
-        "tests/unit/test_texture_sampler.cpp"
+        "tests/unit/test_texture_sampler.cpp",
+        "tests/unit/test_texture_storage_3d_mip.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp",
+        "tests/unit/test_texture_target_validation.cpp"
       ]
     },
     {
@@ -3381,9 +3874,13 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -3404,19 +3901,35 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_elements_offset0.cpp",
@@ -3597,6 +4110,7 @@
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_m5b_gl_draw.cpp",
         "tests/integration/test_mc_gui_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_shader_program.cpp"
       ]
     },
@@ -3670,6 +4184,11 @@
       "tests": [
         "tests/integration/test_mc_gettex_apple.cpp",
         "tests/integration/test_mc_namedbuffer_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_core_registry.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
@@ -3759,9 +4278,13 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -3782,25 +4305,50 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
+        "tests/unit/test_clear_tex_3d.cpp",
+        "tests/unit/test_clear_tex_cube.cpp",
         "tests/unit/test_compressed_contract.cpp",
+        "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
         "tests/unit/test_conditional_render.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_image_3d.cpp",
+        "tests/unit/test_copy_image_cube.cpp",
+        "tests/unit/test_copy_image_cube_apple.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_core_registry.cpp",
         "tests/unit/test_debug_p4.cpp",
         "tests/unit/test_draw_buffers2_p8.cpp",
@@ -3810,6 +4358,10 @@
         "tests/unit/test_ext_state_uniform64.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
         "tests/unit/test_frag_bind.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_get_texture_cube.cpp",
+        "tests/unit/test_get_texture_formats.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mc_terrain_ubo_real.cpp",
         "tests/unit/test_modern_ext_objects.cpp",
@@ -3819,7 +4371,10 @@
         "tests/unit/test_pbo_unpack.cpp",
         "tests/unit/test_pipeline_sso.cpp",
         "tests/unit/test_query_objects.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
         "tests/unit/test_readpixels_packed.cpp",
+        "tests/unit/test_readpixels_region.cpp",
         "tests/unit/test_renderbuffer.cpp",
         "tests/unit/test_renderer.cpp",
         "tests/unit/test_restart_xfb.cpp",
@@ -3828,8 +4383,12 @@
         "tests/unit/test_shader_precision.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp",
         "tests/unit/test_subroutine_api.cpp",
+        "tests/unit/test_texture_3d_types.cpp",
         "tests/unit/test_texture_per_target_bind.cpp",
         "tests/unit/test_texture_sampler.cpp",
+        "tests/unit/test_texture_storage_3d_mip.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp",
+        "tests/unit/test_texture_target_validation.cpp",
         "tests/unit/test_vertex_packed.cpp"
       ]
     },
@@ -3854,6 +4413,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_tess_quad_apple.cpp",
         "tests/unit/test_p0_honesty.cpp",
         "tests/unit/test_sample_state.cpp"
       ]
@@ -3908,6 +4468,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/unit/test_p10_sodium_iris.cpp"
       ]
     },
@@ -3970,7 +4531,11 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_conservative_depth_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
         "tests/unit/test_compressed_contract.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_enum_exts.cpp",
         "tests/unit/test_ext_aliases.cpp",
@@ -4017,7 +4582,9 @@
       "impl_file": "src/gl/gl_get_extra.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_sample_locations_apple.cpp"
+      ]
     },
     {
       "name": "glGetNamedBufferParameteri64v",
@@ -4152,10 +4719,27 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
         "tests/integration/test_mc_corpus.cpp",
         "tests/integration/test_mc_gui_apple.cpp",
         "tests/integration/test_mc_textured_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp"
@@ -4291,8 +4875,12 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -4312,16 +4900,33 @@
         "tests/integration/test_mc_validate_apple.cpp",
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
@@ -4454,8 +5059,11 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_conditional_render.cpp",
-        "tests/unit/test_query_objects.cpp"
+        "tests/unit/test_query_objects.cpp",
+        "tests/unit/test_restart_xfb.cpp"
       ]
     },
     {
@@ -4540,10 +5148,26 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
         "tests/integration/test_mc_corpus.cpp",
         "tests/integration/test_mc_gui_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
@@ -4586,6 +5210,9 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_m5b_gl_draw.cpp",
         "tests/integration/test_mc_blit_apple.cpp",
         "tests/integration/test_mc_corpus.cpp",
@@ -4597,8 +5224,22 @@
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
@@ -4635,6 +5276,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/unit/test_core_registry.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_enum_exts.cpp",
@@ -4695,9 +5337,15 @@
       "tests": [
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_copy_1d.cpp",
+        "tests/unit/test_copy_image_cube_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_get_texture_cube.cpp",
+        "tests/unit/test_get_texture_formats.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_readpixels_packed.cpp"
       ]
     },
@@ -4722,11 +5370,14 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_ext_state_uniform64.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
-        "tests/unit/test_p10_sodium_iris.cpp"
+        "tests/unit/test_get_texture_cube.cpp",
+        "tests/unit/test_p10_sodium_iris.cpp",
+        "tests/unit/test_texture_target_validation.cpp"
       ]
     },
     {
@@ -4772,7 +5423,8 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
-        "tests/unit/test_enum_behavior.cpp"
+        "tests/unit/test_enum_behavior.cpp",
+        "tests/unit/test_get_texture_cube.cpp"
       ]
     },
     {
@@ -4784,7 +5436,13 @@
       "impl_file": "src/gl/gl_get_extra.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
+      ]
     },
     {
       "name": "glGetTextureLevelParameterfv",
@@ -4869,6 +5527,7 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/unit/test_enum_behavior.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
         "tests/unit/test_pbo_unpack.cpp"
       ]
     },
@@ -4882,6 +5541,8 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
     },
@@ -4917,6 +5578,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
     },
@@ -4970,9 +5632,12 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_copy_tex_image.cpp",
@@ -5312,7 +5977,11 @@
       "impl_file": "src/gl/gl_get_extra.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_get_texture_cube.cpp",
+        "tests/unit/test_get_texture_formats.cpp"
+      ]
     },
     {
       "name": "glGetnUniformdv",
@@ -5651,8 +6320,12 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -5674,19 +6347,36 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
@@ -5798,7 +6488,9 @@
       "impl_file": "src/gl/gl_compute.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/unit/test_compute_dispatch.cpp"
+      ]
     },
     {
       "name": "glMinSampleShading",
@@ -6190,7 +6882,11 @@
       "impl_file": "src/gl/gl_draw.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp"
+      ]
     },
     {
       "name": "glPatchParameteri",
@@ -6201,7 +6897,14 @@
       "impl_file": "src/gl/gl_draw.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp"
+      ]
     },
     {
       "name": "glPauseTransformFeedback",
@@ -6213,6 +6916,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
     },
@@ -6239,9 +6943,12 @@
       "tests": [
         "tests/integration/test_mc_texupload_apple.cpp",
         "tests/unit/test_formats.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_get_texture_formats.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mc_terrain_ubo_real.cpp",
         "tests/unit/test_readpixels_packed.cpp",
+        "tests/unit/test_readpixels_region.cpp",
         "tests/unit/test_restart_xfb.cpp",
         "tests/unit/test_texture_per_target_bind.cpp",
         "tests/unit/test_texture_sampler.cpp"
@@ -6325,6 +7032,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_polygon_offset_apple.cpp",
         "tests/unit/test_p0_honesty.cpp"
       ]
     },
@@ -6994,9 +7702,12 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_frag_bind_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
-        "tests/unit/test_mrt_apple.cpp"
+        "tests/unit/test_mrt_apple.cpp",
+        "tests/unit/test_readpixels_region.cpp"
       ]
     },
     {
@@ -7011,8 +7722,12 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -7031,15 +7746,28 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
@@ -7047,8 +7775,12 @@
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mrt_apple.cpp",
         "tests/unit/test_pbo_unpack.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
         "tests/unit/test_readpixels_packed.cpp",
-        "tests/unit/test_ssbo_graphics_apple.cpp"
+        "tests/unit/test_readpixels_region.cpp",
+        "tests/unit/test_ssbo_graphics_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -7062,7 +7794,8 @@
       "noop_triage": null,
       "tests": [
         "tests/unit/test_enum_behavior.cpp",
-        "tests/unit/test_readpixels_packed.cpp"
+        "tests/unit/test_readpixels_packed.cpp",
+        "tests/unit/test_readpixels_region.cpp"
       ]
     },
     {
@@ -7086,6 +7819,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_polygon_offset_apple.cpp",
         "tests/unit/test_renderbuffer.cpp"
       ]
     },
@@ -7113,6 +7847,7 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
     },
@@ -7292,7 +8027,9 @@
       "impl_file": "src/gl/gl_readpixels_dsa.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/unit/test_core41_contract.cpp"
+      ]
     },
     {
       "name": "glShaderSource",
@@ -7306,8 +8043,12 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -7329,23 +8070,41 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_enum_behavior.cpp",
         "tests/unit/test_frag_bind.cpp",
         "tests/unit/test_mc_terrain_ubo_real.cpp",
@@ -7607,6 +8366,7 @@
       "tests": [
         "tests/integration/test_bake_repro_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -7625,30 +8385,45 @@
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_clear_tex_cube.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_image_cube.cpp",
+        "tests/unit/test_copy_image_cube_apple.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_enum_behavior.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
         "tests/unit/test_formats.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_cube.cpp",
+        "tests/unit/test_get_texture_formats.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mc_terrain_ubo_real.cpp",
         "tests/unit/test_mrt_apple.cpp",
         "tests/unit/test_p10_sodium_iris.cpp",
         "tests/unit/test_pbo_unpack.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
         "tests/unit/test_readpixels_packed.cpp",
+        "tests/unit/test_readpixels_region.cpp",
         "tests/unit/test_restart_xfb.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp",
         "tests/unit/test_texture_per_target_bind.cpp",
-        "tests/unit/test_texture_sampler.cpp"
+        "tests/unit/test_texture_sampler.cpp",
+        "tests/unit/test_texture_target_validation.cpp"
       ]
     },
     {
@@ -7663,7 +8438,10 @@
       "tests": [
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
-        "tests/integration/test_sample_mask_apple.cpp"
+        "tests/integration/test_sample_locations_apple.cpp",
+        "tests/integration/test_sample_mask_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp"
       ]
     },
     {
@@ -7676,9 +8454,20 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
-        "tests/unit/test_copy_3d.cpp"
+        "tests/unit/test_clear_tex_3d.cpp",
+        "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_image_3d.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
+        "tests/unit/test_texture_3d_types.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp",
+        "tests/unit/test_texture_target_validation.cpp"
       ]
     },
     {
@@ -7690,7 +8479,10 @@
       "impl_file": "src/gl/gl_texture.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_msaa_array_apple.cpp",
+        "tests/unit/test_texture_target_validation.cpp"
+      ]
     },
     {
       "name": "glTexParameterIiv",
@@ -7755,6 +8547,7 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_enum_behavior.cpp",
@@ -7795,7 +8588,9 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_enum_exts.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_p0_honesty.cpp"
       ]
     },
@@ -7808,7 +8603,9 @@
       "impl_file": "src/gl/gl_texture.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_msaa_gl_apple.cpp"
+      ]
     },
     {
       "name": "glTexStorage3D",
@@ -7820,7 +8617,10 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
-        "tests/integration/test_texture_array_apple.cpp"
+        "tests/integration/test_texture_array_apple.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -7832,7 +8632,10 @@
       "impl_file": "src/gl/gl_texture.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_msaa_array_apple.cpp",
+        "tests/unit/test_texture_target_validation.cpp"
+      ]
     },
     {
       "name": "glTexSubImage1D",
@@ -7858,6 +8661,7 @@
         "tests/integration/test_ir_full_apple.cpp",
         "tests/integration/test_mc_texupload_apple.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_terrain_ubo_real.cpp",
         "tests/unit/test_pbo_unpack.cpp",
         "tests/unit/test_texture_per_target_bind.cpp"
@@ -7874,7 +8678,10 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_texture_array_apple.cpp",
-        "tests/unit/test_3d_texture_apple.cpp"
+        "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_texture_3d_types.cpp",
+        "tests/unit/test_texture_storage_3d_mip.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -8041,7 +8848,9 @@
       "impl_file": "src/gl/gl_texture.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_msaa_array_apple.cpp"
+      ]
     },
     {
       "name": "glTextureSubImage1D",
@@ -8126,6 +8935,10 @@
       "impl_kind": "real",
       "noop_triage": null,
       "tests": [
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ]
     },
@@ -8162,7 +8975,10 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_m5b_gl_draw.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_copy_tex_image.cpp",
@@ -8198,6 +9014,7 @@
         "tests/integration/test_mip_storage_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp"
@@ -8449,6 +9266,8 @@
       "noop_triage": null,
       "tests": [
         "tests/integration/test_perf_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
         "tests/unit/test_mrt_apple.cpp",
         "tests/unit/test_shader_program.cpp"
@@ -8788,8 +9607,12 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -8810,18 +9633,35 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_compute_query_indirect.cpp",
@@ -9003,7 +9843,9 @@
       "impl_file": "src/gl/gl_vertex.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_tess_vs_capture_apple.cpp"
+      ]
     },
     {
       "name": "glVertexAttrib1fv",
@@ -9069,7 +9911,9 @@
       "impl_file": "src/gl/gl_vertex.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_tess_vs_capture_apple.cpp"
+      ]
     },
     {
       "name": "glVertexAttrib2fv",
@@ -9380,7 +10224,8 @@
       "tests": [
         "tests/integration/test_mc_binding_apple.cpp",
         "tests/integration/test_mc_textured_apple.cpp",
-        "tests/integration/test_mc_world_entry_apple.cpp"
+        "tests/integration/test_mc_world_entry_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp"
       ]
     },
     {
@@ -9392,7 +10237,9 @@
       "impl_file": "src/gl/gl_vertex.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_tess_vs_capture_apple.cpp"
+      ]
     },
     {
       "name": "glVertexAttribFormat",
@@ -9872,9 +10719,13 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -9893,19 +10744,28 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_elements_offset0.cpp",
@@ -9925,7 +10785,9 @@
       "impl_file": "src/gl/gl_vertex.cpp",
       "impl_kind": "real",
       "noop_triage": null,
-      "tests": []
+      "tests": [
+        "tests/integration/test_tess_vs_capture_apple.cpp"
+      ]
     },
     {
       "name": "glVertexP2ui",
@@ -10007,9 +10869,13 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -10030,24 +10896,41 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_draw_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mrt_apple.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
         "tests/unit/test_renderer.cpp",
-        "tests/unit/test_ssbo_graphics_apple.cpp"
+        "tests/unit/test_ssbo_graphics_apple.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ]
     },
     {
@@ -10129,6 +11012,42 @@
       "has_behavior_test": true
     },
     {
+      "name": "GL_ANGLE_framebuffer_blit",
+      "scope": "gl-only",
+      "advertised": true,
+      "funcs": 1,
+      "missing_symbols": [],
+      "noop_funcs": [],
+      "tests": [
+        "tests/unit/test_ext_aliases.cpp"
+      ],
+      "has_behavior_test": true
+    },
+    {
+      "name": "GL_ANGLE_framebuffer_multisample",
+      "scope": "gl-only",
+      "advertised": true,
+      "funcs": 1,
+      "missing_symbols": [],
+      "noop_funcs": [],
+      "tests": [
+        "tests/unit/test_ext_aliases.cpp"
+      ],
+      "has_behavior_test": true
+    },
+    {
+      "name": "GL_ANGLE_instanced_arrays",
+      "scope": "gl-only",
+      "advertised": true,
+      "funcs": 3,
+      "missing_symbols": [],
+      "noop_funcs": [],
+      "tests": [
+        "tests/unit/test_ext_aliases.cpp"
+      ],
+      "has_behavior_test": true
+    },
+    {
       "name": "GL_APPLE_rgb_422",
       "scope": "glcore",
       "advertised": false,
@@ -10172,6 +11091,7 @@
       "tests": [
         "tests/integration/test_mc_textured_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_shader_precision.cpp"
       ],
       "has_behavior_test": true
@@ -10179,12 +11099,14 @@
     {
       "name": "GL_ARB_ES3_1_compatibility",
       "scope": "glcore",
-      "advertised": false,
+      "advertised": true,
       "funcs": 1,
       "missing_symbols": [],
       "noop_funcs": [],
-      "tests": [],
-      "has_behavior_test": false
+      "tests": [
+        "tests/unit/test_compute_dispatch.cpp"
+      ],
+      "has_behavior_test": true
     },
     {
       "name": "GL_ARB_ES3_2_compatibility",
@@ -10219,12 +11141,14 @@
     {
       "name": "GL_ARB_base_instance",
       "scope": "glcore",
-      "advertised": false,
+      "advertised": true,
       "funcs": 3,
       "missing_symbols": [],
       "noop_funcs": [],
-      "tests": [],
-      "has_behavior_test": false
+      "tests": [
+        "tests/integration/test_base_instance_apple.cpp"
+      ],
+      "has_behavior_test": true
     },
     {
       "name": "GL_ARB_bindless_texture",
@@ -10280,8 +11204,10 @@
       "funcs": 2,
       "missing_symbols": [],
       "noop_funcs": [],
-      "tests": [],
-      "has_behavior_test": false
+      "tests": [
+        "tests/unit/test_core41_contract.cpp"
+      ],
+      "has_behavior_test": true
     },
     {
       "name": "GL_ARB_clear_texture",
@@ -10291,6 +11217,9 @@
       "missing_symbols": [],
       "noop_funcs": [],
       "tests": [
+        "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_clear_tex_3d.cpp",
+        "tests/unit/test_clear_tex_cube.cpp",
         "tests/unit/test_enum_behavior.cpp"
       ],
       "has_behavior_test": true
@@ -10366,7 +11295,7 @@
     {
       "name": "GL_ARB_conservative_depth",
       "scope": "glcore",
-      "advertised": false,
+      "advertised": true,
       "funcs": 0,
       "missing_symbols": [],
       "noop_funcs": [],
@@ -10396,6 +11325,9 @@
         "tests/integration/test_mip_storage_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
+        "tests/unit/test_copy_image_3d.cpp",
+        "tests/unit/test_copy_image_cube.cpp",
+        "tests/unit/test_copy_image_cube_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_enum_behavior.cpp"
       ],
@@ -10467,22 +11399,29 @@
         "tests/integration/test_mc_namedbuffer_apple.cpp",
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
         "tests/unit/test_compressed_contract.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
         "tests/unit/test_draw_buffers2_p8.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
         "tests/unit/test_formats.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_p10_sodium_iris.cpp",
         "tests/unit/test_query_objects.cpp",
         "tests/unit/test_readpixels_packed.cpp",
         "tests/unit/test_renderbuffer.cpp",
         "tests/unit/test_restart_xfb.cpp",
-        "tests/unit/test_texture_per_target_bind.cpp"
+        "tests/unit/test_texture_per_target_bind.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ],
       "has_behavior_test": true
     },
@@ -10517,6 +11456,8 @@
       "noop_funcs": [],
       "tests": [
         "tests/integration/test_sodium_vertex_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_enum_behavior.cpp"
       ],
       "has_behavior_test": true
@@ -10611,6 +11552,7 @@
       "missing_symbols": [],
       "noop_funcs": [],
       "tests": [
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/unit/test_p10_sodium_iris.cpp"
       ],
       "has_behavior_test": true
@@ -10626,8 +11568,10 @@
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
         "tests/integration/test_clear_targets_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_legacy_mip_apple.cpp",
         "tests/integration/test_mc_bake_depth_apple.cpp",
@@ -10641,30 +11585,43 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_buffer_dsa_p5.cpp",
         "tests/unit/test_copy_1d.cpp",
         "tests/unit/test_copy_3d.cpp",
+        "tests/unit/test_copy_tex_3d_mip.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_draw_buffers2_p8.cpp",
+        "tests/unit/test_ext_aliases.cpp",
+        "tests/unit/test_fbo_completeness.cpp",
         "tests/unit/test_fbo_mip_level.cpp",
         "tests/unit/test_framebuffer_state.cpp",
+        "tests/unit/test_get_texture_mip_apple.cpp",
         "tests/unit/test_mc_copytobuffer_real.cpp",
         "tests/unit/test_mrt_apple.cpp",
         "tests/unit/test_p0_honesty.cpp",
         "tests/unit/test_p10_sodium_iris.cpp",
+        "tests/unit/test_readpixels_layer.cpp",
+        "tests/unit/test_readpixels_layer_apple.cpp",
+        "tests/unit/test_readpixels_region.cpp",
         "tests/unit/test_renderbuffer.cpp",
         "tests/unit/test_restart_xfb.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp",
-        "tests/unit/test_texture_sampler.cpp"
+        "tests/unit/test_texture_sampler.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ],
       "has_behavior_test": true
     },
@@ -10717,6 +11674,7 @@
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/unit/test_compressed_contract.cpp",
         "tests/unit/test_enum_behavior.cpp",
+        "tests/unit/test_get_texture_3d.cpp",
         "tests/unit/test_pbo_unpack.cpp"
       ],
       "has_behavior_test": true
@@ -11047,12 +12005,14 @@
     {
       "name": "GL_ARB_sample_locations",
       "scope": "glcore",
-      "advertised": false,
+      "advertised": true,
       "funcs": 3,
       "missing_symbols": [],
       "noop_funcs": [],
-      "tests": [],
-      "has_behavior_test": false
+      "tests": [
+        "tests/integration/test_sample_locations_apple.cpp"
+      ],
+      "has_behavior_test": true
     },
     {
       "name": "GL_ARB_sample_shading",
@@ -11191,6 +12151,7 @@
       "noop_funcs": [],
       "tests": [
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp"
       ],
@@ -11397,8 +12358,15 @@
       "funcs": 2,
       "missing_symbols": [],
       "noop_funcs": [],
-      "tests": [],
-      "has_behavior_test": false
+      "tests": [
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp"
+      ],
+      "has_behavior_test": true
     },
     {
       "name": "GL_ARB_texture_barrier",
@@ -11542,10 +12510,15 @@
       "missing_symbols": [],
       "noop_funcs": [],
       "tests": [
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
-        "tests/unit/test_sample_state.cpp"
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
+        "tests/unit/test_sample_state.cpp",
+        "tests/unit/test_texture_target_validation.cpp"
       ],
       "has_behavior_test": true
     },
@@ -11618,20 +12591,28 @@
       "noop_funcs": [],
       "tests": [
         "tests/integration/test_texture_array_apple.cpp",
+        "tests/unit/test_core41_contract.cpp",
         "tests/unit/test_enum_exts.cpp",
-        "tests/unit/test_p0_honesty.cpp"
+        "tests/unit/test_get_texture_mip_apple.cpp",
+        "tests/unit/test_p0_honesty.cpp",
+        "tests/unit/test_texture_storage_3d_mip.cpp",
+        "tests/unit/test_texture_storage_3d_mip_apple.cpp"
       ],
       "has_behavior_test": true
     },
     {
       "name": "GL_ARB_texture_storage_multisample",
       "scope": "glcore",
-      "advertised": false,
+      "advertised": true,
       "funcs": 2,
       "missing_symbols": [],
       "noop_funcs": [],
-      "tests": [],
-      "has_behavior_test": false
+      "tests": [
+        "tests/integration/test_msaa_array_apple.cpp",
+        "tests/integration/test_msaa_gl_apple.cpp",
+        "tests/unit/test_texture_target_validation.cpp"
+      ],
+      "has_behavior_test": true
     },
     {
       "name": "GL_ARB_texture_swizzle",
@@ -11677,6 +12658,10 @@
       "missing_symbols": [],
       "noop_funcs": [],
       "tests": [
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_restart_xfb.cpp"
       ],
       "has_behavior_test": true
@@ -11688,8 +12673,10 @@
       "funcs": 4,
       "missing_symbols": [],
       "noop_funcs": [],
-      "tests": [],
-      "has_behavior_test": false
+      "tests": [
+        "tests/integration/test_xfb_overflow_apple.cpp"
+      ],
+      "has_behavior_test": true
     },
     {
       "name": "GL_ARB_transform_feedback_instanced",
@@ -11727,6 +12714,11 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_compute_dispatch.cpp",
         "tests/unit/test_enum_exts.cpp",
         "tests/unit/test_ssbo_graphics_apple.cpp",
@@ -11755,9 +12747,13 @@
       "tests": [
         "tests/integration/test_attr_fill_apple.cpp",
         "tests/integration/test_bake_repro_apple.cpp",
+        "tests/integration/test_base_instance_apple.cpp",
+        "tests/integration/test_clip_distance_apple.cpp",
+        "tests/integration/test_conservative_depth_apple.cpp",
         "tests/integration/test_cull_orientation_apple.cpp",
         "tests/integration/test_depth_only_draw_apple.cpp",
         "tests/integration/test_draw_triangle.cpp",
+        "tests/integration/test_fbo_3d_slice_apple.cpp",
         "tests/integration/test_frag_bind_apple.cpp",
         "tests/integration/test_ir_batch_apple.cpp",
         "tests/integration/test_ir_full_apple.cpp",
@@ -11778,19 +12774,35 @@
         "tests/integration/test_mc_world_entry_apple.cpp",
         "tests/integration/test_mdi_count_baseinstance_apple.cpp",
         "tests/integration/test_mip_storage_apple.cpp",
+        "tests/integration/test_msaa_array_apple.cpp",
         "tests/integration/test_msaa_depth_apple.cpp",
         "tests/integration/test_msaa_gl_apple.cpp",
         "tests/integration/test_perf_deferred_apple.cpp",
         "tests/integration/test_perf_draw_apple.cpp",
         "tests/integration/test_pipeline_draw_apple.cpp",
+        "tests/integration/test_polygon_offset_apple.cpp",
+        "tests/integration/test_sample_locations_apple.cpp",
         "tests/integration/test_sample_mask_apple.cpp",
         "tests/integration/test_screenshot_pbo_apple.cpp",
         "tests/integration/test_sodium_fulldraw_apple.cpp",
         "tests/integration/test_sodium_vertex_apple.cpp",
         "tests/integration/test_stencil_apple.cpp",
+        "tests/integration/test_tess_clip_distance_apple.cpp",
+        "tests/integration/test_tess_cull_apple.cpp",
+        "tests/integration/test_tess_gl_in_basevertex_apple.cpp",
+        "tests/integration/test_tess_instance_id_apple.cpp",
+        "tests/integration/test_tess_mrt_msaa_depth_apple.cpp",
+        "tests/integration/test_tess_quad_apple.cpp",
+        "tests/integration/test_tess_spacing_apple.cpp",
+        "tests/integration/test_tess_tri_cp_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/integration/test_texture_array_apple.cpp",
         "tests/integration/test_viewport_orientation_apple.cpp",
         "tests/integration/test_water_translucent_apple.cpp",
+        "tests/integration/test_xfb_array_matrix_apple.cpp",
+        "tests/integration/test_xfb_capture_apple.cpp",
+        "tests/integration/test_xfb_matrix_array_apple.cpp",
+        "tests/integration/test_xfb_overflow_apple.cpp",
         "tests/unit/test_3d_texture_apple.cpp",
         "tests/unit/test_copy_tex_image.cpp",
         "tests/unit/test_elements_offset0.cpp",
@@ -11827,6 +12839,7 @@
         "tests/integration/test_mc_binding_apple.cpp",
         "tests/integration/test_mc_textured_apple.cpp",
         "tests/integration/test_mc_world_entry_apple.cpp",
+        "tests/integration/test_tess_vs_capture_apple.cpp",
         "tests/unit/test_enum_behavior.cpp"
       ],
       "has_behavior_test": true
@@ -12683,7 +13696,8 @@
       "noop_funcs": [],
       "tests": [
         "tests/unit/test_enum_behavior.cpp",
-        "tests/unit/test_readpixels_packed.cpp"
+        "tests/unit/test_readpixels_packed.cpp",
+        "tests/unit/test_readpixels_region.cpp"
       ],
       "has_behavior_test": true
     },

@@ -90,11 +90,35 @@ static uint64_t PrimCount(GLenum mode, GLsizei count) {
     }
 }
 
+static bool XfbDrawModeCompatible(GLenum beginMode, GLenum drawMode) {
+    switch (beginMode) {
+        case 0x0000: return drawMode == 0x0000; // POINTS
+        case 0x0001: // LINES
+            return drawMode == 0x0001 || drawMode == 0x0002 || drawMode == 0x0003 ||
+                   drawMode == 0x000A || drawMode == 0x000B;
+        case 0x0004: // TRIANGLES
+            return drawMode == 0x0004 || drawMode == 0x0005 || drawMode == 0x0006 ||
+                   drawMode == 0x000C || drawMode == 0x000D;
+        default: return false;
+    }
+}
+
 static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, GLsizei inst = 1,
                      GLint baseVertex = 0, GLuint baseInstance = 0, GLint first = 0) {
     Context& c = Context::Current();
     if (count < 0 || inst < 1) { c.errors.Record(0x0501); return; }
     if (count == 0) return; // no-op đúng spec (không encode draw-0)
+    // Spec §13.2: draw mode phải tương thích với primitive mode của
+    // glBeginTransformFeedback khi XFB đang active và không pause.
+    {
+        GLuint xid = c.state.BoundXFB();
+        auto xit = c.xfbs.find(xid);
+        if (xit != c.xfbs.end() && xit->second.active && !xit->second.paused &&
+            !XfbDrawModeCompatible(xit->second.primitiveMode, mode)) {
+            c.errors.Record(0x0502); // GL_INVALID_OPERATION
+            return;
+        }
+    }
     if (c.conditionalRender.active) {
         auto qit = c.queries.find(c.conditionalRender.query);
         if (qit == c.queries.end() || qit->second.active) return; // deleted/invalid: skip
@@ -288,12 +312,18 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
         }
     }
     if (enc) enc->endEncoding();
-    // XFB capture hook: draw trong phiên active (không pause) cộng số đỉnh đã capture.
-    // Metal không có TF native nên đây là emulation bằng đếm — tính varying thật cần M5b.
+    // XFB: Apple capture varying thật trong AppleDrawGL; Null backend chỉ có
+    // trace nên vẫn đếm số đỉnh tại đây.
     GLuint xfb = c.state.BoundXFB();
     auto xit = c.xfbs.find(xfb);
-    if (xfb && xit != c.xfbs.end() && xit->second.active && !xit->second.paused)
-        xit->second.capturedCount += (uint32_t)count;
+    // Apple backend capture varying thật trong AppleDrawGL (và tự tăng count
+    // theo từng chunk). Null backend chỉ có trace nên vẫn đếm tại đây.
+    if (c.device->isNull() && xfb && xit != c.xfbs.end() &&
+        xit->second.active && !xit->second.paused)
+    {
+        xit->second.capturedCount += (uint32_t)count * (uint32_t)(inst > 0 ? inst : 1);
+        c.pipeStats.xfbPrimsWritten += PrimCount(mode, count) * (uint64_t)inst;
+    }
 }
 
 namespace tglmt::gl {
@@ -496,13 +526,22 @@ void glDrawTransformFeedbackStreamInstanced(GLenum m, GLuint id, GLuint s, GLsiz
 void glPrimitiveRestartIndex(GLuint i) { Context::Current().state.SetShadow(0x8F9E, &i, 4); }
 void glPatchParameterfv(GLenum p, const GLfloat* v) {
     Context& c = Context::Current();
-    c.state.SetShadow(p, v, 4);
-    if (p == 0x8E72 && v) { // PATCH_VERTICES không phải float — ignore, dùng PatchParameteri
+    if (!v) return;
+    if (p == 0x8E74 /*PATCH_DEFAULT_OUTER_LEVEL*/) {
+        c.state.SetShadow(p, v, 4 * sizeof(GLfloat));
+        c.state.SetPatchDefaultOuter(v);
+    } else if (p == 0x8E73 /*PATCH_DEFAULT_INNER_LEVEL*/) {
+        c.state.SetShadow(p, v, 2 * sizeof(GLfloat)); // spec chỉ đọc 2 float
+        c.state.SetPatchDefaultInner(v);
+    } else {
+        c.errors.Record(0x0500); // GL_INVALID_ENUM
     }
 }
 void glPatchParameteri(GLenum p, GLint v) {
     Context& c = Context::Current();
-    c.state.SetShadow(p, &v, 4);
-    if (p == 0x8E72 /*PATCH_VERTICES*/) c.state.SetPatchVertices(v);
+    if (p != 0x8E72 /*PATCH_VERTICES*/) { c.errors.Record(0x0500); return; }
+    if (v <= 0 || v > 32 /*GL_MAX_PATCH_VERTICES*/) { c.errors.Record(0x0501); return; }
+    c.state.SetShadow(p, &v, sizeof(v));
+    c.state.SetPatchVertices(v);
 }
 } // namespace tglmt::gl

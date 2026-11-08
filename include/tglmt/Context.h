@@ -132,6 +132,9 @@ struct TextureObject {
     // placeholder 2D (cube Metal + sample vec3 là P1, xem limits.md).
     bool isCube = false;
     std::vector<uint8_t> faces[6];
+    // Cubemap mip levels >0: dữ liệu RIÊNG từng face (mipData ở trên là shadow
+    // level dùng cho 2D; cube cần face để upload/readback đúng mặt).
+    std::map<GLint, MipLevel> faceMips[6];
     // Diag: TỪNG LÀ color attachment của FBO (GuiItemAtlas bake etc) — nội dung
     // đến từ render, CPU shadow luôn rỗng → probe iconatlas# đọc GPU trực tiếp.
     bool wasRT = false;
@@ -148,6 +151,8 @@ struct TextureObject {
     // MSAA texture: target gồm multisample + resolve; gpu trỏ resolve texture.
     GLsizei samples = 1;
     std::shared_ptr<metal::IRenderTarget> msaaTarget;
+    // glTexStorage*Multisample immutable: TexImage/Storage lặp → INVALID_OPERATION.
+    bool immutableFormat = false;
     // Như BufferObject::lastReadGen — encoder đã commit nhưng GPU chưa execute
     // (lastReadGen == Context::waitGen) → ghi replaceRegion sẽ đổi nội dung
     // mà draw cũ đang sample (in-flight write).
@@ -222,6 +227,54 @@ struct ProgramObject {
     GLenum xfbBufferMode = 0x8C8C; // INTERLEAVED_ATTRIBS mặc định
     bool hasTessStages = false;    // true nếu có TCS/TES (cho đường tessellation Metal)
     bool hasGeometryStage = false; // true nếu có GS (Metal không native → emulate, xem gl_tess_xfb)
+    // P-Tess T3/T4: tess triangle pipeline. TCS = compute kernel (factor + control
+    // point outputs); TES = post-tessellation vertex (đọc buffer TCS ghi).
+    std::shared_ptr<metal::ILibrary> appleTCS, appleTES;
+    std::shared_ptr<metal::IComputePipeline> appleTCSPipeline;
+    // T4b: VS prepass compute (gl_in/VS attributes cho TCS).
+    std::shared_ptr<metal::ILibrary> appleVSCapture;
+    std::shared_ptr<metal::IComputePipeline> appleVSCapturePipeline;
+    int tessControlPoints = 0;
+    int tessPatchType = 0; // 3=triangles, 4=quads (TES layout domain)
+    int tessSpacing = 0;   // 0=equal, 1=fractional_even, 2=fractional_odd
+    int tessVertexOrder = 0; // 0=ccw, 1=cw
+    int tessFactorSlot = -1;
+    int tesFactorSlot = -1;
+    int vsCaptureIndexSlot = -1, vsCaptureDrawSlot = -1, vsCaptureDescSlot = -1;
+    std::string tessControlMSL, tessEvalMSL, vertexCaptureMSL;
+    struct VsCaptureSlot {
+        std::string name;
+        int slot = -1;
+        std::string type;
+        bool isGlIn = false;
+        int arraySize = 0;  // >0: varying mảng (XFB capture từng element)
+    };
+    std::vector<VsCaptureSlot> vsCaptureSlots;
+    // Slot buffer TCS/TES. physical slot đã bake trong MSL từng stage; T4 bind
+    // CÙNG buffer ở slot của TCS và slot của TES (không cần trùng số).
+    struct TessSlot {
+        std::string name;
+        int slot = -1;
+        bool isInput = false, isPatch = false, isGlIn = false;
+        std::string type;
+        int count = 0;
+        bool isControl = false; // true = slot của TCS, false = TES
+    };
+    std::vector<TessSlot> tessSlots;
+    // T4b stage 2: uniform (không phải block/sampler) theo TỪNG stage tess.
+    // Mỗi stage có TGLMTUniforms riêng nên backend copy từ pr.uniforms[loc]
+    // vào buffer stage-local trước khi bind buffer(16).
+    struct StageUniform { std::string name; size_t offset = 0, size = 0; };
+    std::vector<StageUniform> vsUniforms, tcsUniforms, tesUniforms, fsUniforms;
+    size_t vsUniformBytes = 0, tcsUniformBytes = 0, tesUniformBytes = 0, fsUniformBytes = 0;
+    // T4b stage 2: sampler theo TỪNG stage. texSlot = thứ tự khai báo trong
+    // stage (khớp [[texture(k)]]); sampSlot = [[sampler(s)]] (-1 = buffer read).
+    struct StageSampler {
+        std::string name;
+        int texSlot = 0, sampSlot = -1;
+        char kind = '2';
+    };
+    std::vector<StageSampler> vsCaptureSamplers, tcsSamplers, tesSamplers, fsTessSamplers;
     // M5b GL-driven render: uniform layout gộp 2 stage (vs trước, fs sau, align 16),
     // sampler (loc → tên), Apple libraries (chỉ khi device thật).
     struct UniformEntry {
@@ -281,12 +334,14 @@ struct ProgramObject {
     // Binding = layout binding, hoặc samplerUnits[tên] nếu layout không có.
     struct ImageSlot { std::string name; int slot; int binding; };
     std::vector<ImageSlot> vsImages, fsImages, computeImages;
+    std::vector<ImageSlot> tcsImages, tesImages;
     // P9 atomic counters: (tên, binding, offset, buffer slot) cho compute dispatch.
     // Slot = ssboCnt + index (sau SSBOs, tránh 16/uniforms và 17+/UBO).
     struct AtomicSlot { std::string name; int binding; int offset; int slot; };
     std::vector<AtomicSlot> computeAtomics;
     // P9 graphics atomics: vs/fs riêng (slot 24+, tránh vertex/uniform/UBO).
     std::vector<AtomicSlot> vsAtomics, fsAtomics;
+    std::vector<AtomicSlot> tcsAtomics, tesAtomics;
     std::unordered_map<std::string, GLuint> attribBind; // glBindAttribLocation (trước link)
     std::unordered_map<std::string, GLint> attribLoc;   // location sau link
     // Kiểu attribute VS sau link — nguồn cho "fill" ở AppleDrawGL: Metal BẮT
@@ -340,6 +395,7 @@ struct ProgramObject {
     // bind theo slot thật trong list này (không tự tính 17+bi).
     struct StageBlockSlot { std::string name; int slot = -1; bool isStorage = false; };
     std::vector<StageBlockSlot> vsShaderBlocks, fsShaderBlocks;
+    std::vector<StageBlockSlot> tcsShaderBlocks, tesShaderBlocks;
     // Block `buffer` program-scope: index = storageBlockIndex (thứ tự vs rồi fs,
     // dedupe tên giống uniformBlocks) cho glShaderStorageBlockBinding +
     // SHADER_STORAGE_BLOCK query (0x92E6).
@@ -369,6 +425,14 @@ struct ProgramPipelineObject {
     std::string infoLog;
 };
 
+// Map một GLenum trong draw buffer list → attachment slot (0..7), -1 nếu
+// không phải COLOR_ATTACHMENTi (GL_NONE hoặc hằng số khác). Dùng chung cho
+// glClearBufferfv(COLOR), clear/draw paths và resolve attachment index.
+inline GLint DrawBufferAttachmentIndex(GLenum db) {
+    if (db >= 0x8CE0 && db <= 0x8CE7) return (GLint)(db - 0x8CE0);
+    return -1;
+}
+
 struct FramebufferObject {
     GLuint id = 0;
     std::unordered_map<GLenum, GLuint> colorTex; // attachment -> texture id
@@ -382,10 +446,17 @@ struct FramebufferObject {
     GLint depthLayer = -1, stencilLayer = -1, depthStencilLayer = -1;
     GLsizei w = 0, h = 0;
     std::vector<GLenum> drawBuffers = {0x8CE0}; // GL_COLOR_ATTACHMENT0
+    // GL_READ_BUFFER (spec §18.2 / ARB_direct_state_access): state riêng từng
+    // FBO — mặc định cho FBO mới là COLOR_ATTACHMENT0; NONE hợp lệ (ReadPixels
+    // báo INVALID_OPERATION, blit bỏ qua color). Default framebuffer giữ trong
+    // shadow 0x0C02 (glReadBuffer bật khi bound READ_FRAMEBUFFER là default FB).
+    GLenum readBuffer = 0x8CE0;
     // P10 ARB_framebuffer_no_attachments: defaults cho FBO không attachment.
     GLint defaultWidth = 0, defaultHeight = 0, defaultLayers = 0, defaultSamples = 0;
     GLboolean defaultFixedSampleLocations = 0;
     std::vector<GLfloat> sampleLocations; // ARB/NV_sample_locations: x,y pairs
+    GLboolean programmableSampleLocations = 0; // ARB_sample_locations
+    GLboolean sampleLocationPixelGrid = 0;
 };
 
 struct RenderbufferObject {
@@ -409,6 +480,7 @@ struct QueryObject {
     // occlusion). Sau glEndQuery, GPU ghi 1 vào occlBuf[slot] nếu có fragment
     // pass depth-test; đọc sau CommitAndWait.
     uint64_t occlSlot = UINT64_MAX;
+    GLuint stream = 0; // TRANSFORM_FEEDBACK_STREAM_OVERFLOW index
 };
 struct SyncObject { GLuint id = 0; bool signaled = false; };
 // Buffer range cho glBindBufferBase/Range (UBO index 0x8A11, SSBO 0x90D2).
@@ -426,7 +498,8 @@ struct XfbObject {
     bool active = false, paused = false;
     GLenum primitiveMode = 0x0004; // mode của glBeginTransformFeedback (TRIANGLES)
     std::array<GLuint, 4> buffers = {0, 0, 0, 0}; // TRANSFORM_FEEDBACK_BUFFER bindings
-    std::array<GLintptr, 4> offsets = {0, 0, 0, 0}; // P8: offset từ BindBufferOffsetEXT
+    std::array<GLintptr, 4> offsets = {0, 0, 0, 0}; // offset của buffer binding
+    std::array<GLsizeiptr, 4> sizes = {0, 0, 0, 0}; // 0 = toàn bộ buffer
     GLuint capturedCount = 0;      // số đỉnh đã capture (cho glDrawTransformFeedback*)
 };
 
@@ -470,6 +543,11 @@ struct ExtState {
     GLuint nextPerfObject = 1;
     std::map<GLuint, bool> commandLists;
     std::map<GLuint, bool> commandStates;
+    // ARB_sample_locations trên default framebuffer (spec chỉ cho phép 2 pname
+    // FRAMEBUFFER_PROGRAMMABLE_SAMPLE_LOCATIONS / SAMPLE_LOCATION_PIXEL_GRID).
+    GLboolean defaultProgrammableSampleLocations = 0;
+    GLboolean defaultSampleLocationPixelGrid = 0;
+    std::vector<GLfloat> defaultSampleLocations;
     GLuint nextCommandObject = 1;
     std::map<GLenum, std::vector<uint8_t>> colorTables;
     std::map<GLenum, GLint> colorTableWidths;
@@ -687,6 +765,9 @@ public:
         uint64_t gsPrimsWritten = 0;   // GL_GEOMETRY_SHADER_PRIMITIVES_WRITTEN_ARB
         uint64_t fsInvocations = 0;    // GL_FRAGMENT_SHADER_INVOCATIONS_ARB (0: không đo được)
         uint64_t csInvocations = 0;    // GL_COMPUTE_SHADER_INVOCATIONS
+        uint64_t xfbPrimsWritten = 0;  // GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN
+        uint64_t xfbOverflow = 0;      // GL_TRANSFORM_FEEDBACK_OVERFLOW
+        uint64_t xfbStreamOverflow[4] = {0, 0, 0, 0}; // GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW
     } pipeStats;
 
     // Occlusion ANY_SAMPLES (EXT_occlusion_query_boolean): buffer visibility
@@ -783,15 +864,44 @@ public:
             if (pendingColorIds[i] == id && id != 0) return true;
         return false;
     }
-    // GL_READ_BUFFER shadow → attachment slot cho glReadPixels/glCopyTex*/blit
+    // GL_READ_BUFFER hiện hành (spec §18.2): FBO bound READ_FRAMEBUFFER →
+    // f.readBuffer (NONE được phép, COLOR_ATTACHMENTi); default FB → shadow
+    // 0x0C02 (mặc định BACK).
+    GLenum CurrentReadBuffer() const {
+        GLuint fbo = state.BoundReadFBO();
+        if (fbo == 0) {
+            GLenum rb = 0x0405; // GL_BACK (default framebuffer double-buffered)
+            state.GetShadow(0x0C02 /*READ_BUFFER*/, &rb, sizeof(rb));
+            return rb;
+        }
+        auto it = fbos.find(fbo);
+        return (it == fbos.end()) ? (GLenum)0x8CE0 : it->second.readBuffer;
+    }
+    // GL_DRAW_BUFFERi hiện hành (i < 8): FBO bound DRAW → drawBuffers pad
+    // GL_NONE; default FB → i==0 là shadow 0x0C01 (mặc định BACK), i>0 là NONE
+    // (fragment color khác 0 mặc định là NONE, spec §17.4.1).
+    GLenum CurrentDrawBuffer(GLuint i) const {
+        if (i >= 8) return 0x0000;
+        GLuint fbo = state.BoundDrawFBO();
+        if (fbo == 0) {
+            if (i != 0) return 0x0000;
+            GLenum db = 0x0405; // GL_BACK
+            state.GetShadow(0x0C01 /*DRAW_BUFFER*/, &db, sizeof(db));
+            return db;
+        }
+        auto it = fbos.find(fbo);
+        if (it == fbos.end()) return 0x0000;
+        const auto& d = it->second.drawBuffers;
+        return i < d.size() ? d[i] : (GLenum)0x0000;
+    }
+    // GL_READ_BUFFER → attachment slot cho glReadPixels/glCopyTex*/blit
     // (spec §18.2/§18.3: nguồn đọc là READ_BUFFER, không phải luôn attachment 0).
     // GL_COLOR_ATTACHMENTi → i; GL_NONE → -1 (caller báo INVALID_OPERATION);
-    // GL_BACK/GL_FRONT/chưa set → 0 (default FB & hành vi cũ).
+    // GL_BACK/GL_FRONT (default FB) → 0.
     GLint ReadBufferSlot() const {
-        GLenum rb = 0x8CE0;
-        state.GetShadow(0x0C02 /*READ_BUFFER*/, &rb, sizeof(rb));
+        GLenum rb = CurrentReadBuffer();
         if (rb >= 0x8CE0 && rb <= 0x8CE7) return (GLint)(rb - 0x8CE0);
-        if (rb == 0x0404 /*GL_NONE*/) return -1;
+        if (rb == 0x0000 /*GL_NONE*/) return -1;
         return 0;
     }
     bool pendingViewportValid = false;
@@ -1074,11 +1184,25 @@ public:
     // P0: đo lại shadow CPU vs GPU resource → appleStats.mem*. Chỉ để chẩn đoán
     // (quét toàn bộ textures/buffers) — gọi trước khi log frame=, không gọi /frame.
     void RefreshMemStats();
+    // P1b: giải phóng phần TGLMT giữ THÊM mà đọc lại được từ GPU: shadow mip
+    // (glTexSubImage2D level>0 trên texture immutable — Voxy: 126MB), shadow
+    // face-mip, wrap-target cache (AppleTarget giữ id<MTLTexture>), pool buffer.
+    // KHÔNG đụng shadow base/face (có thể là bản duy nhất của format chưa upload).
+    // Trả số byte shadow đã trả lại. Gọi từ TGLMT_TrimMemory (memory warning của
+    // launcher) hoặc MaybeTrimForAllocation trước alloc lớn.
+    size_t TrimCachedMemory();
+    // Gọi NGAY TRƯỚC khi cấp phát GPU >= ~32MB: nếu bộ nhớ còn dùng được
+    // (os_proc_available_memory) < need + headroom thì TrimCachedMemory() trước
+    // để không chạm trần Jetsam (iPhone 8 Plus ~2.1GB) khi Voxy tạo lại world.
+    void MaybeTrimForAllocation(size_t needBytes);
     // P1: đọc level-0 texture từ GPU vào `out` (thoả w*h*4, row = w*4, không lật).
     // Trả false nếu không đọc được (Null / không phải RGBA8-ish / fail) → caller
     // dùng shadow. `out` sống đến hết frame và KHÔNG ghi ngược vào tx.pixels —
     // nếu ghi, shadow sẽ hồi sinh và nuốt mất đúng phần bộ nhớ P1 tiết kiệm.
-    bool ReadTextureGPU(const TextureObject& tx, std::vector<uint8_t>& out);
+    // face >= 0: đọc riêng một face cubemap qua textureLayerView (Metal cube
+    // không cho readback nguyên texture như 2D). face < 0: 2D/array/3D volume.
+    bool ReadTextureGPU(const TextureObject& tx, std::vector<uint8_t>& out, int face = -1,
+                        int level = 0);
     // PSO prewarm (Phase 4): dựng trước pipeline cho program đã link để frame
     // đầu không hitch giây. Trả true nếu đã đảm bảo pipeline tồn tại.
     bool PrewarmPipelineForProgram(GLuint prog);

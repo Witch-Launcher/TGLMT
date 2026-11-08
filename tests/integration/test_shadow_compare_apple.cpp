@@ -54,7 +54,7 @@ int main() {
     if (!color1 || !depth) { printf("test_shadow_compare_apple FAIL: textures\n"); return 1; }
     auto rt1 = dev->wrapAsTarget(color1.get(), depth.get());
     auto pso1 = dev->makeDepthPipeline(lib.get(), "depthVS", lib.get(), "depthFS",
-                                       PixelFormat::RGBA8Unorm);
+                                       PixelFormat::RGBA8Unorm, false);
     auto dss = dev->makeDepthStencilState(0x0203 /* GL_LEQUAL */, true);
     if (!rt1 || !pso1 || !dss) { printf("test_shadow_compare_apple FAIL: pass1 setup\n"); return 1; }
     {
@@ -70,7 +70,7 @@ int main() {
     auto color2 = dev->newTexture(W, H, PixelFormat::RGBA8Unorm);
     auto rt2 = dev->wrapAsTarget(color2.get(), nullptr);
     auto pso2 = dev->makeRenderPipeline(lib.get(), "probeVS", lib.get(), "probeFS",
-                                        PixelFormat::RGBA8Unorm);
+                                        PixelFormat::RGBA8Unorm, false);
     SamplerDesc sd;
     sd.minFilter = 0x2600; sd.magFilter = 0x2600; // GL_NEAREST
     sd.sWrap = 0x812F; sd.tWrap = 0x812F;         // CLAMP_TO_EDGE

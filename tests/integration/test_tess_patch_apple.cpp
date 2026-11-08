@@ -53,7 +53,7 @@ int main() {
     Viewport vp{0, 0, 64, 64, 0, 1};
     enc->setViewport(vp);
     enc->setVertexBuffer(cpBuf.get(), 0, 0);
-    enc->setTessellationFactorBuffer(fBuf.get(), 0, sizeof(factors));
+    enc->setTessellationFactorBuffer(fBuf.get(), 0, 0); // PerPatch: instanceStride = 0
     enc->drawPatches(3, 0, 1);
     if (!enc->endAndCommit()) { printf("test_tess_patch_apple FAIL: commit\n"); return 1; }
 

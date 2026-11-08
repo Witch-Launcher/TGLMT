@@ -96,6 +96,40 @@ int main() {
     glTexParameteri(0x806F, 0x2800, 0x2600); // MAG_FILTER NEAREST
     Check(glGetError() == 0, "glTexImage3D không lỗi");
 
+    // --- GetTexImage 3D: shadow được giữ lại để trả đủ volume (Metal không
+    // cho view 3D→2D); kiểm tra slice 2 có R=128.
+    {
+        std::vector<uint8_t> got((size_t)4 * 4 * 4 * 4, 0);
+        glGetTextureImage(t3d, 0, 0x1908, 0x1401, (GLsizei)got.size(), got.data());
+        Check(glGetError() == 0, "glGetTextureImage 3D no error");
+        Check(got[(((size_t)2 * 16) + 5) * 4] == 128,
+              "glGetTextureImage 3D trả đúng slice z=2 (R=128)");
+    }
+
+    // --- 2D array: shadow bị bỏ (P1); GetTexImage đọc GPU từng layer.
+    {
+        GLuint arr = 0;
+        glGenTextures(1, &arr);
+        glActiveTexture(0x84C0);
+        glBindTexture(0x8C1A /*TEXTURE_2D_ARRAY*/, arr);
+        std::vector<uint8_t> px((size_t)2 * 2 * 3 * 4, 0);
+        for (int z = 0; z < 3; ++z)
+            for (int i = 0; i < 4; ++i) {
+                uint8_t* q = px.data() + (((size_t)z * 4 + i) * 4);
+                q[0] = (uint8_t)(z * 80 + 10);
+                q[3] = 255;
+            }
+        glTexImage3D(0x8C1A, 0, 0x8058, 2, 2, 3, 0, 0x1908, 0x1401, px.data());
+        Check(glGetError() == 0, "setup 2D array GPU");
+        std::vector<uint8_t> got((size_t)2 * 2 * 3 * 4, 0);
+        glGetTextureImage(arr, 0, 0x1908, 0x1401, (GLsizei)got.size(), got.data());
+        Check(glGetError() == 0, "glGetTextureImage 2D array GPU no error");
+        Check(got[(((size_t)2 * 4) + 3) * 4] == 170,
+              "glGetTextureImage 2D array đọc đúng layer 2 (R=170)");
+        glDeleteTextures(1, &arr);
+        glBindTexture(0x806F, t3d);
+    }
+
     // --- 1D texture 4 texel: R = x*64 ---
     GLuint t1d = 0;
     glGenTextures(1, &t1d);
@@ -203,6 +237,24 @@ int main() {
     glReadPixels(32, 32, 1, 1, 0x1908, 0x1401, p);
     Check(Near(p[0], 200), "copy 3D d=2 → dst slice 2 = src slice 2 (R=200)");
     glDeleteTextures(1, &t3dCopy);
+
+    // (5) Clear 3D trên GPU: clear slice 3, sample đúng slice; clear toàn volume.
+    glBindTexture(0x806F, t3d);
+    {
+        unsigned char red[4] = {255, 0, 0, 255};
+        glClearTexSubImage(t3d, 0, 0, 0, 3, 4, 4, 1, 0x1908, 0x1401, red);
+    }
+    Check(glGetError() == 0, "clearTexSubImage slice 3 GPU no error");
+    glUniform1f(glGetUniformLocation(prog, "uZ"), 0.875f); // slice 3
+    glDrawArrays(0x0004, 0, 6);
+    glReadPixels(32, 32, 1, 1, 0x1908, 0x1401, p);
+    Check(Near(p[0], 255), "clearTexSubImage slice 3 → sample R=255");
+    glClearTexImage(t3d, 0, 0x1908, 0x1401, nullptr);
+    Check(glGetError() == 0, "glClearTexImage 3D GPU no error");
+    glUniform1f(glGetUniformLocation(prog, "uZ"), 0.625f);
+    glDrawArrays(0x0004, 0, 6);
+    glReadPixels(32, 32, 1, 1, 0x1908, 0x1401, p);
+    Check(p[0] == 0, "glClearTexImage 3D clear slice 2 → sample R=0");
 
     if (gFails) {
         printf("test_3d_texture_apple RESULT: FAIL (%d)\n", gFails);

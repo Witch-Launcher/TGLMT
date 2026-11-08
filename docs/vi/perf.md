@@ -44,10 +44,11 @@ unset TGLMT_DIAG
 TGLMT_DIAG=1 ./build-ios-pkg/run.sh 2> latestlog.txt
 ```
 
-Kết quả `test_perf_deferred_apple` (MacIntel):
+Kết quả `test_perf_deferred_apple` (MacIntel UHD 630, 2026-11-02, 5 lần):
 
 ```
-batch100: enc=1 reuse=99 traceSkip=100 ring=2 tempFallback=0 us=~2000-3000
+batch100: enc=1 reuse=99 traceSkip=100 ring=2 tempFallback=0
+          us=16171, 8075, 4276, 8344, 20420  (median 8344)
 cond-flush: enc=1 flushAvoided>=5
 used-flush: enc=2 (tách khi stage buffer đang dùng)
 multidraw: enc=1 batched=5
@@ -55,6 +56,9 @@ mid=(255,0,0)
 ```
 
 `ring=2` = draw đầu upload VS+FS một lần, 99 draws sau tái dùng (ổn định 0 alloc).
+Số cũ `us=~2000-3000` không tái lập được trên host này; wall-clock hiện dao động
+mạnh (4.3–20.4 ms). Test chỉ assert counter, chưa có performance gate.
+`test_perf_draw_apple` đo median 31.6 µs/draw qua 5 lần (22.8–38.1 µs/draw).
 
 ## Cái gì CHƯA gom (trung thực)
 

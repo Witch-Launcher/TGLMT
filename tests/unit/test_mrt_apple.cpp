@@ -162,7 +162,7 @@ int main() {
     CheckSlot(2, 51, 102, 153, "glClear phủ slot2");
 
     // (5) glDrawBuffers tắt slot 0/1 (GL_NONE) → draw chỉ ghi slot2; slot0/1 giữ.
-    glDrawBuffers(3, (const GLenum[]){0x0404, 0x0404, 0x8CE2});
+    glDrawBuffers(3, (const GLenum[]){0x0000 /*NONE*/, 0x0000 /*NONE*/, 0x8CE2});
     glUniform4f(u0Loc, 1.0f, 1.0f, 0.0f, 1.0f);
     glDrawArrays(0x0004, 0, 6);
     Check(glGetError() == 0, "drawBuffers subset draw no error");

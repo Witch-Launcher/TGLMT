@@ -95,6 +95,9 @@ struct GLSLConvertResult {
     std::vector<GLSLBlock> blocks;   // UBO blocks (read-only)
     size_t uniformBufferSize = 0;    // sizeof(TGLMTUniforms), đã align
     bool usesPointSize = false;
+    // Metal chỉ có 1 clip_distance; TGLMT hỗ trợ gl_ClipDistance[0].
+    bool usesClipDistance = false;
+    bool usesClipDistanceIn = false;
     bool usesPointCoord = false;
     bool usesFragCoord = false;
     bool usesFrontFacing = false;
@@ -110,6 +113,12 @@ struct GLSLConvertResult {
     // TCS → MSL kernel (MoltenVK/SPIRV-Cross pattern): thread = (invocation, patch).
     bool isTessControl = false;
     bool isTessEval = false;
+    // P-Tess T2: domain của TES — 3=triangles, 4=quads, 2=isolines (0 = chưa khai báo).
+    int tessPatchType = 0;
+    // TES spacing: 0=equal_spacing, 1=fractional_even, 2=fractional_odd.
+    int tessSpacing = 0;
+    // TES vertex order: 0=ccw (mặc định), 1=cw. Metal đổi front-facing winding.
+    int tessVertexOrder = 0;
     // layout(vertices=N) out (TCS bắt buộc): số invocation/patch, stride cho
     // buffer per-vertex. T4 dispatch grid=(N, numPatches,1), threadgroup=(N,1,1).
     int tessVertices = 0;
@@ -126,6 +135,22 @@ struct GLSLConvertResult {
     std::vector<TessIOSlot> tessSlots;
     // Factor buffer (MTLTriangleTessellationFactorsHalf, 8B/patch): -1 = không dùng.
     int tessFactorSlot = -1;
+    // TES đọc gl_TessLevel*: buffer factor Half (tri 8B / quad 12B mỗi patch).
+    int tesFactorSlot = -1;
+    // P-Tess T4b: VS prepass (compute) chạy vertex shader thật để sinh gl_in cho
+    // TCS. Slot output capture được bake trong MSL; backend cấp buffer theo bảng.
+    bool vertexCapture = false;
+    struct CaptureSlot {
+        std::string name;   // varying hoặc gl_Position/gl_PointSize
+        int slot = -1;      // [[buffer(slot)]]
+        std::string mslType;
+        bool isGlIn = false;
+        int arraySize = 0;  // >0: out T name[N] (XFB capture toàn mảng)
+    };
+    std::vector<CaptureSlot> captureSlots;
+    int captureIndexSlot = -1;
+    int captureDrawSlot = -1;
+    int captureDescSlot = -1;
     // P6f backend: map block → MSL buffer slot. GL bind theo bindingPoint
     // (glBindBufferBase), converter gán slot theo thứ tự khai báo → backend
     // cần bảng này để bind storageBindPoints[binding] → buffer(slot).
@@ -137,7 +162,10 @@ struct GLSLConvertResult {
 };
 
 // Convert 1 shader stage. stage = 0x8B31 (VERTEX), 0x8B30 (FRAGMENT),
-// 0x91B9 (COMPUTE), 0x8E88 (TESS_CONTROL). 0x8E87 (TESS_EVAL, T2) hiện fail rõ.
-GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage);
+// 0x91B9 (COMPUTE), 0x8E88 (TESS_CONTROL), 0x8E87 (TESS_EVAL — T2 triangles).
+// tessDomainHint: 0 = tự suy (TCS N>=4 → quads), 3/4 = domain TES đã biết.
+// Link dùng hint để TCS chọn đúng factor struct khi triangle domain có N>3.
+GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
+                                   bool vertexCapture = false, int tessDomainHint = 0);
 
 } // namespace tglmt

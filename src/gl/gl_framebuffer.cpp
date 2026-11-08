@@ -40,6 +40,14 @@ void glDeleteFramebuffers(GLsizei n, const GLuint* f) {
     Context& c = Context::Current();
     c.registry.Delete(ObjectKind::Framebuffer, n, f);
     ++c.objectGen; // cache wrap-target theo FBO không còn hợp lệ
+    // GL 4.6 §9.2: xóa FBO đang bind → binding tự về 0 (default FB), không
+    // bao giờ để dangling id (mọi glReadBuffer/glDrawBuffer sau đó áp vào
+    // default FB như spec, thay vì bị lặng lẽ bỏ qua).
+    for (GLsizei i = 0; i < n; ++i) {
+        if (f[i] == 0) continue;
+        if (c.state.BoundDrawFBO() == f[i]) c.state.BindFBO(0x8CA9 /*DRAW_FRAMEBUFFER*/, 0);
+        if (c.state.BoundReadFBO() == f[i]) c.state.BindFBO(0x8CA8 /*READ_FRAMEBUFFER*/, 0);
+    }
     for (GLsizei i = 0; i < n; ++i) c.fbos.erase(f[i]);
 }
 GLboolean glIsFramebuffer(GLuint f) {
@@ -47,6 +55,9 @@ GLboolean glIsFramebuffer(GLuint f) {
 }
 void glBindFramebuffer(GLenum t, GLuint f) {
     Context& c = Context::Current();
+    if (t != 0x8CA9 /*DRAW*/ && t != 0x8CA8 /*READ*/ && t != 0x8D40 /*FRAMEBUFFER*/) {
+        c.errors.Record(0x0500); return; // INVALID_ENUM
+    }
     if (f && !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
     c.state.BindFBO(t, f);
 }
@@ -202,8 +213,8 @@ static GLuint ResolveFBOForTarget(Context& c, GLenum t) {
 }
 void glFramebufferTexture2D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l) {
     Context& c = Context::Current();
-    AttachToFBO(c, ResolveFBOForTarget(c, t), a, x, l, -1);
-    (void)tx;
+    GLint layer = (tx >= 0x8515 && tx <= 0x851A) ? (GLint)(tx - 0x8515) : -1;
+    AttachToFBO(c, ResolveFBOForTarget(c, t), a, x, l, layer);
 }
 void glFramebufferTexture3D(GLenum t, GLenum a, GLenum tx, GLuint x, GLint l, GLint z) {
     Context& c = Context::Current();
@@ -247,6 +258,15 @@ static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex,
         GLint lw = (GLint)txt->second.w >> level, lh = (GLint)txt->second.h >> level;
         f.w = lw > 0 ? lw : 1; f.h = lh > 0 ? lh : 1;
         if (level == 0) txt->second.wasRT = true;
+        // Attach mip level>0 → nội dung level do GPU pass sinh ra; shadow level
+        // cũ (thường zero từ TexImage NULL) không còn là nguồn đúng. Cube xóa
+        // riêng face; texture khác xóa mipData[level].
+        if (level > 0 && !c.device->isNull()) {
+            if (layer >= 0 && txt->second.isCube)
+                txt->second.faceMips[layer].erase(level);
+            else
+                txt->second.mipData.erase(level);
+        }
     }
     return true;
 }
@@ -255,22 +275,31 @@ void glNamedFramebufferTextureLayer(GLuint f, GLenum a, GLuint x, GLint l, GLint
     AttachToFBO(Context::Current(), f, a, x, l, layer);
 }
 void glFramebufferParameteri(GLenum t, GLenum p, GLint v) {
-    // P10 ARB_framebuffer_no_attachments: defaults cho FBO không attachment.
+    // P10 ARB_framebuffer_no_attachments + ARB_sample_locations.
     Context& c = Context::Current();
     GLuint fbo = ResolveFBOForTarget(c, t);
-    if (fbo == 0) { c.errors.Record(0x0502); return; } // default FB không có params
+    if (fbo == 0) {
+        // Default framebuffer chỉ nhận 2 pname sample-location (spec ARB_sample_locations).
+        if (p == 0x9342) c.ext.defaultProgrammableSampleLocations = (GLboolean)(v ? 1 : 0);
+        else if (p == 0x9343) c.ext.defaultSampleLocationPixelGrid = (GLboolean)(v ? 1 : 0);
+        else c.errors.Record(0x0502); // INVALID_OPERATION
+        return;
+    }
     auto it = c.fbos.find(fbo);
     if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
     auto& f = it->second;
     // Pnames: DEFAULT_WIDTH(0x9310), HEIGHT(0x9311), LAYERS(0x9312),
-    // SAMPLES(0x9313), FIXED_SAMPLE_LOCATIONS(0x9314).
+    // SAMPLES(0x9313), FIXED_SAMPLE_LOCATIONS(0x9314),
+    // FRAMEBUFFER_PROGRAMMABLE_SAMPLE_LOCATIONS(0x9342), PIXEL_GRID(0x9343).
     if (p == 0x9310) f.defaultWidth = v;
     else if (p == 0x9311) f.defaultHeight = v;
     else if (p == 0x9312) f.defaultLayers = v;
     else if (p == 0x9313) f.defaultSamples = v;
     else if (p == 0x9314) f.defaultFixedSampleLocations = (GLboolean)(v ? 1 : 0);
+    else if (p == 0x9342) f.programmableSampleLocations = (GLboolean)(v ? 1 : 0);
+    else if (p == 0x9343) f.sampleLocationPixelGrid = (GLboolean)(v ? 1 : 0);
     else { c.errors.Record(0x0500); return; } // INVALID_ENUM
-    if (v < 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE (trừ FIXED=0/1)
+    if (v < 0 && p >= 0x9310 && p <= 0x9313) { c.errors.Record(0x0501); return; }
 }
 void glNamedFramebufferParameteri(GLuint f, GLenum p, GLint v) {
     Context& c = Context::Current();
@@ -283,14 +312,21 @@ void glNamedFramebufferParameteri(GLuint f, GLenum p, GLint v) {
     else if (p == 0x9312) fo.defaultLayers = v;
     else if (p == 0x9313) fo.defaultSamples = v;
     else if (p == 0x9314) fo.defaultFixedSampleLocations = (GLboolean)(v ? 1 : 0);
+    else if (p == 0x9342) fo.programmableSampleLocations = (GLboolean)(v ? 1 : 0);
+    else if (p == 0x9343) fo.sampleLocationPixelGrid = (GLboolean)(v ? 1 : 0);
     else { c.errors.Record(0x0500); return; }
-    if (v < 0) { c.errors.Record(0x0501); return; }
+    if (v < 0 && p >= 0x9310 && p <= 0x9313) { c.errors.Record(0x0501); return; }
 }
 void glGetFramebufferParameteriv(GLenum t, GLenum p, GLint* v) {
     Context& c = Context::Current();
     if (!v) return;
     GLuint fbo = ResolveFBOForTarget(c, t);
-    if (fbo == 0) { c.errors.Record(0x0502); return; }
+    if (fbo == 0) {
+        if (p == 0x9342) *v = c.ext.defaultProgrammableSampleLocations;
+        else if (p == 0x9343) *v = c.ext.defaultSampleLocationPixelGrid;
+        else c.errors.Record(0x0502);
+        return;
+    }
     auto it = c.fbos.find(fbo);
     if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
     auto& f = it->second;
@@ -299,6 +335,8 @@ void glGetFramebufferParameteriv(GLenum t, GLenum p, GLint* v) {
     else if (p == 0x9312) *v = f.defaultLayers;
     else if (p == 0x9313) *v = f.defaultSamples;
     else if (p == 0x9314) *v = f.defaultFixedSampleLocations;
+    else if (p == 0x9342) *v = f.programmableSampleLocations;
+    else if (p == 0x9343) *v = f.sampleLocationPixelGrid;
     else { c.errors.Record(0x0500); return; }
 }
 void glGetNamedFramebufferParameteriv(GLuint f, GLenum p, GLint* v) {
@@ -312,85 +350,218 @@ void glGetNamedFramebufferParameteriv(GLuint f, GLenum p, GLint* v) {
     else if (p == 0x9312) *v = fo.defaultLayers;
     else if (p == 0x9313) *v = fo.defaultSamples;
     else if (p == 0x9314) *v = fo.defaultFixedSampleLocations;
+    else if (p == 0x9342) *v = fo.programmableSampleLocations;
+    else if (p == 0x9343) *v = fo.sampleLocationPixelGrid;
     else { c.errors.Record(0x0500); return; }
+}
+// --- Draw/Read buffer constant validation -----------------------------------
+// GL 4.6 core + ARB_direct_state_access (table 17.4/17.5/17.6):
+//   • FBO bị ảnh hưởng  → chấp nhận GL_NONE | GL_COLOR_ATTACHMENTi (i <
+//     MAX_COLOR_ATTACHMENTS = 8). Hằng số của default FB (table 17.4) →
+//     INVALID_OPERATION; COLOR_ATTACHMENT0+i với i >= 8 → INVALID_OPERATION;
+//     còn lại → INVALID_ENUM.
+//   • Default FB (f = 0): singular → table 17.4 (NONE, FRONT*/BACK*/LEFT/
+//     RIGHT/FRONT_AND_BACK, AUXi); plural (DrawBuffers) → table 17.6 (NONE,
+//     FRONT_LEFT/RIGHT, BACK_LEFT/RIGHT, AUXi — FRONT/BACK/LEFT/RIGHT/
+//     FRONT_AND_BACK KHÔNG hợp lệ). Hằng số attachment → INVALID_OPERATION;
+//     còn lại → INVALID_ENUM. (Hằng số table 17.4 trong plural → INVALID_OPERATION.)
+//   • glDrawBuffers: mọi hằng số lặp lại (khác GL_NONE) → INVALID_OPERATION.
+// Spec không yêu cầu gì về "buffer được cấp phát" cho default FB trên TGLMT
+// (không biết cấu hình drawable) → chấp nhận mọi hằng số hợp lệ, không đoán.
+enum class BufConstResult { Ok, InvalidOp, InvalidEnum };
+static bool IsDefaultFBConst(GLenum v, bool frontBackOk) {
+    switch (v) {
+        case 0x0000: // GL_NONE
+        case 0x0400: case 0x0401: case 0x0402: case 0x0403: // FRONT_LEFT/RIGHT, BACK_LEFT/RIGHT
+        case 0x040C: case 0x040D: case 0x040E: case 0x040F: // AUX0..AUX3
+            return true;
+        case 0x0404: case 0x0405:                           // FRONT, BACK
+        case 0x0406: case 0x0407:                           // LEFT, RIGHT
+        case 0x0408:                                        // FRONT_AND_BACK
+            return frontBackOk;
+        default: return false;
+    }
+}
+static BufConstResult ClassifyBufferConst(GLenum v, bool plural, bool fbo) {
+    bool defSingul = IsDefaultFBConst(v, true);
+    bool defPlural = IsDefaultFBConst(v, false);
+    bool attOk = (v >= 0x8CE0 && v <= 0x8CE7);
+    bool attAny = (v >= 0x8CE0 && v <= 0x8CFF); // COLOR_ATTACHMENT0..31
+    if (fbo) {
+        if (v == 0x0000 || attOk) return BufConstResult::Ok;
+        if (attAny || defSingul) return BufConstResult::InvalidOp;
+        return BufConstResult::InvalidEnum;
+    }
+    if (plural ? defPlural : defSingul) return BufConstResult::Ok;
+    if (defSingul || attAny) return BufConstResult::InvalidOp; // hằng số bảng khác
+    return BufConstResult::InvalidEnum;
+}
+static void ApplyDrawBuffers(Context& c, GLuint fbo, std::vector<GLenum> v) {
+    if (fbo == 0) { // default FB: DRAW_BUFFER (0x0C01) + DRAW_BUFFERi (0x8825+i)
+        for (GLuint i = 0; i < 8; ++i) {
+            GLenum val = i < v.size() ? v[i] : (GLenum)0x0000;
+            c.state.SetShadow(0x8825 + i, &val, 4);
+        }
+        GLenum first = v.empty() ? (GLenum)0x0000 : v[0];
+        c.state.SetShadow(0x0C01, &first, 4);
+        return;
+    }
+    auto it = c.fbos.find(fbo);
+    if (it != c.fbos.end()) it->second.drawBuffers = std::move(v);
+}
+static bool ValidateDrawBufferArray(Context& c, const GLenum* b, GLsizei n,
+                                    bool fboMode) {
+    for (GLsizei i = 0; i < n; ++i) {
+        BufConstResult r = ClassifyBufferConst(b[i], /*plural=*/true, fboMode);
+        if (r == BufConstResult::InvalidOp) { c.errors.Record(0x0502); return false; }
+        if (r == BufConstResult::InvalidEnum) { c.errors.Record(0x0500); return false; }
+    }
+    for (GLsizei i = 0; i < n; ++i) {
+        if (b[i] == 0x0000) continue; // GL_NONE được lặp lại
+        for (GLsizei j = i + 1; j < n; ++j)
+            if (b[j] == b[i]) { c.errors.Record(0x0502); return false; }
+    }
+    return true;
+}
+static void ApplyReadBuffer(Context& c, GLuint fbo, GLenum b) {
+    BufConstResult r = ClassifyBufferConst(b, /*plural=*/false, fbo != 0);
+    if (r == BufConstResult::InvalidOp) { c.errors.Record(0x0502); return; }
+    if (r == BufConstResult::InvalidEnum) { c.errors.Record(0x0500); return; }
+    if (fbo == 0) { c.state.SetShadow(0x0C02, &b, 4); return; }
+    auto it = c.fbos.find(fbo);
+    if (it != c.fbos.end()) it->second.readBuffer = b;
+}
+// Core completeness: attachment sizes/layers. Spec §9.4.2 — GL 4.1+
+// (ARB_ES2_compatibility, core since 4.1) ĐÃ GỠ các clause DRAW_BUFFER/
+// READ_BUFFER: draw/read buffer trỏ attachment trống không còn làm FBO
+// incomplete — bị bỏ qua như GL_NONE khi ghi/đọc (spec: fragment color không
+// được ghi vào buffer đó). Sample-count consistency is enforced by the draw
+// path for 2D attachments; MSAA depth is currently an internal Metal
+// attachment (see TRUTH_REPORT limitations).
+static GLenum CheckFramebufferComplete(Context& c, FramebufferObject& f) {
+    bool any = false;
+    GLsizei refW = 0, refH = 0;
+    bool refLayered = false;
+    GLsizei refLayers = 0;
+    auto check = [&](GLuint id, GLint level, GLint layer) -> GLenum {
+        if (!id) return 0x8CD5; // GL_FRAMEBUFFER_COMPLETE sentinel: attached
+        auto it = c.textures.find(id);
+        if (it == c.textures.end() || it->second.w == 0 || it->second.h == 0)
+            return 0x8CD6; // INCOMPLETE_ATTACHMENT
+        const TextureObject& tx = it->second;
+        if (!any) {
+            any = true;
+            refW = tx.w >> level; if (refW < 1) refW = 1;
+            refH = tx.h >> level; if (refH < 1) refH = 1;
+            bool isLayeredType = tx.target == 0x8C1A /*2D_ARRAY*/ ||
+                                 tx.target == 0x806F /*3D*/ ||
+                                 tx.target == 0x8513 /*CUBE*/ ||
+                                 tx.target == 0x9009 /*CUBE_ARRAY*/;
+            refLayered = (layer < 0) && isLayeredType && tx.d > 1;
+            refLayers = refLayered ? (GLsizei)(tx.target == 0x806F ? (tx.d >> level) : tx.d) : 1;
+            if (refLayers < 1) refLayers = 1;
+        }
+        GLsizei w = tx.w >> level; if (w < 1) w = 1;
+        GLsizei h = tx.h >> level; if (h < 1) h = 1;
+        if (w != refW || h != refH) return 0x8CD9; // INCOMPLETE_DIMENSIONS
+        bool isLayeredType = tx.target == 0x8C1A || tx.target == 0x806F ||
+                             tx.target == 0x8513 || tx.target == 0x9009;
+        bool layered = (layer < 0) && isLayeredType && tx.d > 1;
+        GLsizei layers = layered
+            ? (GLsizei)(tx.target == 0x806F ? (tx.d >> level) : tx.d) : 1;
+        if (layers < 1) layers = 1;
+        if (layered != refLayered || (layered && layers != refLayers))
+            return 0x8DA8; // INCOMPLETE_LAYER_TARGETS
+        return 0x8CD5;
+    };
+    for (auto& kv : f.colorTex) {
+        GLint lvl = 0, lyr = -1;
+        auto li = f.colorLevel.find(kv.first);
+        if (li != f.colorLevel.end()) lvl = li->second;
+        auto yi = f.colorLayer.find(kv.first);
+        if (yi != f.colorLayer.end()) lyr = yi->second;
+        GLenum st = check(kv.second, lvl, lyr);
+        if (st != 0x8CD5) return st;
+    }
+    GLenum st = check(f.depthTex, f.depthLevel, f.depthLayer);
+    if (st != 0x8CD5) return st;
+    st = check(f.stencilTex, f.stencilLevel, f.stencilLayer);
+    if (st != 0x8CD5) return st;
+    st = check(f.depthStencilTex, f.depthStencilLevel, f.depthStencilLayer);
+    if (st != 0x8CD5) return st;
+    // ARB_framebuffer_no_attachments: a sized no-attachment FBO is complete.
+    if (!any && f.defaultWidth <= 0 && f.defaultHeight <= 0)
+        return 0x8CD7; // MISSING_ATTACHMENT
+    // GL 4.1+ (ARB_ES2_compatibility, core): KHÔNG còn clause draw/read
+    // buffer trong completeness — draw/read buffer trỏ attachment trống bị
+    // bỏ qua như GL_NONE (không ghi/đọc gì), FBO vẫn complete.
+    return 0x8CD5;
 }
 GLenum glCheckFramebufferStatus(GLenum t) {
     Context& c = Context::Current();
+    // target phải là DRAW(0x8CA9) / READ(0x8CA8) / FRAMEBUFFER(0x8D40)
+    if (t != 0x8CA9 && t != 0x8CA8 && t != 0x8D40) { c.errors.Record(0x0500); return 0; }
     GLuint fbo = ResolveFBOForTarget(c, t);
     if (fbo == 0) return 0x8CD5; // default framebuffer
     auto it = c.fbos.find(fbo);
     if (it == c.fbos.end()) { c.errors.Record(0x0502); return 0; }
-    auto& f = it->second;
-    bool any = false;
-    auto checkTex = [&](GLuint id) -> bool {
-        if (!id) return true;
-        any = true;
-        auto it2 = c.textures.find(id);
-        return it2 != c.textures.end() && it2->second.w > 0 && it2->second.h > 0;
-    };
-    for (auto& kv : f.colorTex) if (!checkTex(kv.second)) return 0x8CD6; // INCOMPLETE_ATTACHMENT
-    if (!checkTex(f.depthTex)) return 0x8CD6;
-    if (!checkTex(f.stencilTex)) return 0x8CD6;
-    if (!checkTex(f.depthStencilTex)) return 0x8CD6;
-    // ARB_framebuffer_no_attachments: a sized no-attachment FBO is complete.
-    if (!any && f.defaultWidth <= 0 && f.defaultHeight <= 0) return 0x8CD7; // MISSING_ATTACHMENT
-    return 0x8CD5; // FRAMEBUFFER_COMPLETE
+    return CheckFramebufferComplete(c, it->second);
 }
 GLenum glCheckNamedFramebufferStatus(GLuint fbo, GLenum t) {
     Context& c = Context::Current();
+    if (t != 0x8CA9 && t != 0x8CA8 && t != 0x8D40) { c.errors.Record(0x0500); return 0; }
     if (fbo == 0) return 0x8CD5;
-    if (!c.fbos.count(fbo)) { c.errors.Record(0x0502); return 0; }
-    // Route through the binding-independent path by temporarily using fbo.
     auto it = c.fbos.find(fbo);
-    auto& f = it->second;
-    bool any = false;
-    auto checkTex = [&](GLuint id) -> bool {
-        if (!id) return true; any = true;
-        auto it2 = c.textures.find(id);
-        return it2 != c.textures.end() && it2->second.w > 0 && it2->second.h > 0;
-    };
-    for (auto& kv : f.colorTex) if (!checkTex(kv.second)) return 0x8CD6;
-    if (!checkTex(f.depthTex)) return 0x8CD6;
-    if (!checkTex(f.stencilTex)) return 0x8CD6;
-    if (!checkTex(f.depthStencilTex)) return 0x8CD6;
-    if (!any && f.defaultWidth <= 0 && f.defaultHeight <= 0) return 0x8CD7;
-    return 0x8CD5;
+    if (it == c.fbos.end()) { c.errors.Record(0x0502); return 0; }
+    return CheckFramebufferComplete(c, it->second);
 }
 void glDrawBuffer(GLenum b) {
     Context& c = Context::Current();
     GLuint fbo = c.state.BoundDrawFBO();
-    if (fbo == 0) { c.state.SetShadow(0x0C01, &b, 4); return; }
-    auto it = c.fbos.find(fbo);
-    if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
-    it->second.drawBuffers = {b};
+    BufConstResult r = ClassifyBufferConst(b, /*plural=*/false, fbo != 0);
+    if (r == BufConstResult::InvalidOp) { c.errors.Record(0x0502); return; }
+    if (r == BufConstResult::InvalidEnum) { c.errors.Record(0x0500); return; }
+    ApplyDrawBuffers(c, fbo, {b});
 }
 void glDrawBuffers(GLsizei n, const GLenum* b) {
     Context& c = Context::Current();
-    if (n < 0 || n > 8) { c.errors.Record(0x0501); return; }
+    if (n < 0 || n > 8 /*MAX_DRAW_BUFFERS*/) { c.errors.Record(0x0501); return; }
+    if (n > 0 && !b) { c.errors.Record(0x0501); return; }
     GLuint fbo = c.state.BoundDrawFBO();
-    if (fbo == 0) { // default FB: chỉ lưu shadow (single buffer)
-        if (n > 0) c.state.SetShadow(0x0C01, &b[0], 4);
-        return;
-    }
-    auto it = c.fbos.find(fbo);
-    if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
-    it->second.drawBuffers.assign(b, b + n);
+    if (!ValidateDrawBufferArray(c, b, n, fbo != 0)) return; // atomic: không đổi state
+    ApplyDrawBuffers(c, fbo, b ? std::vector<GLenum>(b, b + n) : std::vector<GLenum>{});
 }
 void glNamedFramebufferDrawBuffer(GLuint f, GLenum b) {
+    // DSA (ARB_direct_state_access): f == 0 → default framebuffer; khác 0 phải
+    // là FBO tồn tại (không thì INVALID_OPERATION).
     Context& c = Context::Current();
-    auto it = c.fbos.find(f);
-    if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
-    it->second.drawBuffers = {b};
+    if (f != 0 && !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
+    BufConstResult r = ClassifyBufferConst(b, /*plural=*/false, f != 0);
+    if (r == BufConstResult::InvalidOp) { c.errors.Record(0x0502); return; }
+    if (r == BufConstResult::InvalidEnum) { c.errors.Record(0x0500); return; }
+    ApplyDrawBuffers(c, f, {b});
 }
 void glNamedFramebufferDrawBuffers(GLuint f, GLsizei n, const GLenum* b) {
+    // DSA: f == 0 → default framebuffer; khác 0 phải là FBO tồn tại.
     Context& c = Context::Current();
-    if (n < 0 || n > 8) { c.errors.Record(0x0501); return; }
-    auto it = c.fbos.find(f);
-    if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
-    it->second.drawBuffers.assign(b, b + n);
+    if (n < 0 || n > 8 /*MAX_DRAW_BUFFERS*/) { c.errors.Record(0x0501); return; }
+    if (n > 0 && !b) { c.errors.Record(0x0501); return; }
+    if (f != 0 && !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
+    if (!ValidateDrawBufferArray(c, b, n, f != 0)) return; // atomic: không đổi state
+    ApplyDrawBuffers(c, f, b ? std::vector<GLenum>(b, b + n) : std::vector<GLenum>{});
 }
-void glReadBuffer(GLenum b) { Context::Current().state.SetShadow(0x0C02 /*READ_BUFFER*/, &b, 4); }
-void glNamedFramebufferReadBuffer(GLuint f, GLenum b) { (void)f; glReadBuffer(b); }
+void glReadBuffer(GLenum b) {
+    // Spec §18.2: áp lên READ_FRAMEBUFFER binding (không phải DRAW).
+    Context& c = Context::Current();
+    GLuint fbo = c.state.BoundReadFBO();
+    ApplyReadBuffer(c, fbo, b);
+}
+void glNamedFramebufferReadBuffer(GLuint f, GLenum b) {
+    // DSA: f == 0 → default read framebuffer; khác 0 phải là FBO tồn tại.
+    Context& c = Context::Current();
+    if (f != 0 && !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
+    ApplyReadBuffer(c, f, b);
+}
 // Blit có default framebuffer tham gia (composite cuối menu/post chain ra màn
 // hình). Toàn bộ pipeline TGLMT lưu pixels theo quy ước GL-order (byte đầu =
 // row 0 = đáy GL, cả shadow lẫn GPU — do viewport GL-correct h<0; present
@@ -736,6 +907,10 @@ void glBlitNamedFramebuffer(GLuint r, GLuint d, GLint s0, GLint s1, GLint s2, GL
     // glBlitNamedFramebuffer(readFbo, drawFbo, ...) — bug cũ bỏ qua r/d, dùng
     // binding hiện tại (sai khi Core path bind khác). Tôn trọng r/d bằng bind tạm.
     Context& c = Context::Current();
+    // DSA: r/d == 0 → default framebuffer; khác 0 phải là FBO tồn tại
+    // (không thì INVALID_OPERATION) — spec §18.3 / ARB_direct_state_access.
+    if (r != 0 && !c.fbos.count(r)) { c.errors.Record(0x0502); return; }
+    if (d != 0 && !c.fbos.count(d)) { c.errors.Record(0x0502); return; }
     GLuint savedR = c.state.BoundReadFBO();
     GLuint savedD = c.state.BoundDrawFBO();
     c.state.BindFBO(0x8CA8 /*READ*/, r);
@@ -833,13 +1008,26 @@ void glClearBufferfv(GLenum b, GLint d, const GLfloat* v) {
     // đụng slot khác); fallback deferred (Null) ghi màu riêng slot.
     if (b == 0x1800 /*COLOR*/ && v) {
         if (d < 0 || d >= 8) { c.errors.Record(0x0501); return; } // INVALID_VALUE
-        ClrProbeLog(c, c.state.BoundDrawFBO(), 0x00004000u);
-        if (AppleClearBufferImage(c.state.BoundDrawFBO(), d, v)) return;
+        GLuint fbo = c.state.BoundDrawFBO();
+        ClrProbeLog(c, fbo, 0x00004000u);
+        // d là CHỈ SỐ DRAW BUFFER (spec: clear đúng DRAW_BUFFERd) — d trỏ
+        // GL_NONE / không nằm trong danh sách → không clear gì (đúng GL).
+        if (fbo != 0) {
+            auto fit = c.fbos.find(fbo);
+            if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
+            const auto& dbs = fit->second.drawBuffers;
+            if ((size_t)d >= dbs.size() || DrawBufferAttachmentIndex(dbs[(size_t)d]) < 0)
+                return; // NONE/ngoài danh sách → no-op
+        } else if (c.CurrentDrawBuffer((GLuint)d) == 0x0000) {
+            return; // default FB: fragment color d = NONE
+        }
+        // Metal attachment d ↔ DRAW_BUFFERd → slot d là chỉ số đúng ở cả hai backend.
+        if (AppleClearBufferImage(fbo, d, v)) return;
         for (int k = 0; k < 4; ++k) c.appleClearColorSlot[d][k] = v[k];
         c.appleClearColorSlots |= (uint8_t)(1u << d);
         c.applePendingClear = true;
         c.appleClearMask |= 0x00004000u;
-        c.appleClearFBO = c.state.BoundDrawFBO();
+        c.appleClearFBO = fbo;
         return;
     }
     if (b == 0x1801 /*DEPTH*/ && v) {
@@ -850,7 +1038,17 @@ void glClearBufferfv(GLenum b, GLint d, const GLfloat* v) {
         c.appleClearFBO = c.state.BoundDrawFBO();
         return;
     }
-    if (b == 0x1802 /*STENCIL*/ && v) { c.clearStencil = (GLint)v[0]; return; }
+    // STENCIL (0x1802): phải CLEAR stencil thật (trước đây chỉ lưu giá trị,
+    // không clear gì) — d bị ignore như các buffer khác.
+    if (b == 0x1802 /*STENCIL*/ && v) {
+        c.clearStencil = (GLint)v[0];
+        if (AppleClearNow(0x00000400u)) return;
+        c.applePendingClear = true;
+        c.appleClearMask |= 0x00000400u;
+        c.appleClearFBO = c.state.BoundDrawFBO();
+        return;
+    }
+    c.errors.Record(0x0500); // INVALID_ENUM: buffer khác COLOR/DEPTH/STENCIL
     (void)d;
 }
 void glClearBufferiv(GLenum b, GLint d, const GLint* v) {
@@ -863,21 +1061,27 @@ void glClearBufferuiv(GLenum b, GLint d, const GLuint* v) {
 }
 void glClearBufferfi(GLenum b, GLint d, GLfloat dep, GLint st) {
     Context& c = Context::Current();
-    (void)b; (void)d;
-    c.clearDepth = dep; c.clearStencil = st;
-    GLbitfield m = 0x00000100u | 0x00000400u;
+    (void)d; // DEPTH/STENCIL/DEPTH_STENCIL: d không dùng
+    GLbitfield m = 0;
+    if (b == 0x1801 /*DEPTH*/) { c.clearDepth = dep; m = 0x00000100u; }
+    else if (b == 0x1802 /*STENCIL*/) { c.clearStencil = st; m = 0x00000400u; }
+    else if (b == 0x84F9 /*GL_DEPTH_STENCIL*/) {
+        c.clearDepth = dep; c.clearStencil = st;
+        m = 0x00000100u | 0x00000400u;
+    } else { c.errors.Record(0x0500); return; } // INVALID_ENUM
     if (AppleClearNow(m)) return;
     c.applePendingClear = true;
     c.appleClearMask |= m;
     c.appleClearFBO = c.state.BoundDrawFBO();
 }
 void glClearNamedFramebufferfv(GLuint f, GLenum b, GLint d, const GLfloat* v) {
-    // DSA: clear FBO chỉ định — hiện tôn trọng f (bind tạm), đúng hơn bản cũ bỏ qua.
+    // DSA: f == 0 → default draw framebuffer; khác 0 phải là FBO tồn tại
+    // (không thì INVALID_OPERATION). Clear áp dụng lên framebuffer ĐÍCH,
+    // không phụ thuộc binding hiện tại (bind tạm rồi trả lại).
     Context& c = Context::Current();
+    if (f != 0 && !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
     GLuint saved = c.state.BoundDrawFBO();
     if (f != saved) {
-        auto it = c.fbos.find(f);
-        if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
         c.state.BindFBO(0x8CA9 /*DRAW_FRAMEBUFFER*/, f);
         glClearBufferfv(b, d, v);
         c.state.BindFBO(0x8CA9, saved);
@@ -894,11 +1098,11 @@ void glClearNamedFramebufferuiv(GLuint f, GLenum b, GLint d, const GLuint* v) {
     glClearNamedFramebufferfv(f, b, d, fl);
 }
 void glClearNamedFramebufferfi(GLuint f, GLenum b, GLint d, GLfloat dep, GLint st) {
+    // DSA: f == 0 → default draw framebuffer; khác 0 phải là FBO tồn tại.
     Context& c = Context::Current();
+    if (f != 0 && !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
     GLuint saved = c.state.BoundDrawFBO();
     if (f != saved) {
-        auto it = c.fbos.find(f);
-        if (it == c.fbos.end()) { c.errors.Record(0x0502); return; }
         c.state.BindFBO(0x8CA9, f);
         glClearBufferfi(b, d, dep, st);
         c.state.BindFBO(0x8CA9, saved);

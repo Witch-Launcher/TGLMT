@@ -41,6 +41,39 @@ static char KindOf(const std::unordered_map<std::string, char>& kinds, const std
     return it == kinds.end() ? '2' : it->second;
 }
 
+// ARB_sample_locations: vị trí sample là state của draw framebuffer, nhưng Metal
+// chỉ nhận trên MTLRenderPassDescriptor trước khi tạo encoder. Gọi mỗi draw để
+// target MSAA (persistent) phản ánh đúng FBO/default state hiện tại.
+static void SyncTargetSamplePositions(Context& c, metal::IRenderTarget* target) {
+    if (!target || target->sampleCount() <= 1) return;
+    const std::vector<GLfloat>* table = nullptr;
+    bool enabled = false;
+    GLuint fboId = c.state.BoundDrawFBO();
+    if (fboId) {
+        auto it = c.fbos.find(fboId);
+        if (it != c.fbos.end()) {
+            enabled = it->second.programmableSampleLocations != 0;
+            table = &it->second.sampleLocations;
+        }
+    } else {
+        enabled = c.ext.defaultProgrammableSampleLocations != 0;
+        table = &c.ext.defaultSampleLocations;
+    }
+    if (!enabled) { target->setSamplePositions(nullptr, 0); return; }
+    GLsizei n = (GLsizei)target->sampleCount();
+    std::vector<GLfloat> xy((size_t)n * 2, 0.5f);
+    if (table) {
+        for (GLsizei i = 0; i < n; ++i) {
+            size_t o = (size_t)i * 2;
+            if (o + 1 < table->size()) {
+                xy[o] = (*table)[o];
+                xy[o + 1] = (*table)[o + 1];
+            }
+        }
+    }
+    target->setSamplePositions(xy.data(), (uint32_t)n);
+}
+
 // Deferred full ring upload: lấy (buf,off) từ Context ring, memcpy + didModify.
 // 0 MTLBuffer alloc trong frame. Fallback newBuffer khi ring đầy/Null + đếm tempAllocs.
 static size_t RingUpload(Context& c, const void* data, size_t n,
@@ -107,6 +140,40 @@ static std::shared_ptr<metal::ITexture> FallbackBlackCube(Context& c) {
         cache[c.device.get()] = t;
     }
     return t;
+}
+
+static std::shared_ptr<metal::ITexture> FallbackBlackArray(Context& c) {
+    static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::ITexture>> cache;
+    auto it = cache.find(c.device.get());
+    if (it != cache.end() && it->second) return it->second;
+    auto t = c.device->newTexture2DArray(1, 1, 1, metal::PixelFormat::RGBA8Unorm);
+    if (t) {
+        uint8_t black[4] = {0, 0, 0, 255};
+        c.device->updateTexture3DLevel(t.get(), 0, 0, 0, 0, 1, 1, black, 4);
+        cache[c.device.get()] = t;
+    }
+    return t;
+}
+static std::shared_ptr<metal::ITexture> FallbackBlack3D(Context& c) {
+    static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::ITexture>> cache;
+    auto it = cache.find(c.device.get());
+    if (it != cache.end() && it->second) return it->second;
+    auto t = c.device->newTexture3D(1, 1, 1, metal::PixelFormat::RGBA8Unorm);
+    if (t) {
+        uint8_t black[4] = {0, 0, 0, 255};
+        c.device->updateTexture3DLevel(t.get(), 0, 0, 0, 0, 1, 1, black, 4);
+        cache[c.device.get()] = t;
+    }
+    return t;
+}
+static std::shared_ptr<metal::ITexture> FallbackForKind(Context& c, char kind) {
+    switch (kind) {
+        case 'C': return FallbackBlackCube(c);
+        case 'S': return FallbackShadowTex(c);
+        case 'A': return FallbackBlackArray(c);
+        case '3': case 'x': case 'y': return FallbackBlack3D(c);
+        default: return FallbackBlackTex(c);
+    }
 }
 static std::shared_ptr<metal::IBuffer> FallbackZeroBuf(Context& c) {
     static thread_local std::map<metal::IDevice*, std::shared_ptr<metal::IBuffer>> cache;
@@ -305,6 +372,22 @@ static metal::ITexture* LevelView(TextureObject& tx, GLint level, GLint layer = 
     tx.layerViews[key] = v;
     return v.get();
 }
+// MSAA 2D array target dùng chung 1 AppleTarget cho mọi layer; chọn slice
+// trước khi mở pass (color + depth của target đều là MultisampleArray).
+static void SyncMSAATargetLayer(Context& c, GLuint fbo, metal::IRenderTarget* target) {
+    if (!target) return;
+    auto fit = c.fbos.find(fbo);
+    if (fit == c.fbos.end()) return;
+    GLint layer = 0;
+    auto ci = fit->second.colorLayer.find(0);
+    if (ci != fit->second.colorLayer.end() && ci->second >= 0) layer = ci->second;
+    target->setColorAttachmentLayer(0, (uint32_t)layer);
+    GLint depthLayer = 0;
+    if (fit->second.depthTex && fit->second.depthLayer >= 0)
+        depthLayer = fit->second.depthLayer;
+    target->setDepthAttachmentLayer((uint32_t)depthLayer);
+}
+
 static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
                               const float* slotRGBA) {
     Context& c = Context::Current();
@@ -313,41 +396,58 @@ static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
     // các slot glDrawBuffers (+depth nếu có).
     std::shared_ptr<metal::IRenderTarget> target;
     bool hasDepthAny = false;
+    bool anyCol = true; // default FB luôn có color attachment
     if (fbo == 0) {
+        if (slotOnly >= 0 && c.CurrentDrawBuffer((GLuint)slotOnly) == 0x0000) {
+            // DRAW_BUFFERd = GL_NONE → không clear gì (đúng GL).
+            ConsumeDeferredClear(c);
+            return true;
+        }
         target = c.device->defaultRenderTarget();
     } else {
         auto fit = c.fbos.find(fbo);
         if (fit == c.fbos.end()) return false;
         const auto& dbs = fit->second.drawBuffers;
-        uint32_t nSlots = dbs.empty() ? 1 : (uint32_t)std::min<size_t>(dbs.size(), 8);
-        if (slotOnly >= 0) nSlots = (uint32_t)slotOnly + 1; // chỉ giữ đúng slot đích
-        metal::ITexture* colPtrs[8] = {};
-        for (uint32_t s = 0; s < nSlots && s < 8; ++s) {
-            if (slotOnly >= 0 && (GLint)s != slotOnly) continue;
-            GLenum db = dbs.empty() ? 0x8CE0 : dbs[s];
-            if (db < 0x8CE0 || db > 0x8CE7) continue; // GL_NONE
-            auto cit = fit->second.colorTex.find((GLint)(db - 0x8CE0));
-            if (cit == fit->second.colorTex.end()) continue;
+        // slotOnly = CHỈ SỐ DRAW BUFFER của glClearBufferfv(COLOR, d) — resolve
+        // attachment tương ứng; d = GL_NONE hoặc ngoài danh sách → không clear gì.
+        if (slotOnly >= 0 &&
+            (slotOnly >= (GLint)dbs.size() ||
+             DrawBufferAttachmentIndex(dbs[(size_t)slotOnly]) < 0)) {
+            ConsumeDeferredClear(c);
+            return true;
+        }
+        // Metal attachment i ↔ GL fragment color i ↔ slot i của DRAW_BUFFERi.
+        // Attachment i của pass = attachment (DRAW_BUFFERi − COLOR_ATTACHMENT0);
+        // slot NONE/thiếu → attachment nil (hợp lệ trong Metal pass).
+        auto buildOne = [&](uint32_t s) -> metal::ITexture* {
+            GLint a = DrawBufferAttachmentIndex(dbs[s]);
+            if (a < 0) return nullptr;
+            auto cit = fit->second.colorTex.find(a);
+            if (cit == fit->second.colorTex.end()) return nullptr;
             auto tit = c.textures.find(cit->second);
-            if (tit == c.textures.end() || !tit->second.gpu) continue;
+            if (tit == c.textures.end() || !tit->second.gpu) return nullptr;
             // Như AppleDrawGL: clear vào mip view level>0 của texture 1-level là
             // no-op (tránh clear NHẦM level 0 = wipe atlas). Tiêu thụ deferred.
-            auto lit = fit->second.colorLevel.find((GLint)(db - 0x8CE0));
+            auto lit = fit->second.colorLevel.find(a);
             GLint fboLevel = (lit == fit->second.colorLevel.end()) ? 0 : lit->second;
-            auto layit = fit->second.colorLayer.find((GLint)(db - 0x8CE0));
+            auto layit = fit->second.colorLayer.find(a);
             GLint fboLayer = (layit == fit->second.colorLayer.end()) ? -1 : layit->second;
             metal::ITexture* lv = LevelView(tit->second, fboLevel, fboLayer);
-            if (!lv) {
-                ++c.appleStats.mipLevelSkipped;
+            if (!lv) ++c.appleStats.mipLevelSkipped;
+            return lv;
+        };
+        uint32_t nSlots = (uint32_t)std::min<size_t>(dbs.size(), 8);
+        metal::ITexture* colPtrs[8] = {};
+        if (slotOnly >= 0) {
+            colPtrs[slotOnly] = buildOne((uint32_t)slotOnly);
+            nSlots = (uint32_t)slotOnly + 1;
+            if (!colPtrs[slotOnly]) {
+                // d trỏ attachment thiếu texture/không có mip view: không clear gì.
                 ConsumeDeferredClear(c);
                 return true;
             }
-            colPtrs[s] = lv;
-        }
-        if (slotOnly >= 0 && !colPtrs[slotOnly]) {
-            // d trỏ vào GL_NONE/chưa attach: GL spec — không clear gì.
-            ConsumeDeferredClear(c);
-            return true;
+        } else {
+            for (uint32_t s = 0; s < nSlots; ++s) colPtrs[s] = buildOne(s);
         }
         metal::ITexture* dep = nullptr;
         if (slotOnly < 0 && fit->second.depthTex) {
@@ -355,14 +455,19 @@ static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
             if (dit != c.textures.end() && dit->second.gpu)
                 dep = LevelView(dit->second, fit->second.depthLevel, fit->second.depthLayer);
         }
-        bool anyCol = false;
+        anyCol = false;
         for (uint32_t s = 0; s < nSlots; ++s) if (colPtrs[s]) { anyCol = true; break; }
-        if (!anyCol && !dep) return false;
+        // Không attachment màu nào hợp lệ (draw buffers toàn NONE) mà cũng
+        // không có depth: không có gì để clear — NO-OP, tuyệt đối không trả
+        // false (false → deferred áp lên draw kế tiếp fbo khác = clrmiss#).
+        if (!anyCol && !dep) { ConsumeDeferredClear(c); return true; }
         hasDepthAny = (dep != nullptr);
         // MSAA FBO: clear vào multisample target + depth MSAA, không clear resolve.
         bool msaaClear = false;
         if (nSlots == 1) {
-            auto cit = fit->second.colorTex.find(0);
+            GLint a0 = DrawBufferAttachmentIndex(dbs[0]);
+            auto cit = (a0 >= 0) ? fit->second.colorTex.find(a0)
+                                 : fit->second.colorTex.end();
             if (cit != fit->second.colorTex.end()) {
                 auto tit = c.textures.find(cit->second);
                 if (tit != c.textures.end() && tit->second.samples > 1 && tit->second.msaaTarget) {
@@ -370,6 +475,7 @@ static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
                     if (ct) {
                         target = tit->second.msaaTarget;
                         colPtrs[0] = ct;
+                        SyncMSAATargetLayer(c, fbo, target.get());
                         msaaClear = true;
                     }
                 }
@@ -380,7 +486,10 @@ static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
     }
     if (fbo == 0 && target) hasDepthAny = target->hasDepth();
     if (!target) return false;
-    metal::LoadOp cl = (m & 0x00004000u) ? metal::LoadOp::Clear : metal::LoadOp::Load;
+    // Color clear chỉ hợp lệ khi CÓ attachment màu (GL: fragment color không
+    // attachment không được ghi). Không có → Load (không clear), KHÔNG deferred.
+    metal::LoadOp cl = ((m & 0x00004000u) && anyCol) ? metal::LoadOp::Clear
+                                                     : metal::LoadOp::Load;
     metal::LoadOp dl = ((m & 0x00000100u) && slotOnly < 0) ? metal::LoadOp::Clear
                                                            : metal::LoadOp::Load;
     metal::LoadOp sl = ((m & 0x00000400u) && slotOnly < 0) ? metal::LoadOp::Clear
@@ -608,6 +717,993 @@ static bool BuildPipelineProgram(Context& c, GLuint pipId, ProgramObject& out,
     return true;
 }
 
+// P-Tess T4a/T4b: draw GL_PATCHES bằng Metal tessellation thật.
+// TCS chạy như compute pass (factors + control-point outputs), rồi render pass
+// dùng post-tessellation vertex (TES) + drawPatches. Subset: triangles,
+// T4a: VS không attribute / TCS không in. T4b: VS capture compute + attribute +
+// gl_in + indexed/baseVertex + uniform/sampler/UBO/SSBO/image. Atomic counter và
+// FBO khác default vẫn bị chặn rõ (T4b stage 2d/3).
+// float → IEEE half (tess factor mặc định; giá trị GL thường 1..64).
+static uint16_t FloatToHalfBits(float f) {
+    if (!(f > 0.0f)) return 0;
+    int e = 0;
+    float m = std::frexp(f, &e); // f = m*2^e, m in [0.5,1)
+    int exp = e - 1;
+    if (exp > 15) return 0x7C00;
+    if (exp < -14) {
+        float scaled = f * 16777216.0f; // 2^24
+        if (scaled >= 1024.0f) return 0x03FF;
+        return (uint16_t)(scaled + 0.5f);
+    }
+    uint32_t mant = (uint32_t)((m * 2.0f - 1.0f) * 1024.0f + 0.5f);
+    if (mant >= 1024) { mant = 0; ++exp; }
+    return (uint16_t)(((exp + 15) << 10) | mant);
+}
+
+static size_t TessTypeSize(const std::string& t) {
+    if (t == "float" || t == "int" || t == "uint") return 4;
+    if (t == "vec2" || t == "ivec2" || t == "uvec2" ||
+        t == "float2" || t == "int2" || t == "uint2") return 8;
+    if (t == "vec3" || t == "ivec3" || t == "uvec3" ||
+        t == "float3" || t == "int3" || t == "uint3") return 16; // MSL float3 = 16B
+    if (t == "vec4" || t == "ivec4" || t == "uvec4" ||
+        t == "float4" || t == "int4" || t == "uint4") return 16;
+    return 0;
+}
+struct TGLMTTessAttrDesc {
+    uint32_t type, size, normalized, stride, offset, binding, divisor, pad;
+    float current[4];
+};
+struct TGLMTTessDrawInfo {
+    uint32_t indexed, indexType;
+    int32_t first, baseVertex;
+    uint32_t count, baseInstance, instanceCount, pad1;
+};
+static bool AppleDrawTess(Context& c, ProgramObject& pr, metal::IRenderTarget* target,
+                          GLenum mode, GLsizei count, bool indexed, GLenum indexType,
+                          const void* indexData, size_t indexByteOff, GLuint eboId,
+                          GLint baseVertex, GLint first, GLsizei inst,
+                          GLuint baseInstance) {
+    if (mode != 0x000E /*PATCHES*/) return false;
+    if (inst == 0) return true;
+    if (inst < 0) return false;
+    if (!pr.appleTCS || !pr.appleTCSPipeline || !pr.appleTES || !pr.appleFS) return false;
+    const uint32_t outputCP = (pr.tessControlPoints > 0) ? (uint32_t)pr.tessControlPoints : 3u;
+    const uint32_t inputCP = (uint32_t)(c.state.PatchVertices() > 0 ? c.state.PatchVertices() : 3);
+    if (count <= 0 || count % (GLsizei)inputCP != 0) return true;
+    const uint32_t patchCount = (uint32_t)(count / (GLsizei)inputCP);
+    const uint32_t totalPatches = patchCount * (uint32_t)inst;
+    const uint32_t inputVerts = (uint32_t)count * (uint32_t)inst;
+    const uint32_t outputVerts = totalPatches * outputCP;
+    const size_t factorStride = (pr.tessPatchType == 4) ? 12u : 8u;
+    // Control point / patch outputs: 1 buffer mỗi slot, dùng chung TCS↔TES.
+    std::vector<std::shared_ptr<metal::IBuffer>> keep;
+    std::map<std::string, metal::IBuffer*> byName;   // TCS/TES outputs
+    std::map<std::string, metal::IBuffer*> captureByName; // VS prepass (TCS/TES gl_in)
+    std::map<std::string, metal::IBuffer*> tcsInByName;
+    std::map<int, metal::IBuffer*> bySlot;
+    auto alloc = [&](size_t bytes) -> metal::IBuffer* {
+        auto b = c.device->newBuffer(bytes ? bytes : 16, metal::StorageMode::Shared);
+        if (!b) return nullptr;
+        keep.push_back(b);
+        return b.get();
+    };
+    // T4b stage 2: mỗi stage có TGLMTUniforms riêng. Copy đúng byte đã set qua
+    // glUniform* (pr.uniforms[loc]) vào buffer stage-local; chưa set = zero (GL).
+    auto makeUniformBuffer = [&](const std::vector<ProgramObject::StageUniform>& list,
+                                 size_t bytes) -> metal::IBuffer* {
+        size_t sz = std::max<size_t>(16, (bytes + 15u) & ~size_t(15));
+        std::vector<uint8_t> data(sz, 0);
+        for (auto& e : list) {
+            auto lit = pr.uniformLoc.find(e.name);
+            if (lit == pr.uniformLoc.end()) continue;
+            auto uit = pr.uniforms.find(lit->second);
+            if (uit == pr.uniforms.end() || uit->second.empty()) continue;
+            size_t n = e.size < uit->second.size() ? e.size : uit->second.size();
+            if (e.offset + n <= data.size()) memcpy(data.data() + e.offset, uit->second.data(), n);
+        }
+        auto b = c.device->newBufferWithBytes(data.data(), data.size(),
+                                              metal::StorageMode::Shared);
+        if (!b) return nullptr;
+        keep.push_back(b);
+        return b.get();
+    };
+    metal::IBuffer* vsUB = makeUniformBuffer(pr.vsUniforms, pr.vsUniformBytes);
+    metal::IBuffer* tcsUB = makeUniformBuffer(pr.tcsUniforms, pr.tcsUniformBytes);
+    metal::IBuffer* tesUB = makeUniformBuffer(pr.tesUniforms, pr.tesUniformBytes);
+    metal::IBuffer* fsUB = makeUniformBuffer(pr.fsUniforms, pr.fsUniformBytes);
+    if (!vsUB || !tcsUB || !tesUB || !fsUB) return false;
+    // T4b stage 2: sampler theo unit GL → texture/sampler slot của từng stage.
+    // Thiếu/không khớp → fallback đen (giống draw path thường), không bỏ trống.
+    c.FlushAllTextureStaging();
+    c.FlushAllBufferStaging();
+    auto resolveSampler = [&](const ProgramObject::StageSampler& s,
+                              std::shared_ptr<metal::ITexture>& hold,
+                              std::shared_ptr<metal::ISamplerState>& ss) -> metal::ITexture* {
+        auto uit = pr.samplerUnits.find(s.name);
+        GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+        const TextureObject* txp = nullptr;
+        metal::ITexture* gpu = nullptr;
+        if (unit < 32) {
+            GLuint texId = c.state.BoundTexture(unit, KindTarget(s.kind));
+            auto tit = c.textures.find(texId);
+            if (tit != c.textures.end() && tit->second.gpu) {
+                txp = &tit->second;
+                gpu = txp->gpu.get();
+                c.NoteTextureUsed(texId);
+            }
+        }
+        if (!gpu) {
+            hold = FallbackForKind(c, s.kind);
+            gpu = hold.get();
+            if (!gpu) return nullptr;
+            static thread_local TextureObject dummy;
+            ss = SamplerForUnit(c, 0, dummy, s.kind == 'S');
+        } else {
+            ss = SamplerForUnit(c, unit, *txp, s.kind == 'S');
+        }
+        return gpu;
+    };
+    auto bindComputeSamplers = [&](metal::IComputeEncoder* ce,
+                                   const std::vector<ProgramObject::StageSampler>& list) {
+        for (auto& s : list) {
+            std::shared_ptr<metal::ITexture> hold;
+            std::shared_ptr<metal::ISamplerState> ss;
+            auto* gpu = resolveSampler(s, hold, ss);
+            if (!gpu) continue;
+            ce->setTexture(gpu, (uint32_t)s.texSlot);
+            if (ss && s.sampSlot >= 0) ce->setSamplerState(ss.get(), (uint32_t)s.sampSlot);
+        }
+    };
+    auto bindVertexSamplers = [&](metal::IRenderEncoder* enc,
+                                  const std::vector<ProgramObject::StageSampler>& list) {
+        for (auto& s : list) {
+            std::shared_ptr<metal::ITexture> hold;
+            std::shared_ptr<metal::ISamplerState> ss;
+            auto* gpu = resolveSampler(s, hold, ss);
+            if (!gpu) continue;
+            enc->setVertexTexture(gpu, (uint32_t)s.texSlot);
+            if (ss && s.sampSlot >= 0) enc->setVertexSamplerState(ss.get(), (uint32_t)s.sampSlot);
+        }
+    };
+    auto bindFragmentSamplers = [&](metal::IRenderEncoder* enc,
+                                    const std::vector<ProgramObject::StageSampler>& list) {
+        for (auto& s : list) {
+            std::shared_ptr<metal::ITexture> hold;
+            std::shared_ptr<metal::ISamplerState> ss;
+            auto* gpu = resolveSampler(s, hold, ss);
+            if (!gpu) continue;
+            enc->setFragmentTexture(gpu, (uint32_t)s.texSlot);
+            if (ss && s.sampSlot >= 0) enc->setFragmentSamplerState(ss.get(), (uint32_t)s.sampSlot);
+        }
+    };
+    auto resolveImage = [&](const ProgramObject::ImageSlot& im) -> metal::ITexture* {
+        auto bit = c.imageBindPoints.find((GLuint)im.binding);
+        if (bit != c.imageBindPoints.end() && bit->second.texture) {
+            auto tit = c.textures.find(bit->second.texture);
+            if (tit != c.textures.end() && tit->second.gpu) {
+                c.NoteTextureUsed(bit->second.texture);
+                return tit->second.gpu.get();
+            }
+        }
+        auto fb = FallbackBlackTex(c);
+        return fb ? fb.get() : nullptr;
+    };
+    auto bindComputeImages = [&](metal::IComputeEncoder* ce,
+                                 const std::vector<ProgramObject::ImageSlot>& list) {
+        for (auto& im : list) if (auto* gpu = resolveImage(im)) ce->setTexture(gpu, (uint32_t)im.slot);
+    };
+    auto bindVertexImages = [&](metal::IRenderEncoder* enc,
+                                const std::vector<ProgramObject::ImageSlot>& list) {
+        for (auto& im : list) if (auto* gpu = resolveImage(im)) enc->setVertexTexture(gpu, (uint32_t)im.slot);
+    };
+    auto bindFragmentImages = [&](metal::IRenderEncoder* enc,
+                                  const std::vector<ProgramObject::ImageSlot>& list) {
+        for (auto& im : list) if (auto* gpu = resolveImage(im)) enc->setFragmentTexture(gpu, (uint32_t)im.slot);
+    };
+    auto zeroBlock = FallbackZeroBuf(c);
+    struct TessAtomicBind { metal::IBuffer* buf = nullptr; size_t off = 0; };
+    auto resolveAtomic = [&](const ProgramObject::AtomicSlot& as) -> TessAtomicBind {
+        TessAtomicBind r;
+        auto it = c.atomicBindPoints.find((GLuint)as.binding);
+        if (it == c.atomicBindPoints.end() || !it->second.buffer) return r;
+        auto bt = c.buffers.find(it->second.buffer);
+        if (bt == c.buffers.end() || !bt->second.gpu) return r;
+        r.buf = bt->second.gpu.get();
+        r.off = (size_t)it->second.offset + (size_t)as.offset;
+        c.NoteComputeWriter(it->second.buffer);
+        return r;
+    };
+    auto bindComputeAtomics = [&](metal::IComputeEncoder* ce,
+                                  const std::vector<ProgramObject::AtomicSlot>& list) {
+        for (auto& as : list) {
+            auto r = resolveAtomic(as);
+            if (r.buf) ce->setBuffer(r.buf, (uint32_t)as.slot, r.off);
+            else if (zeroBlock) ce->setBuffer(zeroBlock.get(), (uint32_t)as.slot);
+        }
+    };
+    auto bindVertexAtomics = [&](metal::IRenderEncoder* enc,
+                                 const std::vector<ProgramObject::AtomicSlot>& list) {
+        for (auto& as : list) {
+            auto r = resolveAtomic(as);
+            if (r.buf) enc->setVertexBuffer(r.buf, r.off, (uint32_t)as.slot);
+            else if (zeroBlock) enc->setVertexBuffer(zeroBlock.get(), 0, (uint32_t)as.slot);
+        }
+    };
+    auto bindFragmentAtomics = [&](metal::IRenderEncoder* enc,
+                                   const std::vector<ProgramObject::AtomicSlot>& list) {
+        for (auto& as : list) {
+            auto r = resolveAtomic(as);
+            if (r.buf) enc->setFragmentBuffer(r.buf, r.off, (uint32_t)as.slot);
+            else if (zeroBlock) enc->setFragmentBuffer(zeroBlock.get(), 0, (uint32_t)as.slot);
+        }
+    };
+    // T4b stage 2b: UBO bind theo GL binding point; thiếu/ngắn hơn block thật →
+    // zero fallback (tránh OOB A11), đúng tinh thần draw path thường.
+    struct TessUboBind { metal::IBuffer* buf = nullptr; size_t off = 0; };
+    auto resolveBlock = [&](const ProgramObject::StageBlockSlot& sb) -> TessUboBind {
+        TessUboBind r;
+        GLuint binding = 0;
+        size_t need = 0;
+        if (sb.isStorage) {
+            bool found = false;
+            for (auto& b : pr.storageBlocks)
+                if (b.name == sb.name) {
+                    binding = pr.EffectiveSsboBinding(b.name, b.layoutBinding);
+                    need = b.size;
+                    found = true;
+                    break;
+                }
+            if (!found) return r;
+            auto bit = c.storageBindPoints.find(binding);
+            if (bit == c.storageBindPoints.end() || !bit->second.buffer) return r;
+            auto t = c.buffers.find(bit->second.buffer);
+            if (t == c.buffers.end() || !t->second.gpu) return r;
+            r.buf = t->second.gpu.get();
+            r.off = bit->second.offset;
+            c.NoteComputeWriter(bit->second.buffer);
+        } else {
+            const ProgramObject::UniformBlock* ub = nullptr;
+            for (auto& b : pr.uniformBlocks) if (b.name == sb.name) { ub = &b; break; }
+            if (!ub) return r;
+            auto bit = c.uniformBindPoints.find(ub->binding);
+            if (bit == c.uniformBindPoints.end() || !bit->second.buffer) return r;
+            auto t = c.buffers.find(bit->second.buffer);
+            if (t == c.buffers.end() || !t->second.gpu) return r;
+            need = ub->trueSize ? ub->trueSize : ub->minSize;
+            if (BufferLen(t->second) < bit->second.offset + need) return r;
+            r.buf = t->second.gpu.get();
+            r.off = bit->second.offset;
+            c.NoteBufferUsed(bit->second.buffer);
+        }
+        return r;
+    };
+    auto bindComputeBlocks = [&](metal::IComputeEncoder* ce,
+                                 const std::vector<ProgramObject::StageBlockSlot>& list) {
+        for (auto& sb : list) {
+            if (sb.slot < 0 || sb.slot > 30) continue;
+            auto r = resolveBlock(sb);
+            if (r.buf) ce->setBuffer(r.buf, (uint32_t)sb.slot, r.off);
+            else if (zeroBlock) ce->setBuffer(zeroBlock.get(), (uint32_t)sb.slot);
+        }
+    };
+    auto bindVertexBlocks = [&](metal::IRenderEncoder* enc,
+                                const std::vector<ProgramObject::StageBlockSlot>& list) {
+        for (auto& sb : list) {
+            if (sb.slot < 0 || sb.slot > 30) continue;
+            auto r = resolveBlock(sb);
+            if (r.buf) enc->setVertexBuffer(r.buf, r.off, (uint32_t)sb.slot);
+            else if (zeroBlock) enc->setVertexBuffer(zeroBlock.get(), 0, (uint32_t)sb.slot);
+        }
+    };
+    auto bindFragmentBlocks = [&](metal::IRenderEncoder* enc,
+                                  const std::vector<ProgramObject::StageBlockSlot>& list) {
+        for (auto& sb : list) {
+            if (sb.slot < 0 || sb.slot > 30) continue;
+            auto r = resolveBlock(sb);
+            if (r.buf) enc->setFragmentBuffer(r.buf, r.off, (uint32_t)sb.slot);
+            else if (zeroBlock) enc->setFragmentBuffer(zeroBlock.get(), 0, (uint32_t)sb.slot);
+        }
+    };
+    for (auto& s : pr.tessSlots) {
+        if (!s.isControl || s.isInput) continue;
+        size_t es = TessTypeSize(s.type);
+        if (!es) return false;
+        size_t per = (size_t)(s.isPatch ? (s.count > 0 ? s.count : 1) : outputCP);
+        metal::IBuffer* b = alloc((size_t)totalPatches * per * es);
+        if (!b) return false;
+        bySlot[s.slot] = b;
+        byName[s.name] = b; // cả per-vertex và patch: TES đọc patch[pid]
+    }
+    // GL_PATCH_DEFAULT_OUTER/INNER_LEVEL: TCS có thể chỉ ghi một phần level;
+    // các level còn lại giữ default (mặc định 1.0). Metal không tự điền.
+    std::vector<uint16_t> fdata((size_t)totalPatches * (factorStride / 2), 0);
+    const float* dOuter = c.state.PatchDefaultOuter();
+    const float* dInner = c.state.PatchDefaultInner();
+    for (uint32_t p = 0; p < totalPatches; ++p) {
+        uint16_t* dst = fdata.data() + (size_t)p * (factorStride / 2);
+        if (pr.tessPatchType == 4) {
+            for (int i = 0; i < 4; ++i) dst[i] = FloatToHalfBits(dOuter[i]);
+            for (int i = 0; i < 2; ++i) dst[4 + i] = FloatToHalfBits(dInner[i]);
+        } else {
+            for (int i = 0; i < 3; ++i) dst[i] = FloatToHalfBits(dOuter[i]);
+            dst[3] = FloatToHalfBits(dInner[0]);
+        }
+    }
+    auto factorsSp = c.device->newBufferWithBytes(fdata.data(), fdata.size() * sizeof(uint16_t),
+                                                  metal::StorageMode::Shared);
+    if (!factorsSp) return false;
+    keep.push_back(factorsSp);
+    auto* factors = factorsSp.get();
+    // T4b: VS prepass → buffer capture. Kernel tự fetch attribute qua descriptor
+    // (binding + relativeOffset), nên không cần Metal vertex descriptor.
+    if (!pr.vsCaptureSlots.empty()) {
+        if (!pr.appleVSCapturePipeline || pr.vsCaptureIndexSlot < 0 ||
+            pr.vsCaptureDrawSlot < 0 || pr.vsCaptureDescSlot < 0) return false;
+        GLuint vao = c.state.BoundVAO();
+        auto vaoIt = c.vaos.find(vao);
+        if (vaoIt == c.vaos.end()) { c.appleStats.miscFail++; return false; }
+        VertexArrayObject& v = vaoIt->second;
+        c.FlushAllBufferStaging();
+        c.FlushAllTextureStaging();
+        auto GLTypeSize = [](GLenum t) -> uint32_t {
+            switch (t) {
+                case 0x1400: case 0x1401: return 1;
+                case 0x1402: case 0x1403: case 0x140B: return 2;
+                case 0x1404: case 0x1405: case 0x1406: case 0x140C: return 4;
+                default: return 0; // packed/double chưa hỗ trợ trong capture T4b
+            }
+        };
+        TGLMTTessAttrDesc desc[16] = {};
+        metal::IBuffer* bindBuf[16] = {};
+        size_t bindOff[16] = {};
+        for (int i = 0; i < 16; ++i) {
+            const VertexAttrib& a = v.attribs[i];
+            if (!a.enabled) continue;
+            auto bit = c.buffers.find(a.buffer);
+            if (bit == c.buffers.end() || !bit->second.gpu) {
+                c.appleStats.miscFail++; return false;
+            }
+            uint32_t ts = GLTypeSize(a.type);
+            if (!ts) return false;
+            size_t base = 0;
+            if (a.binding < v.bindings.size() && v.bindings[a.binding].offset > 0)
+                base = (size_t)v.bindings[a.binding].offset;
+            uint32_t stride = (uint32_t)a.stride;
+            if (!stride) stride = (uint32_t)a.size * ts;
+            GLuint divisor = a.divisor;
+            if (!divisor && a.binding < v.bindings.size()) divisor = v.bindings[a.binding].divisor;
+            desc[i] = {a.type, (uint32_t)a.size, (uint32_t)(a.normalized ? 1 : 0),
+                       stride, (uint32_t)a.relativeOffset, a.binding, divisor, 0,
+                       {0.0f, 0.0f, 0.0f, 1.0f}};
+            if (a.binding < 16 && !bindBuf[a.binding]) {
+                bindBuf[a.binding] = bit->second.gpu.get();
+                bindOff[a.binding] = base;
+            }
+        }
+        // Active attribute nhưng GL array tắt: GL dùng current generic value
+        // (glVertexAttrib4f/I4*), không phải zero. Capture kernel đọc current
+        // qua descriptor sentinel binding 0xFFFFFFFF.
+        for (auto& fa : pr.attribFill) {
+            if (fa.loc < 0 || fa.loc > 15) continue;
+            if (v.attribs[fa.loc].enabled) continue;
+            double cur[4] = {0.0, 0.0, 0.0, 1.0};
+            c.state.GetShadow(0x8626 /*CURRENT_VERTEX_ATTRIB*/, cur, sizeof(cur), fa.loc);
+            desc[fa.loc].type = fa.cls == 0 ? 0x1406 : (fa.cls == 1 ? 0x1404 : 0x1405);
+            desc[fa.loc].size = fa.comps;
+            desc[fa.loc].binding = 0xFFFFFFFFu;
+            desc[fa.loc].current[0] = (float)cur[0];
+            desc[fa.loc].current[1] = (float)cur[1];
+            desc[fa.loc].current[2] = (float)cur[2];
+            desc[fa.loc].current[3] = (float)cur[3];
+        }
+        metal::IBuffer* zero = alloc(16);
+        if (!zero) return false;
+        for (int b = 0; b < 16; ++b)
+            if (!bindBuf[b]) { bindBuf[b] = zero; bindOff[b] = 0; }
+        auto descSp = c.device->newBufferWithBytes(desc, sizeof(desc),
+                                                   metal::StorageMode::Shared);
+        auto* descBuf = descSp.get();
+        if (!descBuf) return false;
+        keep.push_back(descSp);
+        TGLMTTessDrawInfo di{};
+        di.indexed = indexed ? 1u : 0u;
+        di.indexType = indexType;
+        di.first = first;
+        di.baseVertex = baseVertex;
+        di.count = (uint32_t)count;
+        di.baseInstance = baseInstance;
+        di.instanceCount = (uint32_t)inst;
+        auto drawSp = c.device->newBufferWithBytes(&di, sizeof(di),
+                                                   metal::StorageMode::Shared);
+        auto* drawBuf = drawSp.get();
+        if (!drawBuf) return false;
+        keep.push_back(drawSp);
+        metal::IBuffer* indexBuf = zero;
+        size_t indexOff = 0;
+        if (indexed) {
+            if (indexType != 0x1403 && indexType != 0x1405) return false;
+            if (eboId) {
+                auto bit = c.buffers.find(eboId);
+                if (bit == c.buffers.end() || !bit->second.gpu) return false;
+                indexBuf = bit->second.gpu.get();
+                indexOff = indexByteOff;
+            } else {
+                if (!indexData) return false;
+                size_t elem = (indexType == 0x1403) ? 2 : 4;
+                auto ib = c.device->newBufferWithBytes(indexData, (size_t)count * elem,
+                                                       metal::StorageMode::Shared);
+                if (!ib) return false;
+                keep.push_back(ib);
+                indexBuf = ib.get();
+            }
+        }
+        for (auto& s : pr.vsCaptureSlots) {
+            size_t es = TessTypeSize(s.type);
+            if (!es) return false;
+            if (s.slot <= 16 || s.slot >= pr.vsCaptureIndexSlot) return false;
+            metal::IBuffer* b = alloc((size_t)inputVerts * es);
+            if (!b) return false;
+            captureByName[s.name] = b;
+        }
+        auto ce = c.device->makeComputeEncoder();
+        if (!ce) return false;
+        ce->setPipeline(pr.appleVSCapturePipeline.get());
+        for (int b = 0; b < 16; ++b)
+            ce->setBuffer(bindBuf[b], (uint32_t)b, bindOff[b]);
+        ce->setBuffer(vsUB, 16);
+        for (auto& s : pr.vsCaptureSlots) {
+            auto it = captureByName.find(s.name);
+            if (it == captureByName.end()) return false;
+            ce->setBuffer(it->second, (uint32_t)s.slot);
+        }
+        bindComputeSamplers(ce.get(), pr.vsCaptureSamplers);
+        bindComputeImages(ce.get(), pr.vsImages);
+        bindComputeBlocks(ce.get(), pr.vsShaderBlocks);
+        bindComputeAtomics(ce.get(), pr.vsAtomics);
+        ce->setBuffer(indexBuf, (uint32_t)pr.vsCaptureIndexSlot, indexOff);
+        ce->setBuffer(drawBuf, (uint32_t)pr.vsCaptureDrawSlot);
+        ce->setBuffer(descBuf, (uint32_t)pr.vsCaptureDescSlot);
+        uint32_t groups = (uint32_t)(((size_t)inputVerts + 63) / 64);
+        ce->dispatchGroups3D(groups, 1, 1, 64, 1, 1);
+        if (!ce->endAndCommit()) return false;
+        // TCS đọc chính buffer capture theo slot của nó (khác số slot cũng được).
+        // Map RIÊNG: passthrough TCS in/out cùng tên không được đè buffer input.
+        for (auto& s : pr.tessSlots) {
+            if (!s.isControl || !s.isInput) continue;
+            auto it = captureByName.find(s.name);
+            if (it == captureByName.end()) return false;
+            tcsInByName[s.name] = it->second;
+        }
+    }
+    // TCS compute pass.
+    {
+        auto ce = c.device->makeComputeEncoder();
+        if (!ce) return false;
+        ce->setPipeline(pr.appleTCSPipeline.get());
+        ce->setBuffer(tcsUB, 16);
+        bindComputeSamplers(ce.get(), pr.tcsSamplers);
+        bindComputeImages(ce.get(), pr.tcsImages);
+        bindComputeBlocks(ce.get(), pr.tcsShaderBlocks);
+        bindComputeAtomics(ce.get(), pr.tcsAtomics);
+        if (pr.tessFactorSlot >= 0) ce->setBuffer(factors, (uint32_t)pr.tessFactorSlot);
+        // GL_PATCH_VERTICES (input CP) — converter index mảng input bằng runtime.
+        uint32_t tcsCounts[2] = {inputCP, patchCount};
+        auto icp = c.device->newBufferWithBytes(tcsCounts, sizeof(tcsCounts),
+                                                metal::StorageMode::Shared);
+        if (!icp) return false;
+        keep.push_back(icp);
+        ce->setBuffer(icp.get(), 30);
+        for (auto& s : pr.tessSlots) {
+            if (!s.isControl || s.isInput) continue;
+            auto it = bySlot.find(s.slot);
+            if (it != bySlot.end()) ce->setBuffer(it->second, (uint32_t)s.slot);
+        }
+        for (auto& s : pr.tessSlots) {
+            if (!s.isControl || !s.isInput) continue;
+            auto it = tcsInByName.find(s.name);
+            if (it != tcsInByName.end()) ce->setBuffer(it->second, (uint32_t)s.slot);
+        }
+        ce->dispatchGroups3D(1, totalPatches, 1, outputCP, 1, 1);
+        if (!ce->endAndCommit()) return false;
+    }
+    metal::PixelFormat colorFmts[8] = {};
+    uint32_t colorCount = target->colorCount();
+    if (colorCount == 0) colorCount = 1;
+    if (colorCount > 8) colorCount = 8;
+    for (uint32_t i = 0; i < colorCount; ++i) {
+        auto* ct = target->colorTexture(i);
+        colorFmts[i] = ct ? ct->pixelFormat() : metal::PixelFormat::Invalid;
+    }
+    auto pipe = c.device->makeTessPipeline(pr.appleTES.get(), "TGLMT_tes",
+                                           pr.appleFS.get(), "TGLMT_fs",
+                                           colorFmts[0], outputCP,
+                                           target->sampleCount(), colorFmts, colorCount,
+                                           (uint32_t)pr.tessSpacing, target->hasDepth(),
+                                           false /* GL TES không dùng stage_in */);
+    if (!pipe) { c.appleStats.noPipeline++; return false; }
+    metal::ClearColor cc{(double)c.clearColor[0], (double)c.clearColor[1],
+                         (double)c.clearColor[2], (double)c.clearColor[3]};
+    SyncTargetSamplePositions(c, target);
+    auto enc = c.device->makeRenderEncoderActions(target, pipe.get(), cc, 1.0,
+                                                   metal::LoadOp::Load, metal::LoadOp::Load);
+    if (!enc) { c.appleStats.miscFail++; return false; }
+    metal::Viewport vp{0, 0, (double)target->width(), (double)target->height(), 0, 1};
+    enc->setViewport(vp);
+    // Cull/front-face: tess encoder trước đây bỏ qua GL_CULL_FACE. Layout(cw)
+    // đảo winding semantics; đổi front-facing winding để cull/gl_FrontFacing đúng.
+    {
+        bool cullOn = c.state.IsEnabled(0x0B44 /*CULL_FACE*/);
+        uint32_t cullM = c.state.CullMode();
+        uint32_t frontF = c.state.FrontFace();
+        if (pr.tessVertexOrder == 1)
+            frontF = (frontF == 0x0900) ? 0x0901u : 0x0900u;
+        if (c.state.ClipOrigin() != 0x8CA2)
+            frontF = (frontF == 0x0900) ? 0x0901u : 0x0900u;
+        enc->setCullMode(cullOn, cullM, frontF);
+    }
+    // TES gl_in = TCS gl_out nếu TCS có ghi, ngược lại VS capture (TCS không
+    // ghi gl_out thì control-point position vẫn là giá trị VS ban đầu).
+    for (auto& s : pr.tessSlots) {
+        if (!s.isInput || !s.isGlIn) continue;
+        auto outIt = byName.find(s.name);
+        if (outIt != byName.end()) {
+            enc->setVertexBuffer(outIt->second, 0, (uint32_t)s.slot);
+            continue;
+        }
+        auto it = captureByName.find(s.name);
+        if (it == captureByName.end()) return false;
+        enc->setVertexBuffer(it->second, 0, (uint32_t)s.slot);
+    }
+    enc->setVertexBuffer(tesUB, 0, 16);
+    if (pr.tesFactorSlot >= 0)
+        enc->setVertexBuffer(factors, 0, (uint32_t)pr.tesFactorSlot);
+    {
+        uint32_t tesCounts[2] = {outputCP, patchCount};
+        auto ocp = c.device->newBufferWithBytes(tesCounts, sizeof(tesCounts),
+                                                metal::StorageMode::Shared);
+        if (!ocp) return false;
+        keep.push_back(ocp);
+        enc->setVertexBuffer(ocp.get(), 0, 30);
+    }
+    enc->setFragmentBuffer(fsUB, 0, 16);
+    bindVertexSamplers(enc.get(), pr.tesSamplers);
+    bindFragmentSamplers(enc.get(), pr.fsTessSamplers);
+    bindVertexImages(enc.get(), pr.tesImages);
+    bindFragmentImages(enc.get(), pr.fsImages);
+    bindVertexBlocks(enc.get(), pr.tesShaderBlocks);
+    bindFragmentBlocks(enc.get(), pr.fsShaderBlocks);
+    bindVertexAtomics(enc.get(), pr.tesAtomics);
+    bindFragmentAtomics(enc.get(), pr.fsAtomics);
+    // Bind lại tess I/O sau cùng: các resource khác (UBO/factor/count) có thể
+    // dùng slot lân cận; bind cuối bảo đảm input của TES không bị ghi đè.
+    for (auto& s : pr.tessSlots) {
+        if (s.isControl || !s.isInput || s.isGlIn) continue;
+        auto it = byName.find(s.name);
+        if (it != byName.end()) enc->setVertexBuffer(it->second, 0, (uint32_t)s.slot);
+    }
+    // PerPatch bắt buộc instanceStride = 0 (factors các patch liền nhau).
+    enc->setTessellationFactorBuffer(factors, 0, 0);
+    enc->drawPatches(outputCP, 0, totalPatches);
+    if (!enc->endAndCommit()) return false;
+    return true;
+}
+
+
+// XFB capture: Metal không có transform feedback; compute prepass chạy đúng VS
+// (attribute + uniform + resource bindings) và pack các varying đã chọn vào
+// buffer XFB. Giai đoạn này chỉ VS-only; GS/TES capture phải chạy sau stage đó.
+static size_t XfbGLSize(const std::string& t) {
+    if (t == "float" || t == "int" || t == "uint") return 4;
+    if (t == "vec2" || t == "ivec2" || t == "uvec2" ||
+        t == "float2" || t == "int2" || t == "uint2") return 8;
+    if (t == "vec3" || t == "ivec3" || t == "uvec3" ||
+        t == "float3" || t == "int3" || t == "uint3") return 12;
+    if (t == "vec4" || t == "ivec4" || t == "uvec4" ||
+        t == "float4" || t == "int4" || t == "uint4") return 16;
+    return 0;
+}
+static bool XfbMatrixDims(const std::string& t, int& cols, int& rows) {
+    int c = 0, r = 0;
+    if (sscanf(t.c_str(), "float%dx%d", &c, &r) == 2 && c >= 2 && c <= 4 && r >= 2 && r <= 4) {
+        cols = c; rows = r; return true;
+    }
+    return false;
+}
+static size_t XfbSlotElemGLSize(const std::string& type) {
+    int c = 0, r = 0;
+    if (XfbMatrixDims(type, c, r)) return (size_t)(4 * c * r);
+    return XfbGLSize(type);
+}
+static size_t XfbSlotElemSrcSize(const std::string& type) {
+    int c = 0, r = 0;
+    if (XfbMatrixDims(type, c, r)) return (size_t)(4 * c * r); // capture ghi scalar packed
+    return TessTypeSize(type);
+}
+static size_t XfbSlotSrcSize(const ProgramObject::VsCaptureSlot& s) {
+    size_t n = XfbSlotElemSrcSize(s.type);
+    if (!n) return 0;
+    return n * (size_t)(s.arraySize > 0 ? s.arraySize : 1);
+}
+static bool XfbArrayElement(const std::string& name, std::string& base, int& index) {
+    size_t lb = name.rfind('[');
+    if (lb == std::string::npos || name.empty() || name.back() != ']') return false;
+    std::string ns = name.substr(lb + 1, name.size() - lb - 2);
+    if (ns.empty()) return false;
+    for (char ch : ns) if (!isdigit((unsigned char)ch)) return false;
+    base = name.substr(0, lb);
+    index = atoi(ns.c_str());
+    return !base.empty();
+}
+static uint64_t XfbPrimCount(GLenum mode, GLsizei count) {
+    switch (mode) {
+        case 0x0000: return (uint64_t)count;
+        case 0x0001: return (uint64_t)count / 2;
+        case 0x0002: return count < 2 ? 0 : (count == 2 ? 1u : (uint64_t)count);
+        case 0x0003: return count >= 2 ? (uint64_t)count - 1 : 0;
+        case 0x0004: return (uint64_t)count / 3;
+        case 0x0005: case 0x0006: return count >= 3 ? (uint64_t)count - 2 : 0;
+        case 0x000A: return (uint64_t)count / 4;
+        case 0x000B: return count >= 4 ? (uint64_t)count - 3 : 0;
+        case 0x000C: return (uint64_t)count / 6;
+        case 0x000D: return count >= 6 ? (uint64_t)(count - 4) / 2 : 0;
+        default: return (uint64_t)count / 3;
+    }
+}
+
+static bool AppleCaptureXFB(Context& c, ProgramObject& pr, XfbObject& xfb, GLenum mode,
+                            GLsizei count, GLsizei inst, bool indexed, GLenum indexType,
+                            const void* indexData, size_t indexByteOff, GLuint eboId,
+                            GLint baseVertex, GLuint baseInstance, GLint first) {
+    if (!xfb.active || xfb.paused || count <= 0 || inst <= 0) return true;
+    if (pr.hasTessStages || pr.hasGeometryStage) return false;
+    if (!pr.appleVSCapturePipeline || pr.vsCaptureSlots.empty()) return false;
+    if ((uint64_t)count * (uint64_t)inst > 0xFFFFFFFFull) return false;
+    const uint32_t totalVerts = (uint32_t)count * (uint32_t)inst;
+    std::vector<std::shared_ptr<metal::IBuffer>> keep;
+    std::map<std::string, metal::IBuffer*> captureByName;
+    auto alloc = [&](size_t bytes) -> metal::IBuffer* {
+        auto b = c.device->newBuffer(bytes ? bytes : 16, metal::StorageMode::Shared);
+        if (!b) return nullptr;
+        keep.push_back(b);
+        return b.get();
+    };
+    // VS uniform buffer: cùng layout stage-local đã dùng cho draw path thường.
+    size_t vsSize = pr.vsUBSize ? pr.vsUBSize : 16;
+    std::vector<uint8_t> vsBytes(vsSize, 0);
+    for (auto& e : pr.uniformLayout) {
+        if (!e.isVS || e.loc < 0) continue;
+        auto uit = pr.uniforms.find(e.loc);
+        if (uit == pr.uniforms.end()) continue;
+        size_t base = e.isVS ? 0 : ((pr.vsUBSize + 15) & ~((size_t)15));
+        size_t local = (e.offset >= base) ? e.offset - base : e.offset;
+        size_t n = std::min(e.size, uit->second.size());
+        if (local + n <= vsBytes.size()) memcpy(vsBytes.data() + local, uit->second.data(), n);
+    }
+    auto vsUBSp = c.device->newBufferWithBytes(vsBytes.data(), vsBytes.size(),
+                                               metal::StorageMode::Shared);
+    if (!vsUBSp) return false;
+    keep.push_back(vsUBSp);
+    metal::IBuffer* vsUB = vsUBSp.get();
+    // Attribute descriptors giống VS prepass của tess.
+    GLuint vao = c.state.BoundVAO();
+    auto vaoIt = c.vaos.find(vao);
+    if (vaoIt == c.vaos.end()) return false;
+    VertexArrayObject& v = vaoIt->second;
+    auto GLTypeSize = [](GLenum t) -> uint32_t {
+        switch (t) {
+            case 0x1400: case 0x1401: return 1;
+            case 0x1402: case 0x1403: case 0x140B: return 2;
+            case 0x1404: case 0x1405: case 0x1406: case 0x140C: return 4;
+            default: return 0;
+        }
+    };
+    TGLMTTessAttrDesc desc[16] = {};
+    metal::IBuffer* bindBuf[16] = {};
+    size_t bindOff[16] = {};
+    for (int i = 0; i < 16; ++i) {
+        const VertexAttrib& a = v.attribs[i];
+        if (!a.enabled) continue;
+        auto bit = c.buffers.find(a.buffer);
+        if (bit == c.buffers.end() || !bit->second.gpu) return false;
+        uint32_t ts = GLTypeSize(a.type);
+        if (!ts) return false;
+        size_t base = 0;
+        if (a.binding < v.bindings.size() && v.bindings[a.binding].offset > 0)
+            base = (size_t)v.bindings[a.binding].offset;
+        uint32_t stride = (uint32_t)a.stride;
+        if (!stride) stride = (uint32_t)a.size * ts;
+        GLuint divisor = a.divisor;
+        if (!divisor && a.binding < v.bindings.size()) divisor = v.bindings[a.binding].divisor;
+        desc[i] = {a.type, (uint32_t)a.size, (uint32_t)(a.normalized ? 1 : 0),
+                   stride, (uint32_t)a.relativeOffset, a.binding, divisor, 0,
+                   {0.0f, 0.0f, 0.0f, 1.0f}};
+        if (a.binding < 16 && !bindBuf[a.binding]) {
+            bindBuf[a.binding] = bit->second.gpu.get();
+            bindOff[a.binding] = base;
+        }
+    }
+    for (auto& fa : pr.attribFill) {
+        if (fa.loc < 0 || fa.loc > 15) continue;
+        if (v.attribs[fa.loc].enabled) continue;
+        double cur[4] = {0.0, 0.0, 0.0, 1.0};
+        c.state.GetShadow(0x8626 /*CURRENT_VERTEX_ATTRIB*/, cur, sizeof(cur), fa.loc);
+        desc[fa.loc].type = fa.cls == 0 ? 0x1406 : (fa.cls == 1 ? 0x1404 : 0x1405);
+        desc[fa.loc].size = fa.comps;
+        desc[fa.loc].binding = 0xFFFFFFFFu;
+        desc[fa.loc].current[0] = (float)cur[0];
+        desc[fa.loc].current[1] = (float)cur[1];
+        desc[fa.loc].current[2] = (float)cur[2];
+        desc[fa.loc].current[3] = (float)cur[3];
+    }
+    metal::IBuffer* zero = alloc(16);
+    if (!zero) return false;
+    for (int b = 0; b < 16; ++b)
+        if (!bindBuf[b]) { bindBuf[b] = zero; bindOff[b] = 0; }
+    auto descSp = c.device->newBufferWithBytes(desc, sizeof(desc), metal::StorageMode::Shared);
+    if (!descSp) return false;
+    keep.push_back(descSp);
+    TGLMTTessDrawInfo di{};
+    di.indexed = indexed ? 1u : 0u;
+    di.indexType = indexType;
+    di.first = first;
+    di.baseVertex = baseVertex;
+    di.count = (uint32_t)count;
+    di.baseInstance = baseInstance;
+    di.instanceCount = (uint32_t)inst;
+    auto drawSp = c.device->newBufferWithBytes(&di, sizeof(di), metal::StorageMode::Shared);
+    if (!drawSp) return false;
+    keep.push_back(drawSp);
+    metal::IBuffer* indexBuf = zero;
+    size_t indexOff = 0;
+    if (indexed) {
+        if (indexType != 0x1403 && indexType != 0x1405) return false;
+        if (eboId) {
+            auto bit = c.buffers.find(eboId);
+            if (bit == c.buffers.end() || !bit->second.gpu) return false;
+            indexBuf = bit->second.gpu.get();
+            indexOff = indexByteOff;
+        } else {
+            if (!indexData) return false;
+            size_t elem = (indexType == 0x1403) ? 2 : 4;
+            auto ib = c.device->newBufferWithBytes(indexData, (size_t)count * elem,
+                                                   metal::StorageMode::Shared);
+            if (!ib) return false;
+            keep.push_back(ib);
+            indexBuf = ib.get();
+        }
+    }
+    for (auto& s : pr.vsCaptureSlots) {
+        size_t es = XfbSlotSrcSize(s);
+        if (!es) return false;
+        captureByName[s.name] = alloc((size_t)totalVerts * es);
+        if (!captureByName[s.name]) return false;
+    }
+    // Compute bindings: samplers/images/blocks/atomics của VS.
+    auto resolveSampler = [&](const ProgramObject::StageSampler& s,
+                              std::shared_ptr<metal::ITexture>& hold,
+                              std::shared_ptr<metal::ISamplerState>& ss) -> metal::ITexture* {
+        auto uit = pr.samplerUnits.find(s.name);
+        GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+        const TextureObject* txp = nullptr;
+        metal::ITexture* gpu = nullptr;
+        if (unit < 32) {
+            GLuint texId = c.state.BoundTexture(unit, KindTarget(s.kind));
+            auto tit = c.textures.find(texId);
+            if (tit != c.textures.end() && tit->second.gpu) {
+                txp = &tit->second;
+                gpu = txp->gpu.get();
+                c.NoteTextureUsed(texId);
+            }
+        }
+        if (!gpu) {
+            hold = FallbackForKind(c, s.kind);
+            gpu = hold.get();
+            if (!gpu) return nullptr;
+            static thread_local TextureObject dummy;
+            ss = SamplerForUnit(c, 0, dummy, s.kind == 'S');
+        } else {
+            ss = SamplerForUnit(c, unit, *txp, s.kind == 'S');
+        }
+        return gpu;
+    };
+    auto bindComputeSamplers = [&](metal::IComputeEncoder* ce,
+                                   const std::vector<ProgramObject::StageSampler>& list) {
+        for (auto& s : list) {
+            std::shared_ptr<metal::ITexture> hold;
+            std::shared_ptr<metal::ISamplerState> ss;
+            auto* gpu = resolveSampler(s, hold, ss);
+            if (!gpu) continue;
+            ce->setTexture(gpu, (uint32_t)s.texSlot);
+            if (ss && s.sampSlot >= 0) ce->setSamplerState(ss.get(), (uint32_t)s.sampSlot);
+        }
+    };
+    auto resolveImage = [&](const ProgramObject::ImageSlot& im) -> metal::ITexture* {
+        auto bit = c.imageBindPoints.find((GLuint)im.binding);
+        if (bit != c.imageBindPoints.end() && bit->second.texture) {
+            auto tit = c.textures.find(bit->second.texture);
+            if (tit != c.textures.end() && tit->second.gpu) {
+                c.NoteTextureUsed(bit->second.texture);
+                return tit->second.gpu.get();
+            }
+        }
+        auto fb = FallbackBlackTex(c);
+        return fb ? fb.get() : nullptr;
+    };
+    auto bindComputeImages = [&](metal::IComputeEncoder* ce,
+                                 const std::vector<ProgramObject::ImageSlot>& list) {
+        for (auto& im : list) if (auto* gpu = resolveImage(im)) ce->setTexture(gpu, (uint32_t)im.slot);
+    };
+    auto zeroBlock = FallbackZeroBuf(c);
+    struct XfbAtomicBind { metal::IBuffer* buf = nullptr; size_t off = 0; };
+    auto resolveAtomic = [&](const ProgramObject::AtomicSlot& as) -> XfbAtomicBind {
+        XfbAtomicBind r;
+        auto it = c.atomicBindPoints.find((GLuint)as.binding);
+        if (it == c.atomicBindPoints.end() || !it->second.buffer) return r;
+        auto bt = c.buffers.find(it->second.buffer);
+        if (bt == c.buffers.end() || !bt->second.gpu) return r;
+        r.buf = bt->second.gpu.get();
+        r.off = (size_t)it->second.offset + (size_t)as.offset;
+        c.NoteComputeWriter(it->second.buffer);
+        return r;
+    };
+    auto bindComputeAtomics = [&](metal::IComputeEncoder* ce,
+                                  const std::vector<ProgramObject::AtomicSlot>& list) {
+        for (auto& as : list) {
+            auto r = resolveAtomic(as);
+            if (r.buf) ce->setBuffer(r.buf, (uint32_t)as.slot, r.off);
+            else if (zeroBlock) ce->setBuffer(zeroBlock.get(), (uint32_t)as.slot);
+        }
+    };
+    struct XfbBlockBind { metal::IBuffer* buf = nullptr; size_t off = 0; };
+    auto resolveBlock = [&](const ProgramObject::StageBlockSlot& sb) -> XfbBlockBind {
+        XfbBlockBind r;
+        GLuint binding = 0;
+        size_t need = 0;
+        if (sb.isStorage) {
+            bool found = false;
+            for (auto& b : pr.storageBlocks)
+                if (b.name == sb.name) {
+                    binding = pr.EffectiveSsboBinding(b.name, b.layoutBinding);
+                    need = b.size;
+                    found = true;
+                    break;
+                }
+            if (!found) return r;
+            auto bit = c.storageBindPoints.find(binding);
+            if (bit == c.storageBindPoints.end() || !bit->second.buffer) return r;
+            auto t = c.buffers.find(bit->second.buffer);
+            if (t == c.buffers.end() || !t->second.gpu) return r;
+            r.buf = t->second.gpu.get();
+            r.off = bit->second.offset;
+            c.NoteComputeWriter(bit->second.buffer);
+        } else {
+            const ProgramObject::UniformBlock* ub = nullptr;
+            for (auto& b : pr.uniformBlocks) if (b.name == sb.name) { ub = &b; break; }
+            if (!ub) return r;
+            auto bit = c.uniformBindPoints.find(ub->binding);
+            if (bit == c.uniformBindPoints.end() || !bit->second.buffer) return r;
+            auto t = c.buffers.find(bit->second.buffer);
+            if (t == c.buffers.end() || !t->second.gpu) return r;
+            need = ub->trueSize ? ub->trueSize : ub->minSize;
+            if (BufferLen(t->second) < bit->second.offset + need) return r;
+            r.buf = t->second.gpu.get();
+            r.off = bit->second.offset;
+            c.NoteBufferUsed(bit->second.buffer);
+        }
+        return r;
+    };
+    auto bindComputeBlocks = [&](metal::IComputeEncoder* ce,
+                                 const std::vector<ProgramObject::StageBlockSlot>& list) {
+        for (auto& sb : list) {
+            if (sb.slot < 0 || sb.slot > 30) continue;
+            auto r = resolveBlock(sb);
+            if (r.buf) ce->setBuffer(r.buf, (uint32_t)sb.slot, r.off);
+            else if (zeroBlock) ce->setBuffer(zeroBlock.get(), (uint32_t)sb.slot);
+        }
+    };
+    c.FlushAllBufferStaging();
+    c.FlushAllTextureStaging();
+    auto ce = c.device->makeComputeEncoder();
+    if (!ce) return false;
+    ce->setPipeline(pr.appleVSCapturePipeline.get());
+    for (int b = 0; b < 16; ++b) ce->setBuffer(bindBuf[b], (uint32_t)b, bindOff[b]);
+    ce->setBuffer(vsUB, 16);
+    for (auto& s : pr.vsCaptureSlots) {
+        auto it = captureByName.find(s.name);
+        if (it == captureByName.end()) return false;
+        ce->setBuffer(it->second, (uint32_t)s.slot);
+    }
+    bindComputeSamplers(ce.get(), pr.vsCaptureSamplers);
+    bindComputeImages(ce.get(), pr.vsImages);
+    bindComputeBlocks(ce.get(), pr.vsShaderBlocks);
+    bindComputeAtomics(ce.get(), pr.vsAtomics);
+    ce->setBuffer(indexBuf, (uint32_t)pr.vsCaptureIndexSlot, indexOff);
+    ce->setBuffer(drawSp.get() ? drawSp.get() : zero, (uint32_t)pr.vsCaptureDrawSlot);
+    ce->setBuffer(descSp.get(), (uint32_t)pr.vsCaptureDescSlot);
+    uint32_t groups = (totalVerts + 63) / 64;
+    ce->dispatchGroups3D(groups, 1, 1, 64, 1, 1);
+    if (!ce->endAndCommit()) return false;
+    // Pack capture arrays → GL XFB buffer(s). GL interleaved/separate layout;
+    // vec3 giữ 12B (capture MSL float3 có stride 16B); matrix theo column-major.
+    struct XfbPack {
+        const ProgramObject::VsCaptureSlot* slot = nullptr;
+        size_t glElem = 0, srcElem = 0, srcStride = 0;
+        uint32_t elemCount = 1, elemStart = 0;
+        size_t glSize = 0, glOff = 0;
+    };
+    size_t interStride = 0;
+    std::vector<XfbPack> packs;
+    packs.reserve(pr.xfbVaryings.size());
+    for (auto& nm : pr.xfbVaryings) {
+        XfbPack p;
+        std::string base = nm;
+        int idx = 0;
+        bool element = XfbArrayElement(nm, base, idx);
+        for (auto& s : pr.vsCaptureSlots) if (s.name == base) { p.slot = &s; break; }
+        if (!p.slot) return false;
+        if (element && (int)p.slot->arraySize <= idx) return false;
+        p.glElem = XfbSlotElemGLSize(p.slot->type);
+        p.srcElem = XfbSlotElemSrcSize(p.slot->type);
+        if (!p.glElem || !p.srcElem) return false;
+        p.srcStride = p.srcElem * (size_t)(p.slot->arraySize > 0 ? p.slot->arraySize : 1);
+        p.elemCount = element ? 1u : (uint32_t)(p.slot->arraySize > 0 ? p.slot->arraySize : 1);
+        p.elemStart = element ? (uint32_t)idx : 0u;
+        p.glSize = p.glElem * p.elemCount;
+        p.glOff = interStride;
+        interStride += p.glSize;
+        packs.push_back(p);
+    }
+    const bool interleaved = (pr.xfbBufferMode == 0x8C8C);
+    if (pr.xfbBufferMode == 0x8C8D && pr.xfbVaryings.size() > 4) return false;
+    const uint32_t start = xfb.capturedCount;
+    bool anyOverflow = false;
+    for (size_t vi = 0; vi < packs.size(); ++vi) {
+        const XfbPack& p = packs[vi];
+        size_t bi = interleaved ? 0 : vi;
+        if (bi >= 4 || !xfb.buffers[bi]) {
+            c.errors.Record(0x0502);
+            return false;
+        }
+        auto bit = c.buffers.find(xfb.buffers[bi]);
+        if (bit == c.buffers.end() || !bit->second.gpu) return false;
+        auto* src = captureByName[p.slot->name];
+        if (!src || !src->contents()) return false;
+        uint8_t* dst = (uint8_t*)bit->second.gpu->contents();
+        if (!dst) return false;
+        size_t dstLen = BufferLen(bit->second);
+        size_t base = (size_t)xfb.offsets[bi];
+        size_t range = xfb.sizes[bi] ? (size_t)xfb.sizes[bi] : (dstLen - std::min(dstLen, base));
+        for (uint32_t vtx = 0; vtx < totalVerts; ++vtx) {
+            size_t off = base + (size_t)(start + vtx) * (interleaved ? interStride : p.glSize) +
+                         (interleaved ? p.glOff : 0);
+            if (off + p.glSize > base + range || off + p.glSize > dstLen) {
+                anyOverflow = true;
+                c.pipeStats.xfbStreamOverflow[bi]++;
+                break;
+            }
+            for (uint32_t e = 0; e < p.elemCount; ++e) {
+                const uint8_t* sp = (const uint8_t*)src->contents() +
+                                    (size_t)vtx * p.srcStride +
+                                    (size_t)(p.elemStart + e) * p.srcElem;
+                memcpy(dst + off + (size_t)e * p.glElem, sp, p.glElem);
+            }
+            // Capture chạy cùng pipeline Metal: gl_Position đã được đổi z sang
+            // [0,1]. XFB phải trả clip-space gốc của GL, nên đảo phép đổi z.
+            if (p.slot->name == "gl_Position" && p.slot->arraySize == 0 && p.glSize == 16) {
+                float* q = (float*)(dst + off);
+                q[2] = 2.0f * q[2] - q[3];
+            }
+        }
+        if (anyOverflow) break;
+        bit->second.gpu->didModifyRange(0, dstLen);
+        c.NoteBufferUsed(xfb.buffers[bi]);
+    }
+    if (anyOverflow) c.pipeStats.xfbOverflow++;
+    xfb.capturedCount += totalVerts;
+    c.pipeStats.xfbPrimsWritten += XfbPrimCount(mode, count) * (uint64_t)inst;
+    return true;
+}
 bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* indexData,
                  bool indexed, size_t indexByteOff, GLuint eboId, GLsizei inst,
                  GLint baseVertex, GLuint baseInstance, GLint first) {
@@ -640,12 +1736,125 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         prp = &pit->second;
     }
     ProgramObject& pr = *prp;
-    if (pr.hasTessStages || pr.hasGeometryStage) {
-        c.LogDebug(0, 0, 0, 0, "AppleDrawGL: tess/GS trace-only (M5b-future)");
+    // Vertex-only + XFB: capture rồi bỏ rasterization. GL chỉ cho phép chương
+    // trình không FS khi rasterizer discard bật; nếu không, draw là lỗi.
+    if (!pr.appleFS && !pr.separable) {
+        if (!c.state.IsEnabled(0x8C89 /*RASTERIZER_DISCARD*/)) {
+            c.errors.Record(0x0502);
+            return false;
+        }
+        GLuint xid = c.state.BoundXFB();
+        auto xit = c.xfbs.find(xid);
+        if (xit != c.xfbs.end() && xit->second.active && !xit->second.paused &&
+            !pr.xfbVaryings.empty()) {
+            if (!AppleCaptureXFB(c, pr, xit->second, mode, count, inst, indexed, indexType,
+                                 indexData, indexByteOff, eboId, baseVertex, baseInstance,
+                                 first)) {
+                c.appleStats.miscFail++;
+                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: XFB capture (VS-only) thất bại");
+                return false;
+            }
+        }
+        return true;
+    }
+    if (pr.hasTessStages) {
+        if (mode != 0x000E /*PATCHES*/) {
+            c.LogDebug(0, 0, 0, 0, "AppleDrawGL: tess program cần GL_PATCHES");
+            return false;
+        }
+        // T4b stage 3: FBO draw target (color0 + depth). MRT/MSAA tess sẽ mở sau.
+        // Flush staging TRƯỚC khi chụp texture: flush có thể đổi identity
+        // TextureObject::gpu, nếu target giữ pointer cũ thì draw vào texture khác
+        // với texture glReadPixels đọc (FBO mới tạo → đen).
+        c.FlushAllBufferStaging();
+        c.FlushAllTextureStaging();
+        std::shared_ptr<metal::IRenderTarget> tessTarget;
+        GLuint drawFbo = c.state.BoundDrawFBO();
+        if (drawFbo == 0) {
+            tessTarget = c.device->defaultRenderTarget();
+        } else {
+            auto fit = c.fbos.find(drawFbo);
+            if (fit == c.fbos.end()) { c.appleStats.miscFail++; return false; }
+            const auto& dbs = fit->second.drawBuffers;
+            uint32_t nSlots = (uint32_t)std::min<size_t>(dbs.size(), 8);
+            const metal::ITexture* colPtrs[8] = {};
+            bool anyCol = false;
+            for (uint32_t s = 0; s < nSlots; ++s) {
+                GLint a = DrawBufferAttachmentIndex(dbs[s]);
+                if (a < 0) continue; // GL_NONE
+                auto cit = fit->second.colorTex.find(a);
+                if (cit == fit->second.colorTex.end()) continue;
+                auto tit = c.textures.find(cit->second);
+                if (tit == c.textures.end() || !tit->second.gpu) continue;
+                auto lit = fit->second.colorLevel.find(a);
+                auto layit = fit->second.colorLayer.find(a);
+                GLint lvl = (lit == fit->second.colorLevel.end()) ? 0 : lit->second;
+                GLint layer = (layit == fit->second.colorLayer.end()) ? -1 : layit->second;
+                colPtrs[s] = LevelView(tit->second, lvl, layer);
+                if (colPtrs[s]) anyCol = true;
+            }
+            metal::ITexture* dep = nullptr;
+            if (fit->second.depthTex) {
+                auto dit = c.textures.find(fit->second.depthTex);
+                if (dit != c.textures.end() && dit->second.gpu)
+                    dep = LevelView(dit->second, fit->second.depthLevel, fit->second.depthLayer);
+            }
+            // MSAA chỉ hỗ trợ single color; MRT đi wrap target thường.
+            if (nSlots == 1 && anyCol) {
+                GLint a0 = DrawBufferAttachmentIndex(dbs[0]);
+                auto cit = (a0 >= 0) ? fit->second.colorTex.find(a0)
+                                     : fit->second.colorTex.end();
+                if (cit != fit->second.colorTex.end()) {
+                    auto tit = c.textures.find(cit->second);
+                    if (tit != c.textures.end() && tit->second.samples > 1 && tit->second.msaaTarget) {
+                        auto* ct = tit->second.msaaTarget->colorTexture(0);
+                        if (ct) {
+                            tessTarget = tit->second.msaaTarget;
+                            SyncMSAATargetLayer(c, drawFbo, tessTarget.get());
+                        }
+                    }
+                }
+            }
+            if (!tessTarget) {
+                if (!anyCol && !dep) { c.appleStats.miscFail++; return false; }
+                tessTarget = c.WrapTarget(drawFbo, colPtrs, nSlots, dep);
+            }
+        }
+        if (!tessTarget) { c.appleStats.noTarget++; return false; }
+        c.FlushPendingEncoder();
+        bool ok = AppleDrawTess(c, pr, tessTarget.get(), mode, count, indexed,
+                               indexType, indexData, indexByteOff, eboId, baseVertex,
+                               first, inst, baseInstance);
+        if (!ok) {
+            c.appleStats.miscFail++;
+            c.LogDebug(0, 0, 0, 0, "AppleDrawGL: tess draw thất bại");
+        }
+        return ok;
+    }
+    if (pr.hasGeometryStage) {
+        c.LogDebug(0, 0, 0, 0, "AppleDrawGL: GS trace-only (M5b-future)");
         return false;
     }
-    if (mode == 0x000E /*PATCHES*/) return false;
+    if (pr.hasTessStages && mode != 0x000E /*PATCHES*/) {
+        c.LogDebug(0, 0, 0, 0, "AppleDrawGL: tess program cần GL_PATCHES");
+        return false;
+    }
     if (baseVertex != 0 && !indexed) return false;
+    // XFB active: capture varying thật trước khi rasterize (nếu không pause).
+    {
+        GLuint xid = c.state.BoundXFB();
+        auto xit = c.xfbs.find(xid);
+        if (xit != c.xfbs.end() && xit->second.active && !xit->second.paused &&
+            !pr.xfbVaryings.empty()) {
+            if (!AppleCaptureXFB(c, pr, xit->second, mode, count, inst, indexed, indexType,
+                                 indexData, indexByteOff, eboId, baseVertex, baseInstance,
+                                 first)) {
+                c.appleStats.miscFail++;
+                c.LogDebug(0, 0, 0, 0, "AppleDrawGL: XFB capture thất bại");
+                return false;
+            }
+        }
+    }
     // FAN/LOOP expand CPU cho GPU (Metal không có FAN, LOOP hở 1 cạnh).
     // Non-indexed FAN/LOOP chuyển thành indexed tam giác/strip khép kín qua index tạm.
     // Indexed FAN chuyển thành triangle list, indexed LOOP thêm index đầu vào cuối.
@@ -892,17 +2101,17 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         auto fit = c.fbos.find(c.state.BoundDrawFBO());
         if (fit == c.fbos.end()) { c.appleStats.miscFail++; return false; }
         const auto& dbs = fit->second.drawBuffers;
-        if (!dbs.empty()) nSlots = (uint32_t)std::min<size_t>(dbs.size(), 8);
+        nSlots = (uint32_t)std::min<size_t>(dbs.size(), 8);
         for (uint32_t s = 0; s < nSlots; ++s) {
-            GLenum db = dbs.empty() ? 0x8CE0 : dbs[s];
-            if (db < 0x8CE0 || db > 0x8CE7) continue; // GL_NONE (0x0404) = slot rỗng
-            auto cit = fit->second.colorTex.find((GLint)(db - 0x8CE0));
+            GLint a = DrawBufferAttachmentIndex(dbs[s]);
+            if (a < 0) continue; // GL_NONE
+            auto cit = fit->second.colorTex.find(a);
             if (cit == fit->second.colorTex.end()) continue;
             auto tit = c.textures.find(cit->second);
             if (tit == c.textures.end() || !tit->second.gpu) continue;
-            auto lit = fit->second.colorLevel.find((GLint)(db - 0x8CE0));
+            auto lit = fit->second.colorLevel.find(a);
             GLint fboLevel = (lit == fit->second.colorLevel.end()) ? 0 : lit->second;
-            auto layit = fit->second.colorLayer.find((GLint)(db - 0x8CE0));
+            auto layit = fit->second.colorLayer.find(a);
             GLint fboLayer = (layit == fit->second.colorLayer.end()) ? -1 : layit->second;
             metal::ITexture* dstTex = LevelView(tit->second, fboLevel, fboLayer);
             if (!dstTex) {
@@ -929,7 +2138,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         // multisample+resolve của texture thay vì wrap resolve như 1x.
         bool msaaTargetChosen = false;
         if (nSlots == 1) {
-            auto cit = fit->second.colorTex.find(0);
+            GLint a0 = DrawBufferAttachmentIndex(dbs[0]);
+            auto cit = (a0 >= 0) ? fit->second.colorTex.find(a0)
+                                 : fit->second.colorTex.end();
             if (cit != fit->second.colorTex.end()) {
                 auto tit = c.textures.find(cit->second);
                 if (tit != c.textures.end() && tit->second.samples > 1 && tit->second.msaaTarget) {
@@ -939,6 +2150,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                         colPtrs[0] = ct;
                         slotFmts[0] = ct->pixelFormat();
                         drawColorTexId = cit->second;
+                        SyncMSAATargetLayer(c, c.state.BoundDrawFBO(), target.get());
                         msaaTargetChosen = true;
                     }
                 }
@@ -948,6 +2160,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             target = c.WrapTarget(c.state.BoundDrawFBO(), colPtrs, nSlots, dep);
         }
         if (!target) { c.appleStats.noTarget++; return false; }
+        SyncTargetSamplePositions(c, target.get());
         // fixico8: log 1 lần/FBO format color+depth THẬT (depth RGBA8 = sai với
         // pipeline Depth32Float → encoder nil → icon bake bị bỏ).
         if (c.DiagOn()) {
@@ -1001,6 +2214,13 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // Stencil: pipeline/pass chỉ khai báo stencil attachment khi target THẬT có
     // stencil (Depth24Stencil8). Test bật/tắt nằm trong stencilDesc.
     opts.stencil = target->hasStencil();
+    // Metal: pipeline khai báo depth đúng format attachment của TARGET THẬT
+    // (MSAA target có thể không depth dù FBO có depthTex) và phải attach depth
+    // khi stencil bật (combined D32S8 dùng chung texture, depth+stencil bắt buộc
+    // cùng format).
+    opts.depthFmt = (opts.depth || opts.stencil) ? target->depthFormat()
+                                                : metal::PixelFormat::Invalid;
+    bool passHasDepth = opts.depthFmt != metal::PixelFormat::Invalid;
     if (opts.stencil) {
         const auto& sf = c.state.StencilFront();
         const auto& sb = c.state.StencilBack();
@@ -1050,7 +2270,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     metal::PixelFormat pipeFmt = target->pixelFormat();
     if (c.pendingEncoder && c.pendingTarget && !c.applePendingClear &&
         c.pendingDrawFBO == curDrawFBO && attachmentsMatch() &&
-        c.pendingHasDepth == opts.depth) {
+        c.pendingHasDepth == passHasDepth) {
         pipeFmt = c.pendingTarget->pixelFormat();
     }
     // IR pipeline-key cache: nếu mọi input giống pending → tái dùng pipeline,
@@ -1063,7 +2283,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         want.fsLib = pr.appleFS.get();
         want.fmt = pipeFmt;
         want.stride = casN ? cas[0].stride : 0;
-        want.depth = opts.depth;
+        want.depth = passHasDepth;
         want.samples = opts.samples;
         want.stencil = opts.stencil;
         want.stencilDesc = opts.stencilDesc;
@@ -1118,7 +2338,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     {
         bool canReuse = c.pendingEncoder && c.pendingTarget && !c.applePendingClear &&
                         c.pendingDrawFBO == curDrawFBO && attachmentsMatch() &&
-                        c.pendingHasDepth == opts.depth;
+                        c.pendingHasDepth == passHasDepth;
         if (canReuse) {
             enc = c.pendingEncoder;
             target = c.pendingTarget; // dùng target đang mở (tránh wrap mới mỗi draw)
@@ -1242,7 +2462,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             c.pendingEncoder = enc;
             c.pendingTarget = target;
             c.pendingPipeline = pipe;
-            c.pendingHasDepth = opts.depth;
+            c.pendingHasDepth = passHasDepth;
             c.pendingDrawFBO = curDrawFBO;
             c.pendingColorTex = curColorTex;
             c.pendingColorCount = (uint8_t)(nSlots > 8 ? 8 : nSlots);
@@ -1450,15 +2670,15 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     //   slopeScale ← factor        (cùng nhân max-depth-slope)
     //   bias       ← units × r     (r = minimum resolvable difference)
     //   clamp      ← clamp         (0 = không clamp theo convention Vulkan/Metal)
-    // r: depth attachment của TGLMT là Depth32Float; ULP tại z≈1 là 2^-23, còn
-    // desktop GL 24-bit fixed-point cho r = 1/(2^24−1) ≈ 5.96e-8 — cùng bậc.
-    // Dùng hằng số của desktop để MA/decals của shaderpack giữ đúng độ lệch so với
-    // GPU桌面 mà shaderpack vốn được viết cho. Chỉ encode khi POLYGON_OFFSET_FILL
-    // bật (spec: offset chỉ áp cho filled primitives).
+    // Metal's depthBias is expressed in 2^-24 depth units (the same fixed-point
+    // ULP D3D/GL drivers use), not in normalised [0,1] depth. Passing
+    // units/2^24 here made every offset ~1.7e7 times too small and it vanished
+    // (test_polygon_offset_apple). GL depth-range r for a 24-bit buffer is
+    // 1/(2^24−1); Metal's bias already includes that r, so pass `units`
+    // unchanged (and `factor` unchanged for the slope term).
     {
         const bool poOn = opts.depth && c.state.IsEnabled(0x8037 /*GL_POLYGON_OFFSET_FILL*/);
-        const float kDepthUnitR = 1.0f / 16777215.0f; // 1/(2^24−1)
-        float bias = poOn ? c.state.PolygonUnits() * kDepthUnitR : 0.0f;
+        float bias = poOn ? c.state.PolygonUnits() : 0.0f;
         float slope = poOn ? c.state.PolygonFactor() : 0.0f;
         float clampV = poOn ? c.state.PolygonClamp() : 0.0f;
         bool poSame = c.pendingPolyOffValid &&
@@ -1495,8 +2715,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     size_t vsUoff = 0, fsUoff = 0;
     {
         Context::DiagPhase _dp(c.appleStats, &Context::AppleStats::nsUniform, dgPhase);
-        size_t vsSize = pr.vsUBSize ? pr.vsUBSize : 16;
-        size_t fsSize = pr.fsUBSize ? pr.fsUBSize : 16;
+        // Metal argument buffer size phải phủ hết aligned size của MSL struct
+        // (vec3 cuối struct chiếm 16B dù GL uniform chỉ 12B).
+        size_t vsSize = std::max<size_t>(16, (pr.vsUBSize + 15u) & ~size_t(15));
+        size_t fsSize = std::max<size_t>(16, (pr.fsUBSize + 15u) & ~size_t(15));
         // Scratch tái dùng (thread_local): cấp phát vector mỗi draw là malloc
         // + memset 2 lần × hàng trăm draw/frame.
         thread_local std::vector<uint8_t> vsb, fsb;
@@ -1923,8 +3145,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         std::shared_ptr<metal::ISamplerState> ss;
         std::shared_ptr<metal::ITexture> swzKeep; // view swizzle sống qua set
         if (!gpu) {
-            gpu = (kind == 'C' ? FallbackBlackCube(c)
-                  : kind == 'S' ? FallbackShadowTex(c) : FallbackBlackTex(c)).get();
+            gpu = FallbackForKind(c, kind).get();
             if (!gpu) continue; // backend nghẽn, bỏ qua trung thực
             static thread_local TextureObject dummyTex;
             ss = SamplerForUnit(c, 0, dummyTex, kind == 'S');
@@ -2104,8 +3325,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         std::shared_ptr<metal::ISamplerState> ss;
         std::shared_ptr<metal::ITexture> swzKeep; // view swizzle sống qua set
         if (!gpu) {
-            gpu = (kind == 'C' ? FallbackBlackCube(c)
-                  : kind == 'S' ? FallbackShadowTex(c) : FallbackBlackTex(c)).get();
+            gpu = FallbackForKind(c, kind).get();
             if (!gpu) continue; // backend nghẽn, bỏ qua trung thực
             static thread_local TextureObject dummyTex;
             ss = SamplerForUnit(c, 0, dummyTex, kind == 'S');

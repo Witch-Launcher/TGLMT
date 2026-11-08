@@ -59,9 +59,10 @@ int main() {
 
     GLuint dsRb = 0;
     glCreateRenderbuffers(1, &dsRb);
-    glNamedRenderbufferStorage(dsRb, 0x88F0 /*DEPTH24_STENCIL8*/, 16, 8);
+    // Cùng kích thước với color attachment 64x32 — FBO complete theo spec.
+    glNamedRenderbufferStorage(dsRb, 0x88F0 /*DEPTH24_STENCIL8*/, 64, 32);
     glGetNamedRenderbufferParameteriv(dsRb, 0x8D42, &v);
-    Check(v == 16, "named width");
+    Check(v == 64, "named width");
     glGetNamedRenderbufferParameteriv(dsRb, 0x8D54 /*DEPTH_SIZE*/, &v);
     Check(v == 24, "depth size");
     glGetNamedRenderbufferParameteriv(dsRb, 0x8D55 /*STENCIL_SIZE*/, &v);

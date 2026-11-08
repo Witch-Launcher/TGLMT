@@ -203,6 +203,17 @@ public:
     // Số control point / patch (glPatchParameteri GL_PATCH_VERTICES, mặc định 3)
     void SetPatchVertices(GLint n) { if (patchVertices_==n) return; patchVertices_ = n; ++stateSeq_; }
     GLint PatchVertices() const { return patchVertices_; }
+    // GL_PATCH_DEFAULT_OUTER/INNER_LEVEL — giá trị dùng khi TCS không ghi level.
+    void SetPatchDefaultOuter(const float* v) {
+        for (int i = 0; i < 4; ++i) patchDefaultOuter_[i] = v[i];
+        ++stateSeq_;
+    }
+    void SetPatchDefaultInner(const float* v) {
+        patchDefaultInner_[0] = v[0]; patchDefaultInner_[1] = v[1];
+        ++stateSeq_;
+    }
+    const float* PatchDefaultOuter() const { return patchDefaultOuter_; }
+    const float* PatchDefaultInner() const { return patchDefaultInner_; }
 
     PixelStoreState& PixelStore() { return pixel_; }
     const PixelStoreState& PixelStore() const { return pixel_; }
@@ -246,6 +257,8 @@ private:
     GLuint activeTex_ = 0;
     GLuint boundVAO_ = 0, boundProgram_ = 0, boundXFB_ = 0;
     GLint patchVertices_ = 3; // GL_PATCH_VERTICES mặc định (spec §10.1.3)
+    float patchDefaultOuter_[4] = {1, 1, 1, 1};
+    float patchDefaultInner_[2] = {1, 1};
     GLuint boundReadFBO_ = 0, boundDrawFBO_ = 0;
     PixelStoreState pixel_;
     bool dirtyPipeline_ = true, dirtyDepth_ = true;

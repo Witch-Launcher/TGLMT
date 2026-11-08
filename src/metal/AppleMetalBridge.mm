@@ -7,10 +7,15 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h> // presentTarget (cả iOS lẫn macOS đều có QuartzCore)
 #import <TargetConditionals.h> // phân biệt iOS/macOS: synchronizeResource chỉ tồn tại trên macOS
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#include <os/proc.h> // os_proc_available_memory (ngân sách Jetsam per-process)
+#endif
 #include "tglmt/MetalInterface.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -24,6 +29,7 @@ std::shared_ptr<IDevice> CreateAppleDevice(LogFn log);
 #endif
 } // namespace tglmt::metal
 
+
 #ifdef TGLMT_APPLE_METAL
 namespace tglmt::metal {
 
@@ -36,10 +42,36 @@ namespace tglmt::metal {
 // hoạt động; site hiếm (mipmaps/cube upload) không push → chỉ over-wait nhẹ.
 static std::deque<id<MTLCommandBuffer>> gInflightCB;
 static const size_t kInflightCap = 32;
+// Điều tra Jetsam: log allocation GPU lớn (>=8MB) kèm tổng luỹ kế. Launcher
+// không thấy bộ nhớ Metal trong "graphics footprint" → đây là cách duy nhất
+// biết TGLMT (theo yêu cầu của game) đã cấp thêm bao nhiêu.
+static std::atomic<uint64_t> gAllocCumBytes{0};
+static std::atomic<uint32_t> gAllocLogged{0};
+static void NoteBigAlloc(const char* kind, uint64_t bytes, uint64_t total) {
+    uint64_t cum = gAllocCumBytes.fetch_add(total) + total;
+    if (bytes < (8ull << 20)) return;               // chỉ log khối lớn
+    if (gAllocLogged.fetch_add(1) >= 96) return;    // chặn spam
+    fprintf(stderr,
+            "[TGLMT] alloc#%u %s +%.1fMB cum=%.1fMB\n",
+            (unsigned)gAllocLogged.load(), kind, (double)bytes / 1048576.0,
+            (double)cum / 1048576.0);
+    fflush(stderr);
+}
+
 static void NoteInflightCB(id<MTLCommandBuffer> cb) {
     if (!cb) return;
     gInflightCB.push_back(cb);
     while (gInflightCB.size() > kInflightCap) gInflightCB.pop_front();
+}
+
+// macOS không cho phép MTLStorageModeShared cho texture (Intel/AMD và Apple Silicon
+// đều phải Managed/Private); iOS/TVDR unified memory dùng Shared. Depth luôn Private.
+static MTLStorageMode DefaultTextureStorage() {
+#if TARGET_OS_OSX
+    return MTLStorageModeManaged;
+#else
+    return MTLStorageModeShared;
+#endif
 }
 
 static MTLPixelFormat ToMTL(PixelFormat f) {
@@ -213,6 +245,8 @@ public:
     uint32_t levelCount() const override {
         @try { return (uint32_t)[tex_ mipmapLevelCount]; } @catch (NSException*) { return 1; }
     }
+    uint32_t attachmentSlice() const override { return slice_; }
+    uint32_t attachmentLevel() const override { return level_; }
     id<MTLTexture> get() const { return tex_; }
     // EXT_texture_swizzle: view MTLTextureSwizzle (chỉ đúng trên texture —
     // MTLColorSwizzle/rgbaSwizzle trên sampler KHÔNG tồn tại trong SDK).
@@ -260,6 +294,8 @@ private:
     id<MTLTexture> tex_;
     uint32_t w_, h_;
     uint32_t d_ = 1;
+    uint32_t level_ = 0;
+    uint32_t slice_ = 0;
     PixelFormat f_;
     std::shared_ptr<struct DepthInitSet> depthInitSet_;
     std::unordered_map<uint32_t, std::shared_ptr<AppleTexture>> swzCache_;
@@ -296,7 +332,18 @@ private:
         @try {
             MTLTextureType src = [tex_ textureType];
             // Metal không cho view 3D → 2D/2DArray (validation assert trên macOS
-            // 26), nên FBO attach slice 3D chưa hỗ trợ; array/cube thì được.
+            // 26). Render pass vẫn nhận 3D trực tiếp qua depthPlane — wrapper giữ
+            // nguyên texture, chỉ đánh dấu slice/level cho encoder.
+            if (src == MTLTextureType3D) {
+                if (layer >= d_) return nullptr;
+                uint32_t vw = w_ >> level, vh = h_ >> level;
+                if (!vw) vw = 1; if (!vh) vh = 1;
+                auto p = std::make_shared<AppleTexture>(tex_, vw, vh, f_, 1);
+                p->level_ = level;
+                p->slice_ = layer;
+                p->trackDepthInit(depthInitSet_);
+                return p;
+            }
             if (src != MTLTextureType2DArray &&
                 src != MTLTextureTypeCube && src != MTLTextureTypeCubeArray)
                 return nullptr;
@@ -424,6 +471,13 @@ public:
         MTLSize grid = {(NSUInteger)(gx ? gx : 1), (NSUInteger)(gy ? gy : 1), (NSUInteger)(gz ? gz : 1)};
         MTLSize tg = {(NSUInteger)(tx ? tx : 1), (NSUInteger)(ty ? ty : 1), (NSUInteger)(tz ? tz : 1)};
         [enc_ dispatchThreads:grid threadsPerThreadgroup:tg];
+    }
+    void dispatchGroups3D(uint32_t gx, uint32_t gy, uint32_t gz,
+                          uint32_t tx, uint32_t ty, uint32_t tz) override {
+        if (!enc_) return;
+        MTLSize groups = {(NSUInteger)(gx ? gx : 1), (NSUInteger)(gy ? gy : 1), (NSUInteger)(gz ? gz : 1)};
+        MTLSize tg = {(NSUInteger)(tx ? tx : 1), (NSUInteger)(ty ? ty : 1), (NSUInteger)(tz ? tz : 1)};
+        [enc_ dispatchThreadgroups:groups threadsPerThreadgroup:tg];
     }
     // P1 glDispatchComputeIndirect: num_workgroups đọc từ GPU buffer lúc GPU
     // execute (GL ≡ MTLDispatchThreadgroupsIndirectArguments — cùng layout
@@ -553,8 +607,19 @@ public:
         id<MTLTexture> rd = resolve();
         if (!dst || !rd) return false;
         @try {
-            [rd getBytes:dst bytesPerRow:bpr
-                fromRegion:MTLRegionMake2D(0, 0, w_, h_) mipmapLevel:0];
+            MTLTextureType tt = [rd textureType];
+            if (tt == MTLTextureType3D) {
+                [rd getBytes:dst bytesPerRow:bpr bytesPerImage:bpr * h_
+                   fromRegion:MTLRegionMake3D(0, 0, slices_[0], w_, h_, 1)
+                  mipmapLevel:levels_[0] slice:0];
+            } else if (tt == MTLTextureType2DArray) {
+                [rd getBytes:dst bytesPerRow:bpr bytesPerImage:bpr * h_
+                   fromRegion:MTLRegionMake2D(0, 0, w_, h_)
+                  mipmapLevel:levels_[0] slice:slices_[0]];
+            } else {
+                [rd getBytes:dst bytesPerRow:bpr
+                   fromRegion:MTLRegionMake2D(0, 0, w_, h_) mipmapLevel:levels_[0]];
+            }
         } @catch (NSException*) { return false; }
         return true;
     }
@@ -571,6 +636,39 @@ public:
     bool hasStencil() const override { return stencil_ != nil; }
     id<MTLTexture> stencil() const { return stencil_; }
     uint32_t sampleCount() const override { return samples_; }
+    void setColorAttachmentInfo(uint32_t slot, uint32_t level, uint32_t slice) {
+        if (slot < 8) { levels_[slot] = level; slices_[slot] = slice; }
+    }
+    void setDepthAttachmentInfo(uint32_t level, uint32_t slice) {
+        depthLevel_ = level; depthSlice_ = slice;
+    }
+    void setStencilAttachmentInfo(uint32_t level, uint32_t slice) {
+        stencilLevel_ = level; stencilSlice_ = slice;
+    }
+    uint32_t colorLevel(uint32_t slot) const { return slot < 8 ? levels_[slot] : 0; }
+    uint32_t colorSlice(uint32_t slot) const { return slot < 8 ? slices_[slot] : 0; }
+    uint32_t depthLevel() const { return depthLevel_; }
+    uint32_t depthSlice() const { return depthSlice_; }
+    uint32_t stencilLevel() const { return stencilLevel_; }
+    uint32_t stencilSlice() const { return stencilSlice_; }
+    void setColorAttachmentLayer(uint32_t slot, uint32_t layer) override {
+        if (slot < 8) slices_[slot] = layer;
+    }
+    void setDepthAttachmentLayer(uint32_t layer) override { depthSlice_ = layer; }
+    void setSamplePositions(const float* xy, uint32_t count) override {
+        customSamplePositions_.clear();
+        if (!xy || count == 0 || count > 32) return;
+        customSamplePositions_.reserve(count);
+        for (uint32_t i = 0; i < count; ++i)
+            customSamplePositions_.push_back(MTLSamplePositionMake(xy[2 * i], xy[2 * i + 1]));
+    }
+    bool hasCustomSamplePositions() const { return !customSamplePositions_.empty(); }
+    const MTLSamplePosition* customSamplePositions() const {
+        return customSamplePositions_.empty() ? nullptr : customSamplePositions_.data();
+    }
+    uint32_t customSamplePositionCount() const {
+        return (uint32_t)customSamplePositions_.size();
+    }
     ITexture* colorTexture(uint32_t slot = 0) override {
         return (slot < nColors_ && colors_[slot]) ? colorTex_[slot].get() : nullptr;
     }
@@ -592,8 +690,58 @@ private:
     bool msaa_;
     bool depthFirstClear_ = true;
     uint32_t samples_ = 1;
+    uint32_t levels_[8] = {};
+    uint32_t slices_[8] = {};
+    uint32_t depthLevel_ = 0, depthSlice_ = 0;
+    uint32_t stencilLevel_ = 0, stencilSlice_ = 0;
+    std::vector<MTLSamplePosition> customSamplePositions_;
     std::shared_ptr<AppleTexture> resolveTex_;
 };
+
+// Texture 3D làm FBO: attachment là chính MTLTextureType3D + depthPlane/level
+// (Metal cấm view 2D từ 3D). Array/cube dùng view nên level/slice = 0.
+static void SetAttachmentSlice(MTLRenderPassAttachmentDescriptor* a,
+                               uint32_t level, uint32_t slice) {
+    a.level = level;
+    if (!a.texture) return;
+    MTLTextureType tt = [a.texture textureType];
+    if (tt == MTLTextureType3D)
+        a.depthPlane = slice;
+    else if (tt == MTLTextureType2DArray || tt == MTLTextureType2DMultisampleArray ||
+             tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray)
+        a.slice = slice;
+}
+static void SetColorResolveSlice(MTLRenderPassColorAttachmentDescriptor* a,
+                                 uint32_t level, uint32_t slice) {
+    if (!a || !a.resolveTexture) return;
+    a.resolveLevel = level;
+    MTLTextureType rt = [a.resolveTexture textureType];
+    if (rt == MTLTextureType3D)
+        a.resolveDepthPlane = slice;
+    else if (rt == MTLTextureType2DArray)
+        a.resolveSlice = slice;
+}
+
+static void ApplyAttachmentPlanes(MTLRenderPassDescriptor* rp, AppleTarget* at) {
+    if (!rp || !at) return;
+    for (uint32_t i = 0; i < at->colorCount() && i < 8; ++i) {
+        SetAttachmentSlice(rp.colorAttachments[i], at->colorLevel(i), at->colorSlice(i));
+        SetColorResolveSlice(rp.colorAttachments[i], at->colorLevel(i), at->colorSlice(i));
+    }
+    if (at->depth())
+        SetAttachmentSlice(rp.depthAttachment, at->depthLevel(), at->depthSlice());
+    if (at->stencil())
+        SetAttachmentSlice(rp.stencilAttachment, at->stencilLevel(), at->stencilSlice());
+}
+
+// ARB_sample_locations: MTLRenderPassDescriptor.setSamplePositions phải gọi
+// trước renderCommandEncoderWithDescriptor. Chỉ có hiệu lực khi MSAA >1.
+static void ApplySamplePositions(MTLRenderPassDescriptor* rp, AppleTarget* at) {
+    if (!rp || !at || at->sampleCount() <= 1 || !at->hasCustomSamplePositions()) return;
+    if (@available(macOS 10.13, iOS 11.0, *))
+        [rp setSamplePositions:at->customSamplePositions()
+                         count:at->customSamplePositionCount()];
+}
 
 // Tracer cho đường GL dispatch cũ (giữ trace như Null, không encode GPU).
 class TraceEncoder : public IEncoder {
@@ -876,11 +1024,25 @@ private:
     bool ownCB_ = true; // p7: false = clear-ONLY encoder dùng chung CB batch
 };
 
+// macOS Managed storage: sau replaceRegion, GPU copy KHÔNG tự cập nhật. Cách
+// chuẩn để đẩy dữ liệu CPU lên GPU copy là blit từ staging buffer — KHÔNG dùng
+// synchronizeResource: vì trên driver Intel một số máy nó chép ngược GPU copy
+// (rỗng) đè lên CPU copy, làm texture mất nội dung NGẪU NHIÊN (~10% lần; đã tái
+// hiện: post-sync getBytes và blit-readback đều 0x00000000 dù CPU copy = FF0000FF
+// ngay trước sync). Helper uploadTexBytes kiểm soát toàn bộ dữ liệu nên tất định.
+
 class AppleDevice : public IDevice {
 public:
     explicit AppleDevice(id<MTLDevice> d, LogFn log)
         : dev_(d), queue_([d newCommandQueue]), log_(log),
           diag_(std::make_shared<SharedDiag>()) {}
+    uint32_t maxTessellationFactor() const override {
+        NSUInteger m = 64;
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+        if (![dev_ supportsFamily:MTLGPUFamilyApple5]) m = 16;
+#endif
+        return (uint32_t)m;
+    }
     void noteDrawContext(const std::string& s) override {
         if (!diag_) return;
         std::lock_guard<std::mutex> l(diag_->mu);
@@ -891,15 +1053,40 @@ public:
             ([dev_.name UTF8String] ? [dev_.name UTF8String] : "MTLDevice") + ")";
     }
     bool isNull() const override { return false; }
+    size_t availableMemoryBytes() const override {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+        return (size_t)os_proc_available_memory();
+#else
+        return (size_t)-1;
+#endif
+    }
+    void getDefaultSamplePositions(uint32_t count, float* outXY) override {
+        if (!outXY || !count || count > 32) return;
+        if (@available(macOS 10.13, iOS 11.0, *)) {
+            MTLSamplePosition p[32] = {};
+            [dev_ getDefaultSamplePositions:p count:(NSUInteger)count];
+            for (uint32_t i = 0; i < count; ++i) {
+                outXY[2 * i] = p[i].x;
+                outXY[2 * i + 1] = p[i].y;
+            }
+        }
+    }
+    bool supportsProgrammableSamplePositions() const override {
+        if (@available(macOS 10.13, iOS 11.0, *))
+            return [dev_ areProgrammableSamplePositionsSupported] ? true : false;
+        return false;
+    }
     std::shared_ptr<IBuffer> newBuffer(size_t n, StorageMode) override {
         id<MTLBuffer> b = [dev_ newBufferWithLength:(NSUInteger)(n ? n : 1)
                             options:MTLResourceStorageModeShared];
+        if (b) NoteBigAlloc("buf", (uint64_t)n, (uint64_t)n);
         return b ? std::make_shared<AppleBuffer>(b) : nullptr;
     }
     std::shared_ptr<IBuffer> newBufferWithBytes(const void* p, size_t n, StorageMode) override {
         if (!p || !n) return newBuffer(n, StorageMode::Shared);
         id<MTLBuffer> b = [dev_ newBufferWithBytes:p length:(NSUInteger)n
                             options:MTLResourceStorageModeShared];
+        if (b) NoteBigAlloc("buf", (uint64_t)n, (uint64_t)n);
         return b ? std::make_shared<AppleBuffer>(b) : nullptr;
     }
     // Occlusion ANY_SAMPLES: buffer visibility dùng chung, đính trên mọi render
@@ -922,6 +1109,60 @@ public:
         if (!rp || !visWrap_) return;
         rp.visibilityResultBuffer = visWrap_->get();
     }
+    // Đẩy vùng dữ liệu CPU vào 1 level texture bằng staging buffer + blit.
+    // 3D: z nằm trong origin (slice = 0); array/cube: slice = layer/face.
+    bool uploadTexBytes(id<MTLTexture> t, NSUInteger level, NSUInteger slice,
+                        NSUInteger x, NSUInteger y, NSUInteger z,
+                        NSUInteger w, NSUInteger h,
+                        const void* data, size_t bytesPerRow) {
+        if (!t || !data || !queue_ || !w || !h) return false;
+        size_t rowBytes = bytesPerRow;
+        size_t len = rowBytes * h;
+        @try {
+            // iOS/Shared: ghi TRỰC TIẾP vào texture (zero-copy, không staging).
+            // Trước đây luôn tạo MTLBuffer tạm đúng bằng vùng upload → atlas
+            // 2048/4096 (16-64MB) là khoản RAM tạm lớn dưới áp lực Jetsam.
+            // macOS Managed vẫn staging+blit: replaceRegion+synchronizeResource
+            // trên máy này từng chép GPU copy (rỗng) đè CPU copy → mất dữ liệu.
+            if ([t storageMode] == MTLStorageModeShared) {
+                if ([t textureType] == MTLTextureType3D) {
+                    [t replaceRegion:MTLRegionMake3D(x, y, z, w, h, 1)
+                         mipmapLevel:level slice:0 withBytes:data
+                         bytesPerRow:rowBytes bytesPerImage:len];
+                } else {
+                    [t replaceRegion:MTLRegionMake2D(x, y, w, h)
+                         mipmapLevel:level slice:slice withBytes:data
+                         bytesPerRow:rowBytes bytesPerImage:len];
+                }
+                return true;
+            }
+            id<MTLBuffer> stage = [dev_ newBufferWithBytes:data length:(NSUInteger)len
+                                                   options:MTLResourceStorageModeShared];
+            NoteBigAlloc("stage", (uint64_t)len, (uint64_t)len);
+            if (!stage) return false;
+            id<MTLCommandBuffer> cb = [queue_ commandBuffer];
+            if (!cb) return false;
+            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+            if (!blit) return false;
+            if ([t textureType] == MTLTextureType3D) {
+                [blit copyFromBuffer:stage sourceOffset:0
+                   sourceBytesPerRow:rowBytes sourceBytesPerImage:len
+                            sourceSize:MTLSizeMake(w, h, 1)
+                           toTexture:t destinationSlice:0 destinationLevel:level
+                  destinationOrigin:MTLOriginMake(x, y, z)];
+            } else {
+                [blit copyFromBuffer:stage sourceOffset:0
+                   sourceBytesPerRow:rowBytes sourceBytesPerImage:len
+                            sourceSize:MTLSizeMake(w, h, 1)
+                           toTexture:t destinationSlice:slice destinationLevel:level
+                  destinationOrigin:MTLOriginMake(x, y, 0)];
+            }
+            [blit endEncoding];
+            [cb commit];
+            NoteInflightCB(cb);
+            return true;
+        } @catch (NSException*) { return false; }
+    }
     std::shared_ptr<ITexture> newTexture(uint32_t w, uint32_t h, PixelFormat f) override {
         // Guard: validateWithDevice THIẾU width/height quá max là abort không
         // catch được (đã crash thật: buffer texture width 710178 > 16384).
@@ -938,17 +1179,20 @@ public:
         // Integer/float-buffer textures chỉ đọc (.read), không render target
         // (R32Sint làm RT có thể fail validation trên TBDR).
         if (f == PixelFormat::R32Sint || f == PixelFormat::R32Uint || f == PixelFormat::R32Float)
-            d.usage = MTLTextureUsageShaderRead;
+            d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
         else
-            d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+                      MTLTextureUsageShaderWrite;
         // Depth/Stencil CẤM Shared/Managed (validateWithDevice abort — đã crash
         // thật khi glTexImage2D DEPTH_COMPONENT32F). Giống newDepthTexture: Private.
         if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
             d.storageMode = MTLStorageModePrivate;
         else
-            d.storageMode = MTLStorageModeShared;
+            d.storageMode = DefaultTextureStorage();
         id<MTLTexture> t = [dev_ newTextureWithDescriptor:d];
         if (!t) return nullptr;
+        NoteBigAlloc("tex", (uint64_t)w * h * PixelFormatBytes(f),
+                     (uint64_t)w * h * PixelFormatBytes(f));
         auto tex = std::make_shared<AppleTexture>(t, w, h, f);
         if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
             tex->trackDepthInit(depthInit_);
@@ -965,6 +1209,12 @@ public:
                      " vuot Metal max 3D (" + std::to_string(maxD) + ") → bỏ qua");
             return nullptr;
         }
+        // Metal depth/stencil chỉ hỗ trợ 2D/2DArray/Cube; 3D depth abort
+        // validateWithDevice. Từ chối sớm thay vì crash process.
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8) {
+            if (log_) log_("TGLMT: newTexture3D depth/stencil unsupported → bỏ qua");
+            return nullptr;
+        }
         MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
         td.textureType = MTLTextureType3D;
         td.pixelFormat = ToMTL(f);
@@ -972,13 +1222,23 @@ public:
         td.height = h;
         td.depth = d;
         td.mipmapLevelCount = 1;
-        // 3D chỉ đọc (chưa hỗ trợ attach GL_TEXTURE_3D làm FBO color 3D-slice).
-        td.usage = MTLTextureUsageShaderRead;
-        td.storageMode = MTLStorageModeShared;
+        // 3D vừa sample vừa làm FBO slice (render pass dùng depthPlane).
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
+                   MTLTextureUsageRenderTarget;
+        // Depth/Stencil CẤM Shared/Managed (validateWithDevice abort): Private.
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            td.storageMode = MTLStorageModePrivate;
+        else
+            td.storageMode = DefaultTextureStorage();
         id<MTLTexture> t = nil;
         @try { t = [dev_ newTextureWithDescriptor:td]; } @catch (NSException*) { return nullptr; }
         if (!t) return nullptr;
-        return std::make_shared<AppleTexture>(t, w, h, f, d);
+        NoteBigAlloc("tex3d", (uint64_t)w * h * d * PixelFormatBytes(f),
+                     (uint64_t)w * h * d * PixelFormatBytes(f));
+        auto tex = std::make_shared<AppleTexture>(t, w, h, f, d);
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            tex->trackDepthInit(depthInit_);
+        return tex;
     }
     std::shared_ptr<ITexture> newTexture2DArray(uint32_t w, uint32_t h,
                                                 uint32_t layers, PixelFormat f) override {
@@ -990,19 +1250,102 @@ public:
         td.height = h;
         td.arrayLength = layers;
         td.mipmapLevelCount = 1;
-        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget |
+                   MTLTextureUsageShaderWrite;
         // Depth/Stencil CẤM Shared/Managed (validateWithDevice abort): Private.
         if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
             td.storageMode = MTLStorageModePrivate;
         else
-            td.storageMode = MTLStorageModeShared;
+            td.storageMode = DefaultTextureStorage();
         id<MTLTexture> t = nil;
         @try { t = [dev_ newTextureWithDescriptor:td]; } @catch (NSException*) { return nullptr; }
         if (!t) return nullptr;
+        NoteBigAlloc("tex2da", (uint64_t)w * h * layers * PixelFormatBytes(f),
+                     (uint64_t)w * h * layers * PixelFormatBytes(f));
         auto tex = std::make_shared<AppleTexture>(t, w, h, f, layers);
         if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
             tex->trackDepthInit(depthInit_);
         return tex;
+    }
+    std::shared_ptr<ITexture> newTexture2DArrayLevels(uint32_t w, uint32_t h,
+                                                      uint32_t layers,
+                                                      uint32_t levels,
+                                                      PixelFormat f) override {
+        if (!w || !h || !layers || !levels) return nullptr;
+        MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+        td.textureType = MTLTextureType2DArray;
+        td.pixelFormat = ToMTL(f);
+        td.width = w;
+        td.height = h;
+        td.arrayLength = layers;
+        td.mipmapLevelCount = levels;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget |
+                   MTLTextureUsageShaderWrite;
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            td.storageMode = MTLStorageModePrivate;
+        else
+            td.storageMode = DefaultTextureStorage();
+        id<MTLTexture> t = nil;
+        @try { t = [dev_ newTextureWithDescriptor:td]; } @catch (NSException*) { return nullptr; }
+        if (!t) return nullptr;
+        NoteBigAlloc("tex2da", (uint64_t)w * h * layers * PixelFormatBytes(f),
+                     (uint64_t)w * h * layers * PixelFormatBytes(f));
+        auto tex = std::make_shared<AppleTexture>(t, w, h, f, layers);
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            tex->trackDepthInit(depthInit_);
+        return tex;
+    }
+    std::shared_ptr<ITexture> newTexture3DLevels(uint32_t w, uint32_t h, uint32_t d,
+                                                 uint32_t levels, PixelFormat f) override {
+        if (!w || !h || !d || !levels) return nullptr;
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8) {
+            if (log_) log_("TGLMT: newTexture3DLevels depth/stencil unsupported → bỏ qua");
+            return nullptr;
+        }
+        MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+        td.textureType = MTLTextureType3D;
+        td.pixelFormat = ToMTL(f);
+        td.width = w;
+        td.height = h;
+        td.depth = d;
+        td.mipmapLevelCount = levels;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget |
+                   MTLTextureUsageShaderWrite;
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            td.storageMode = MTLStorageModePrivate;
+        else
+            td.storageMode = DefaultTextureStorage();
+        id<MTLTexture> t = nil;
+        @try { t = [dev_ newTextureWithDescriptor:td]; } @catch (NSException*) { return nullptr; }
+        if (!t) return nullptr;
+        NoteBigAlloc("tex3d", (uint64_t)w * h * d * PixelFormatBytes(f),
+                     (uint64_t)w * h * d * PixelFormatBytes(f));
+        auto tex = std::make_shared<AppleTexture>(t, w, h, f, d);
+        if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
+            tex->trackDepthInit(depthInit_);
+        return tex;
+    }
+    bool updateTexture3DLevel(ITexture* tex, uint32_t level, uint32_t z,
+            uint32_t x, uint32_t y, uint32_t w, uint32_t h, const void* data,
+            size_t bytesPerRow) override {
+        AppleTexture* a = dynamic_cast<AppleTexture*>(tex);
+        if (!a || !data || !w || !h || level >= (uint32_t)[a->get() mipmapLevelCount])
+            return false;
+        @try {
+            MTLTextureType type = [a->get() textureType];
+            if (type == MTLTextureType3D) {
+                [a->get() replaceRegion:MTLRegionMake3D(x, y, z, w, h, 1)
+                              mipmapLevel:level slice:0 withBytes:data
+                            bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * h];
+                return uploadTexBytes(a->get(), level, 0, x, y, z, w, h, data, bytesPerRow);
+            } else if (type == MTLTextureType2DArray) {
+                [a->get() replaceRegion:MTLRegionMake2D(x, y, w, h)
+                              mipmapLevel:level slice:(NSUInteger)z withBytes:data
+                            bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * h];
+                return uploadTexBytes(a->get(), level, z, x, y, 0, w, h, data, bytesPerRow);
+            }
+            return false;
+        } @catch (NSException*) { return false; }
     }
     bool updateTexture3D(ITexture* tex, uint32_t z, uint32_t x, uint32_t y,
             uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) override {
@@ -1015,14 +1358,14 @@ public:
                 [a->get() replaceRegion:MTLRegionMake3D(x, y, z, w, h, 1) mipmapLevel:0
                                   slice:0 withBytes:data bytesPerRow:bytesPerRow
                            bytesPerImage:bytesPerRow * h];
+                return uploadTexBytes(a->get(), 0, 0, x, y, z, w, h, data, bytesPerRow);
             } else if (type == MTLTextureType2DArray) {
                 [a->get() replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:0
                                   slice:(NSUInteger)z withBytes:data
                               bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * h];
-            } else {
-                return false;
+                return uploadTexBytes(a->get(), 0, z, x, y, 0, w, h, data, bytesPerRow);
             }
-            return true;
+            return false;
         } @catch (NSException*) { return false; }
     }
     std::shared_ptr<IEncoder> makeEncoder() override {
@@ -1123,7 +1466,8 @@ public:
         return std::make_shared<AppleLibrary>(lib);
     }
     std::shared_ptr<IRenderPipeline> makeRenderPipeline(ILibrary* vsLib, const char* vsFn,
-            ILibrary* fsLib, const char* fsFn, PixelFormat fmt) override {
+            ILibrary* fsLib, const char* fsFn, PixelFormat fmt,
+            bool usesStageIn = true) override {
         AppleLibrary* alVs = dynamic_cast<AppleLibrary*>(vsLib);
         AppleLibrary* alFs = dynamic_cast<AppleLibrary*>(fsLib);
         if (!alVs || !alFs || !vsFn || !fsFn) return nullptr;
@@ -1131,7 +1475,8 @@ public:
         // dài có thể vượt 64 byte gây cắt key và đụng cache sai pipeline).
         std::string key = std::to_string((uintptr_t)alVs) + "|" + vsFn + "|" +
                           std::to_string((uintptr_t)alFs) + "|" + fsFn + "|" +
-                          std::to_string((uint32_t)fmt);
+                          std::to_string((uint32_t)fmt) +
+                          "|I" + std::to_string(usesStageIn ? 1 : 0);
         {   // pipeline cache (M5): cùng key không biên dịch lại
             std::lock_guard<std::mutex> l(pmu_);
             auto it = pcache_.find(key);
@@ -1142,6 +1487,7 @@ public:
         if (!vs || !fs) return nullptr;
         // Layout chuẩn TGLMT M5: pos float2 @0, color float4 @1 (xem triangle.metal).
         MTLRenderPipelineDescriptor* d = basePipelineDesc(vs, fs, fmt, false);
+        if (!usesStageIn) d.vertexDescriptor = nil;
         NSError* e = nil;
         id<MTLRenderPipelineState> pso = [dev_ newRenderPipelineStateWithDescriptor:d error:&e];
         if (!pso) {
@@ -1169,13 +1515,15 @@ public:
         return d;
     }
     std::shared_ptr<IRenderPipeline> makeDepthPipeline(ILibrary* vsLib, const char* vsFn,
-            ILibrary* fsLib, const char* fsFn, PixelFormat fmt) override {
+            ILibrary* fsLib, const char* fsFn, PixelFormat fmt,
+            bool usesStageIn = true) override {
         AppleLibrary* alVs = dynamic_cast<AppleLibrary*>(vsLib);
         AppleLibrary* alFs = dynamic_cast<AppleLibrary*>(fsLib);
         if (!alVs || !alFs || !vsFn || !fsFn) return nullptr;
         std::string key = "depth|" + std::to_string((uintptr_t)alVs) + "|" + vsFn + "|" +
                           std::to_string((uintptr_t)alFs) + "|" + fsFn + "|" +
-                          std::to_string((uint32_t)fmt);
+                          std::to_string((uint32_t)fmt) +
+                          "|I" + std::to_string(usesStageIn ? 1 : 0);
         {
             std::lock_guard<std::mutex> l(pmu_);
             auto it = pcache_.find(key);
@@ -1185,6 +1533,7 @@ public:
         id<MTLFunction> fs = [alFs->get() newFunctionWithName:[NSString stringWithUTF8String:fsFn]];
         if (!vs || !fs) return nullptr;
         MTLRenderPipelineDescriptor* d = basePipelineDesc(vs, fs, fmt, true);
+        if (!usesStageIn) d.vertexDescriptor = nil;
         NSError* e = nil;
         id<MTLRenderPipelineState> pso = [dev_ newRenderPipelineStateWithDescriptor:d error:&e];
         if (!pso) {
@@ -1195,28 +1544,63 @@ public:
         return std::make_shared<ApplePipeline>(pso, true);
     }
     std::shared_ptr<IRenderPipeline> makeTessPipeline(ILibrary* vsLib, const char* postTessFn,
-            ILibrary* fsLib, const char* fsFn, PixelFormat fmt, uint32_t controlPoints) override {
+            ILibrary* fsLib, const char* fsFn, PixelFormat fmt, uint32_t controlPoints,
+            uint32_t samples = 1, const PixelFormat* colorFmts = nullptr,
+            uint32_t colorCount = 1, uint32_t partitionMode = 0, bool depth = false,
+            bool usesStageIn = true) override {
         AppleLibrary* alVs = dynamic_cast<AppleLibrary*>(vsLib);
         AppleLibrary* alFs = dynamic_cast<AppleLibrary*>(fsLib);
         if (!alVs || !alFs || !postTessFn || !fsFn) return nullptr;
         if (controlPoints == 0 || controlPoints > 32) return nullptr; // MSL spec: N 0..32
+        if (partitionMode > 2) return nullptr; // 0=equal, 1=frac_even, 2=frac_odd
         std::string key = "tess|" + std::to_string((uintptr_t)alVs) + "|" + postTessFn + "|" +
                           std::to_string((uintptr_t)alFs) + "|" + fsFn + "|" +
-                          std::to_string((uint32_t)fmt) + "|" + std::to_string(controlPoints);
+                          std::to_string((uint32_t)fmt) + "|" + std::to_string(controlPoints) +
+                          "|S" + std::to_string(samples) + "|C" +
+                          std::to_string(colorFmts ? colorCount : 1) +
+                          "|P" + std::to_string(partitionMode) +
+                          "|D" + std::to_string(depth ? 1 : 0) +
+                          "|I" + std::to_string(usesStageIn ? 1 : 0);
+        if (colorFmts) for (uint32_t i = 0; i < colorCount && i < 8; ++i)
+            key += "|" + std::to_string((uint32_t)colorFmts[i]);
         {
             std::lock_guard<std::mutex> l(pmu_);
             auto it = pcache_.find(key);
-            if (it != pcache_.end()) return std::make_shared<ApplePipeline>(it->second);
+            if (it != pcache_.end())
+                return std::make_shared<ApplePipeline>(it->second, depth);
         }
         id<MTLFunction> vs = [alVs->get() newFunctionWithName:[NSString stringWithUTF8String:postTessFn]];
         id<MTLFunction> fs = [alFs->get() newFunctionWithName:[NSString stringWithUTF8String:fsFn]];
         if (!vs || !fs) return nullptr;
-        MTLRenderPipelineDescriptor* d = basePipelineDesc(vs, fs, fmt, false);
-        // Tessellation: control points bước theo PerPatchControlPoint (PerVertex bị
-        // validation từ chối với post-tessellation vertex function).
-        d.vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerPatchControlPoint;
-        d.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
-        d.maxTessellationFactor = 64;
+        MTLRenderPipelineDescriptor* d = basePipelineDesc(vs, fs, fmt, depth);
+        if (samples < 1) samples = 1;
+        if (samples > 4) samples = 4;
+        d.rasterSampleCount = samples;
+        if (colorFmts) {
+            uint32_t n = colorCount > 8 ? 8 : (colorCount ? colorCount : 1);
+            for (uint32_t i = 0; i < n; ++i)
+                d.colorAttachments[i].pixelFormat = ToMTL(colorFmts[i]);
+        }
+        // GL TES path không dùng [[stage_in]]: control-point/patch data đi qua
+        // buffer args (tessSlots). Vertex descriptor thừa khiến Metal validation
+        // đòi bind buffer 0 dù shader không đọc. Native test dùng stage_in thì giữ
+        // descriptor + PerPatchControlPoint.
+        if (usesStageIn) {
+            d.vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerPatchControlPoint;
+        } else {
+            d.vertexDescriptor = nil;
+        }
+        d.tessellationPartitionMode = partitionMode == 1
+            ? MTLTessellationPartitionModeFractionalEven
+            : partitionMode == 2 ? MTLTessellationPartitionModeFractionalOdd
+                                 : MTLTessellationPartitionModeInteger;
+        // Apple3/4 (A9-A11) chỉ hỗ trợ factor tối đa 16; Apple5+ (A12+) và Mac 64.
+        // Đặt 64 trên A11 làm Metal validation abort ngay khi tạo PSO.
+        NSUInteger maxTess = 64;
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+        if (![dev_ supportsFamily:MTLGPUFamilyApple5]) maxTess = 16;
+#endif
+        d.maxTessellationFactor = maxTess;
         d.tessellationFactorScaleEnabled = NO;
         d.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
         d.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
@@ -1228,7 +1612,7 @@ public:
             return nullptr;
         }
         { std::lock_guard<std::mutex> l(pmu_); pcache_[key] = pso; }
-        return std::make_shared<ApplePipeline>(pso);
+        return std::make_shared<ApplePipeline>(pso, depth);
     }
     std::shared_ptr<IRenderTarget> makeRenderTarget(uint32_t w, uint32_t h, PixelFormat f) override {
         auto t = std::dynamic_pointer_cast<AppleTexture>(newTexture(w, h, f));
@@ -1252,16 +1636,23 @@ public:
         if (!c && !d) return nullptr;
         // Depth-only FBO (clearDepthTexture: glFramebufferTexture2D color=0) →
         // target không color; makeClearEncoder gắn depth-attachment không color.
-        if (!c) return std::make_shared<AppleTarget>(nil, d->pixelFormat(), nil, d->get(),
-                                                     d->width(), d->height(), false,
-                                                     takeDepthInit(d->get()), 1,
-                                                     d->pixelFormat() == PixelFormat::Depth24Stencil8
-                                                         ? d->get() : nil);
-        return std::make_shared<AppleTarget>(c->get(), c->pixelFormat(), nil,
-                                             d ? d->get() : nil, c->width(), c->height(), false,
-                                             d ? takeDepthInit(d->get()) : false, 1,
-                                             (d && d->pixelFormat() == PixelFormat::Depth24Stencil8)
-                                                 ? d->get() : nil);
+        if (!c) {
+            auto t = std::make_shared<AppleTarget>(nil, d->pixelFormat(), nil, d->get(),
+                                                   d->width(), d->height(), false,
+                                                   takeDepthInit(d->get()), 1,
+                                                   d->pixelFormat() == PixelFormat::Depth24Stencil8
+                                                       ? d->get() : nil);
+            t->setDepthAttachmentInfo(d->attachmentLevel(), d->attachmentSlice());
+            return t;
+        }
+        auto t = std::make_shared<AppleTarget>(c->get(), c->pixelFormat(), nil,
+                                               d ? d->get() : nil, c->width(), c->height(), false,
+                                               d ? takeDepthInit(d->get()) : false, 1,
+                                               (d && d->pixelFormat() == PixelFormat::Depth24Stencil8)
+                                                   ? d->get() : nil);
+        t->setColorAttachmentInfo(0, c->attachmentLevel(), c->attachmentSlice());
+        if (d) t->setDepthAttachmentInfo(d->attachmentLevel(), d->attachmentSlice());
+        return t;
     }
     std::shared_ptr<IRenderTarget> wrapAsTarget(const ITexture* const* colors,
             uint32_t nColors, ITexture* depth) override {
@@ -1282,11 +1673,17 @@ public:
         }
         if (!w && d) { w = d->width(); h = d->height(); }
         if (!w && !d) return nullptr;
-        return std::make_shared<AppleTarget>(mtl, fmts, nColors,
-                                             d ? d->get() : nil, w, h,
-                                             d ? takeDepthInit(d->get()) : false,
-                                             (d && d->pixelFormat() == PixelFormat::Depth24Stencil8)
-                                                 ? d->get() : nil);
+        auto t = std::make_shared<AppleTarget>(mtl, fmts, nColors,
+                                               d ? d->get() : nil, w, h,
+                                               d ? takeDepthInit(d->get()) : false,
+                                               (d && d->pixelFormat() == PixelFormat::Depth24Stencil8)
+                                                   ? d->get() : nil);
+        for (uint32_t i = 0; i < nColors; ++i) {
+            AppleTexture* at = dynamic_cast<AppleTexture*>(const_cast<ITexture*>(colors[i]));
+            if (at) t->setColorAttachmentInfo(i, at->attachmentLevel(), at->attachmentSlice());
+        }
+        if (d) t->setDepthAttachmentInfo(d->attachmentLevel(), d->attachmentSlice());
+        return t;
     }
     void setDefaultRenderTarget(std::shared_ptr<IRenderTarget> t) override { defaultTarget_ = t; }
     std::shared_ptr<IRenderTarget> defaultRenderTarget() override { return defaultTarget_; }
@@ -1444,6 +1841,7 @@ public:
             [t->get() replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0
                           withBytes:data bytesPerRow:bytesPerRow];
         } @catch (NSException*) { return nullptr; }
+        uploadTexBytes(t->get(), 0, 0, 0, 0, 0, w, h, data, bytesPerRow);
         return t;
     }
     std::shared_ptr<ITexture> newDepthTexture(uint32_t w, uint32_t h, PixelFormat f) override {
@@ -1455,6 +1853,8 @@ public:
         d.storageMode = MTLStorageModePrivate; // depth không readback trực tiếp
         id<MTLTexture> t = [dev_ newTextureWithDescriptor:d];
         if (!t) return nullptr;
+        NoteBigAlloc("tex", (uint64_t)w * h * PixelFormatBytes(f),
+                     (uint64_t)w * h * PixelFormatBytes(f));
         auto tex = std::make_shared<AppleTexture>(t, w, h, f);
         tex->trackDepthInit(depthInit_);
         return tex;
@@ -1468,17 +1868,19 @@ public:
         return std::make_shared<AppleTarget>(c->get(), colorFmt, nil, dep->get(), w, h, false,
                                              true /* fresh depth */);
     }
-    std::shared_ptr<IRenderTarget> makeMSAATarget(uint32_t w, uint32_t h, uint32_t samples) override {
-        if (samples < 2) return makeRenderTarget(w, h, PixelFormat::RGBA8Unorm);
-        MTLTextureDescriptor* md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:
-                                    MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+    std::shared_ptr<IRenderTarget> makeMSAATarget(uint32_t w, uint32_t h, uint32_t samples,
+                                                  PixelFormat fmt) override {
+        if (samples < 2) return makeRenderTarget(w, h, fmt);
+        MTLPixelFormat mfmt = ToMTL(fmt);
+        if (mfmt == MTLPixelFormatInvalid) return nullptr;
+        MTLTextureDescriptor* md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:mfmt
+                                    width:w height:h mipmapped:NO];
         md.textureType = MTLTextureType2DMultisample;
         md.sampleCount = samples;
         md.usage = MTLTextureUsageRenderTarget;
         md.storageMode = MTLStorageModePrivate;
         id<MTLTexture> msaa = [dev_ newTextureWithDescriptor:md];
-        auto res = std::dynamic_pointer_cast<AppleTexture>(
-            newTexture(w, h, PixelFormat::RGBA8Unorm));
+        auto res = std::dynamic_pointer_cast<AppleTexture>(newTexture(w, h, fmt));
         if (!msaa || !res) return nullptr;
         // MSAA depth: FBO có depth dùng depth đa mẫu riêng (không sample depth
         // đơn mẫu của FBO). Metal render pass bắt buộc depth attachment cùng
@@ -1490,10 +1892,42 @@ public:
         dd.usage = MTLTextureUsageRenderTarget;
         dd.storageMode = MTLStorageModePrivate;
         id<MTLTexture> msaaDepth = [dev_ newTextureWithDescriptor:dd];
-        return std::make_shared<AppleTarget>(msaa, PixelFormat::RGBA8Unorm, res->get(),
+        return std::make_shared<AppleTarget>(msaa, fmt, res->get(),
                                              msaaDepth, w, h, true,
                                              true /* depth MSAA fresh → clear lần đầu */,
                                              samples);
+    }
+    std::shared_ptr<IRenderTarget> makeMSAATargetLayered(uint32_t w, uint32_t h,
+            uint32_t layers, uint32_t samples, PixelFormat fmt) override {
+        if (samples < 1 || !layers) return nullptr;
+        MTLPixelFormat mfmt = ToMTL(fmt);
+        if (mfmt == MTLPixelFormatInvalid) return nullptr;
+        if (samples < 2) {
+            auto res = std::dynamic_pointer_cast<AppleTexture>(newTexture2DArray(w, h, layers, fmt));
+            if (!res) return nullptr;
+            return std::make_shared<AppleTarget>(res->get(), fmt, res->get(), nil, w, h,
+                                                 false, false, 1);
+        }
+        MTLTextureDescriptor* md = [[MTLTextureDescriptor alloc] init];
+        md.textureType = MTLTextureType2DMultisampleArray;
+        md.pixelFormat = mfmt;
+        md.width = w; md.height = h; md.arrayLength = layers;
+        md.sampleCount = samples;
+        md.usage = MTLTextureUsageRenderTarget;
+        md.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> msaa = [dev_ newTextureWithDescriptor:md];
+        auto res = std::dynamic_pointer_cast<AppleTexture>(newTexture2DArray(w, h, layers, fmt));
+        if (!msaa || !res) return nullptr;
+        MTLTextureDescriptor* dd = [[MTLTextureDescriptor alloc] init];
+        dd.textureType = MTLTextureType2DMultisampleArray;
+        dd.pixelFormat = MTLPixelFormatDepth32Float;
+        dd.width = w; dd.height = h; dd.arrayLength = layers;
+        dd.sampleCount = samples;
+        dd.usage = MTLTextureUsageRenderTarget;
+        dd.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> msaaDepth = [dev_ newTextureWithDescriptor:dd];
+        return std::make_shared<AppleTarget>(msaa, fmt, res->get(), msaaDepth, w, h, true,
+                                             true, samples);
     }
     std::shared_ptr<IRenderPipeline> makeMSAAPipeline(ILibrary* vsLib, const char* vsFn,
             ILibrary* fsLib, const char* fsFn, PixelFormat fmt, uint32_t samples) override {
@@ -1663,7 +2097,7 @@ public:
         @try {
             [a->get() replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:0
                           withBytes:data bytesPerRow:bytesPerRow];
-            return true;
+            return uploadTexBytes(a->get(), 0, 0, x, y, 0, w, h, data, bytesPerRow);
         } @catch (NSException*) { return false; }
     }
     bool updateTextureLevel(ITexture* tex, uint32_t level, uint32_t x, uint32_t y,
@@ -1674,7 +2108,7 @@ public:
         @try {
             [a->get() replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:level
                           withBytes:data bytesPerRow:bytesPerRow];
-            return true;
+            return uploadTexBytes(a->get(), level, 0, x, y, 0, w, h, data, bytesPerRow);
         } @catch (NSException*) { return false; }
     }
     std::shared_ptr<ITexture> newTextureLevels(uint32_t w, uint32_t h, PixelFormat f,
@@ -1685,19 +2119,55 @@ public:
                                             width:w height:h mipmapped:(levels > 1 ? YES : NO)];
         d.mipmapLevelCount = levels;
         if (f == PixelFormat::R32Sint || f == PixelFormat::R32Uint || f == PixelFormat::R32Float)
-            d.usage = MTLTextureUsageShaderRead;
+            d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
         else
-            d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+                      MTLTextureUsageShaderWrite;
         if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
             d.storageMode = MTLStorageModePrivate;
         else
-            d.storageMode = MTLStorageModeShared;
+            d.storageMode = DefaultTextureStorage();
         id<MTLTexture> t = [dev_ newTextureWithDescriptor:d];
         if (!t) return nullptr;
+        NoteBigAlloc("tex", (uint64_t)w * h * PixelFormatBytes(f),
+                     (uint64_t)w * h * PixelFormatBytes(f));
         auto tex = std::make_shared<AppleTexture>(t, w, h, f);
         if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
             tex->trackDepthInit(depthInit_);
         return tex;
+    }
+    std::shared_ptr<ITexture> newCubeTextureLevels(uint32_t size, uint32_t levels,
+                                                    PixelFormat f) override {
+        if (!size || !levels) return nullptr;
+        MTLPixelFormat m = ToMTL(f);
+        if (m == MTLPixelFormatInvalid) return nullptr;
+        if (m != MTLPixelFormatRGBA8Unorm && m != MTLPixelFormatRGBA8Unorm_sRGB &&
+            m != MTLPixelFormatR8Unorm)
+            return nullptr;
+        MTLTextureDescriptor* d = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:m
+                                                 size:size mipmapped:(levels > 1 ? YES : NO)];
+        d.mipmapLevelCount = levels;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget |
+                  MTLTextureUsageShaderWrite;
+        d.storageMode = DefaultTextureStorage();
+        id<MTLTexture> t = nil;
+        @try { t = [dev_ newTextureWithDescriptor:d]; } @catch (NSException*) { return nullptr; }
+        if (!t) return nullptr;
+        return std::make_shared<AppleTexture>(t, size, size, f);
+    }
+    bool updateCubeFaceLevel(ITexture* tex, uint32_t level, uint32_t face,
+            const void* data, size_t bytesPerRow) override {
+        AppleTexture* a = dynamic_cast<AppleTexture*>(tex);
+        if (!a || !data || face >= 6 || level >= (uint32_t)[a->get() mipmapLevelCount])
+            return false;
+        @try {
+            if ([a->get() textureType] != MTLTextureTypeCube) return false;
+            uint32_t s = a->width() >> level;
+            if (!s) s = 1;
+            [a->get() replaceRegion:MTLRegionMake2D(0, 0, s, s) mipmapLevel:level slice:face
+                          withBytes:data bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * s];
+            return uploadTexBytes(a->get(), level, face, 0, 0, 0, s, s, data, bytesPerRow);
+        } @catch (NSException*) { return false; }
     }
     std::shared_ptr<ITexture> newCubeTexture(uint32_t size, PixelFormat f) override {
         if (!size) return nullptr;
@@ -1709,8 +2179,9 @@ public:
             return nullptr;
         MTLTextureDescriptor* d = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:m
                                                  size:size mipmapped:NO];
-        d.usage = MTLTextureUsageShaderRead;
-        d.storageMode = MTLStorageModeShared;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget |
+                  MTLTextureUsageShaderWrite;
+        d.storageMode = DefaultTextureStorage();
         id<MTLTexture> t = nil;
         @try { t = [dev_ newTextureWithDescriptor:d]; } @catch (NSException*) { return nullptr; }
         if (!t) return nullptr;
@@ -1725,7 +2196,7 @@ public:
             uint32_t s = a->width();
             [a->get() replaceRegion:MTLRegionMake2D(0, 0, s, s) mipmapLevel:0 slice:face
                           withBytes:data bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * s];
-            return true;
+            return uploadTexBytes(a->get(), 0, face, 0, 0, 0, s, s, data, bytesPerRow);
         } @catch (NSException*) { return false; }
     }
     std::shared_ptr<IRenderPipeline> makeMeshPipeline(ILibrary* meshLib, const char* meshFn,
@@ -1906,6 +2377,17 @@ public:
                    std::to_string(attribs[i].divisor) + "," +
                    std::to_string(attribs[i].stride) + ";";
         bool useDepth = opts && opts->depth;
+        bool useStencil = opts && opts->stencil;
+        // Metal: format depth/stencil khai báo trong pipeline phải TRÙNG format
+        // attachment thật của render pass. Target depth combined (D24S8 →
+        // Depth32Float_Stencil8) thì CẢ depth lẫn stencil đều là D32S8; target
+        // depth-only thì depth=D32F và stencil=Invalid. Trước đây hardcode
+        // (D32F + D32S8) khiến Metal abort "must match" ngay lần draw đầu vào
+        // FBO có depth-stencil (crash thật trên iPhone A11).
+        PixelFormat dFmt = opts ? opts->depthFmt : PixelFormat::Invalid;
+        if (dFmt == PixelFormat::Invalid && useDepth) dFmt = PixelFormat::Depth32Float;
+        if (useStencil) dFmt = PixelFormat::Depth24Stencil8;
+        bool hasDepthAttach = dFmt != PixelFormat::Invalid;
         uint32_t samples = opts ? opts->samples : 1;
         if (samples < 1) samples = 1;
         if (samples > 4) samples = 4;
@@ -1930,9 +2412,9 @@ public:
         auto slotBlend = [&](uint32_t i) -> const AttachmentBlend& {
             return opts ? opts->blends[i] : kDefaultBlend;
         };
-        key += useDepth ? "D" : "-";
+        key += hasDepthAttach ? "D" : "-";
+        key += std::to_string((uint32_t)dFmt) + "|";
         key += "S" + std::to_string(samples);
-        bool useStencil = opts && opts->stencil;
         const StencilDesc& sd = opts ? opts->stencilDesc : StencilDesc{};
         if (useStencil) {
             key += "T";
@@ -1964,7 +2446,8 @@ public:
         {
             std::lock_guard<std::mutex> l(pmu_);
             auto it = pcache_.find(key);
-            if (it != pcache_.end()) return std::make_shared<ApplePipeline>(it->second, useDepth);
+            if (it != pcache_.end())
+                return std::make_shared<ApplePipeline>(it->second, hasDepthAttach, useStencil);
         }
         id<MTLFunction> vs = [alVs->get() newFunctionWithName:[NSString stringWithUTF8String:vsFn]];
         id<MTLFunction> fs = [alFs->get() newFunctionWithName:[NSString stringWithUTF8String:fsFn]];
@@ -1991,8 +2474,14 @@ public:
                 d.colorAttachments[i].alphaBlendOperation = ToMTLBlendOp(b.alphaOp);
             }
         }
-        if (useDepth) d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-        if (useStencil) d.stencilAttachmentPixelFormat = ToMTL(PixelFormat::Depth24Stencil8);
+        if (dFmt == PixelFormat::Depth24Stencil8) {
+            // Combined: depth và stencil dùng CHUNG texture D32S8, pipeline phải
+            // khai báo cả hai cùng format (Metal validation "must match").
+            d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            d.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        } else if (hasDepthAttach) {
+            d.depthAttachmentPixelFormat = ToMTL(dFmt);
+        }
         d.rasterSampleCount = samples;
         NSError* e = nil;
         // Chẩn đoán đen màn hình: PSO compile đồng bộ trên render thread, A11 có
@@ -2013,7 +2502,7 @@ public:
             return nullptr;
         }
         { std::lock_guard<std::mutex> l(pmu_); pcache_[key] = pso; }
-        return std::make_shared<ApplePipeline>(pso, useDepth, useStencil);
+        return std::make_shared<ApplePipeline>(pso, hasDepthAttach, useStencil);
     }
     std::shared_ptr<IComputeEncoder> makeComputeEncoder() override {
         if (!queue_) return nullptr;
@@ -2190,6 +2679,8 @@ public:
             rp.stencilAttachment.loadAction = MTLLoadActionLoad;
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
         }
+        ApplyAttachmentPlanes(rp, at);
+        ApplySamplePositions(rp, at);
         attachVis(rp);
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
@@ -2246,6 +2737,8 @@ public:
             rp.stencilAttachment.loadAction = MTLLoadActionLoad;
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
         }
+        ApplyAttachmentPlanes(rp, at);
+        ApplySamplePositions(rp, at);
         attachVis(rp);
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
@@ -2288,6 +2781,8 @@ public:
             rp.stencilAttachment.loadAction = MTLLoadActionLoad;
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
         }
+        ApplyAttachmentPlanes(rp, at);
+        ApplySamplePositions(rp, at);
         attachVis(rp);
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
@@ -2354,6 +2849,7 @@ public:
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
             rp.stencilAttachment.clearStencil = (uint32_t)clearStencil;
         }
+        ApplyAttachmentPlanes(rp, at);
         attachVis(rp);
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;

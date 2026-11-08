@@ -37,7 +37,7 @@ int main() {
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, fbo);
     glFramebufferTexture2D(0x8D40, 0x8D00 /*DEPTH_ATTACHMENT*/, 0x0DE1, depth, 0);
-    glNamedFramebufferDrawBuffer(fbo, 0x0404 /*GL_NONE*/);
+    glNamedFramebufferDrawBuffer(fbo, 0x0000 /*GL_NONE*/);
     if (glCheckFramebufferStatus(0x8D40) != 0x8CD5 /*COMPLETE*/) {
         printf("test_depth_only_draw_apple SKIP: depth-only FBO incomplete\n");
         return 0;

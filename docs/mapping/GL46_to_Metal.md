@@ -286,7 +286,7 @@ Nguồn: `docs/khronos/gl.xml` + `docs/khronos/extensions/*.txt` + `docs/apple/M
 | 280 | `glGetTextureParameterfv` | GL_VERSION_4_5 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
 | 281 | `glGetTextureParameteriv` | GL_VERSION_4_5 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
 | 282 | `glGetTextureSubImage` | GL_VERSION_4_5 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
-| 283 | `glGetTransformFeedbackVarying` | GL_VERSION_3_0 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
+| 283 | `glGetTransformFeedbackVarying` | GL_VERSION_3_0 | Reflection thật từ VS: scalar/vector, array element/whole-array, mat2/3/4 (kể cả non-square); Metal không có TF query GPU nên chỉ trả metadata lúc link |
 | 284 | `glGetTransformFeedbacki64_v` | GL_VERSION_4_5 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
 | 285 | `glGetTransformFeedbacki_v` | GL_VERSION_4_5 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |
 | 286 | `glGetTransformFeedbackiv` | GL_VERSION_4_5 | Shadow state trên CPU (Metal không cho query GPU đồng bộ); trả về tracker |

@@ -328,13 +328,29 @@ void glLinkProgram(GLuint p) {
     pr.attribLoc.clear(); pr.appleVS.reset(); pr.appleFS.reset();
     pr.appleCS.reset(); pr.appleCSPipeline.reset(); pr.computeMSL.clear();
     pr.computeBlockSlots.clear(); pr.computeSamplers.clear(); pr.computeUBSize = 0;
-    pr.vsShaderBlocks.clear(); pr.fsShaderBlocks.clear(); pr.storageBlocks.clear();
+    pr.vsShaderBlocks.clear(); pr.fsShaderBlocks.clear();
+    pr.tcsShaderBlocks.clear(); pr.tesShaderBlocks.clear();
+    pr.storageBlocks.clear();
     pr.vsImages.clear(); pr.fsImages.clear(); pr.computeImages.clear();
     pr.computeAtomics.clear(); pr.vsAtomics.clear(); pr.fsAtomics.clear();
     pr.vsUBSize = pr.fsUBSize = 0;
     pr.pipelineVS = nullptr; pr.pipelineFS = nullptr;
-    ShaderObject *vs = nullptr, *fs = nullptr;
-    bool hasV = false, hasF = false;
+    pr.appleTCS.reset(); pr.appleTES.reset(); pr.appleTCSPipeline.reset();
+    pr.appleVSCapture.reset(); pr.appleVSCapturePipeline.reset();
+    pr.vsCaptureIndexSlot = pr.vsCaptureDrawSlot = pr.vsCaptureDescSlot = -1;
+    pr.vsCaptureSlots.clear(); pr.vertexCaptureMSL.clear();
+    pr.vsUniforms.clear(); pr.tcsUniforms.clear(); pr.tesUniforms.clear(); pr.fsUniforms.clear();
+    pr.vsUniformBytes = pr.tcsUniformBytes = pr.tesUniformBytes = pr.fsUniformBytes = 0;
+    pr.vsCaptureSamplers.clear(); pr.tcsSamplers.clear(); pr.tesSamplers.clear();
+    pr.fsTessSamplers.clear(); pr.vsSamplers.clear(); pr.fsSamplers.clear();
+    pr.tcsImages.clear(); pr.tesImages.clear();
+    pr.tcsAtomics.clear(); pr.tesAtomics.clear();
+    pr.tessControlPoints = 0; pr.tessPatchType = 0; pr.tessSpacing = 0;
+    pr.tessVertexOrder = 0;
+    pr.tessFactorSlot = -1; pr.tesFactorSlot = -1;
+    pr.tessControlMSL.clear(); pr.tessEvalMSL.clear(); pr.tessSlots.clear();
+    ShaderObject *vs = nullptr, *fs = nullptr, *tcs = nullptr, *tes = nullptr;
+    bool hasV = false, hasF = false, hasTC = false, hasTE = false;
     pr.hasTessStages = false; pr.hasGeometryStage = false;
     for (GLuint s : pr.shaders) {
         auto its = c.shaders.find(s);
@@ -342,6 +358,8 @@ void glLinkProgram(GLuint p) {
         if (!its->second.compiled) { pr.infoLog = "error: shader not compiled"; return; }
         if (its->second.type == 0x8B31) { hasV = true; vs = &its->second; pr.vertexMSL = vs->msl; }
         if (its->second.type == 0x8B30) { hasF = true; fs = &its->second; pr.fragmentMSL = fs->msl; }
+        if (its->second.type == 0x8E88) { hasTC = true; tcs = &its->second; pr.tessControlMSL = tcs->msl; }
+        if (its->second.type == 0x8E87) { hasTE = true; tes = &its->second; pr.tessEvalMSL = tes->msl; }
         if (its->second.type == 0x91B9) { // COMPUTE_SHADER
             pr.computeMSL = its->second.msl;
             pr.computeLocalSize[0] = its->second.conv.localSize[0];
@@ -404,7 +422,353 @@ void glLinkProgram(GLuint p) {
     // link thay vì link OK nhưng vẽ sai/câm (trung thực, đúng nếp P6f).
     // Draw path cũng đã từ chối hasTessStages + PATCHES (trace-only, xem AppleDrawGL).
     if (pr.hasTessStages) {
-        pr.infoLog = "error: tessellation link chưa hỗ trợ (P-Tess T3: pipeline tess descriptor + drawPatches)";
+        // P-Tess T3/T4a: triangles, TCS=compute, TES=post-tess vertex. Subset đầu
+        // tiên chưa có VS prepass (VS attribute → TCS in) và chưa bind uniform/
+        // sampler trong tess path — fail RÕ tại link thay vì vẽ sai/câm.
+        if (!hasV || !hasF || !hasTC || !hasTE) {
+            pr.infoLog = "error: tess program cần đủ VS+TCS+TES+FS";
+            return;
+        }
+        if (!tcs || !tes || (tes->conv.tessPatchType != 3 && tes->conv.tessPatchType != 4)) {
+            pr.infoLog = "error: tessellation chỉ hỗ trợ domain triangles/quads (T3/T4)";
+            return;
+        }
+        // TCS không tự khai báo domain. Nếu compile đơn lẻ đã chọn sai factor
+        // struct (heuristic N>=4) so với TES, convert lại với domain thật.
+        GLSLConvertResult tcsConv = tcs->conv;
+        if (tcs->conv.tessPatchType != tes->conv.tessPatchType) {
+            tcsConv = ConvertGLSLtoMSL(tcs->source, 0x8E88, false, tes->conv.tessPatchType);
+            if (!tcsConv.ok) {
+                pr.infoLog = "error: MSL TCS convert theo domain TES: " + tcsConv.log;
+                return;
+            }
+            pr.tessControlMSL = tcsConv.msl;
+        }
+        const GLSLConvertResult& tcv = tcsConv;
+        const int minCP = (tes->conv.tessPatchType == 4) ? 4 : 3;
+        if (tcv.tessVertices < minCP || tcv.tessVertices > 32) {
+            pr.infoLog = "error: tessellation domain " +
+                         std::string(tes->conv.tessPatchType == 4 ? "quads" : "triangles") +
+                         " yêu cầu 3..32 control point (layout(vertices=N), N>=" +
+                         std::to_string(minCP) + "; tcs=" +
+                         std::to_string(tcv.tessVertices) + ")";
+            return;
+        }
+        // T4b: VS prepass. Link theo tên (GLSL varying match), không dựa
+        // location của Metal interstage vì các stage giao tiếp qua buffer.
+        bool needCapture = false;
+        for (auto& a : vs->conv.inputs) {
+            if (a.location < 0 || a.location >= 16) {
+                pr.infoLog = "error: T4b yêu cầu VS attribute có layout(location=0..15) "
+                             "tường minh (attribute `" + a.name + "`)";
+                return;
+            }
+        }
+        for (auto& s : tcv.tessSlots) {
+            if (!s.isInput) continue;
+            needCapture = true;
+            if (s.isGlIn) {
+                if (s.name != "gl_Position" && s.name != "gl_PointSize") {
+                    pr.infoLog = "error: T4b gl_in." + s.name + " chưa hỗ trợ";
+                    return;
+                }
+                continue;
+            }
+            bool found = false;
+            for (auto& o : vs->conv.outputs)
+                if (o.name == s.name) {
+                    if (o.mslType != s.mslType) {
+                        pr.infoLog = "error: tess varying type mismatch VS→TCS: " + s.name;
+                        return;
+                    }
+                    found = true;
+                    break;
+                }
+            if (!found) {
+                pr.infoLog = "error: TCS in `" + s.name + "` không có VS out tương ứng";
+                return;
+            }
+        }
+        // T4b stage 2d: atomic counters bind theo binding point.
+        pr.vsAtomics.clear(); pr.fsAtomics.clear();
+        for (auto& as : vs->conv.atomicSlots) pr.vsAtomics.push_back({as.name, as.binding, as.offset, as.slot});
+        for (auto& as : tcv.atomicSlots) pr.tcsAtomics.push_back({as.name, as.binding, as.offset, as.slot});
+        for (auto& as : tes->conv.atomicSlots) pr.tesAtomics.push_back({as.name, as.binding, as.offset, as.slot});
+        for (auto& as : fs->conv.atomicSlots) pr.fsAtomics.push_back({as.name, as.binding, as.offset, as.slot});
+        {
+            GLint nextLoc = 0;
+            for (auto& kv : pr.uniformLoc) nextLoc = std::max(nextLoc, kv.second + 1);
+            std::unordered_map<std::string, GLenum> seenType;
+            auto addStage = [&](const ShaderObject& sh, std::vector<ProgramObject::StageUniform>& out,
+                                size_t& bytes, bool isVS) -> bool {
+                for (auto& u : sh.conv.uniforms) {
+                    if (u.isSampler) continue;
+                    GLenum ty = GlslTypeToGLEnum(u.glslType);
+                    if (!ty) {
+                        pr.infoLog = "error: tess uniform `" + u.name + "` type chưa hỗ trợ: " +
+                                     u.glslType;
+                        return false;
+                    }
+                    auto st = seenType.find(u.name);
+                    if (st != seenType.end() && st->second != ty) {
+                        pr.infoLog = "error: tess uniform `" + u.name +
+                                     "` khác kiểu giữa các stage";
+                        return false;
+                    }
+                    bool firstSeen = (st == seenType.end());
+                    seenType[u.name] = ty;
+                    auto lit = pr.uniformLoc.find(u.name);
+                    GLint loc = (lit != pr.uniformLoc.end()) ? lit->second : nextLoc++;
+                    pr.uniformLoc[u.name] = loc;
+                    if (firstSeen) {
+                        pr.uniformLayout.push_back({u.name, u.uniformOffset, u.uniformSize,
+                                                    loc, isVS, ty});
+                        std::string nm = u.name;
+                        GLint sz = (u.arraySize > 0) ? (GLint)u.arraySize : 1;
+                        if (u.arraySize > 0) nm += "[0]";
+                        pr.activeUniforms.push_back({nm, ty, sz});
+                    }
+                    out.push_back({u.name, u.uniformOffset, u.uniformSize});
+                }
+                bytes = sh.conv.uniformBufferSize;
+                return true;
+            };
+            if (!addStage(*vs, pr.vsUniforms, pr.vsUniformBytes, true) ||
+                !addStage(*tcs, pr.tcsUniforms, pr.tcsUniformBytes, false) ||
+                !addStage(*tes, pr.tesUniforms, pr.tesUniformBytes, false) ||
+                !addStage(*fs, pr.fsUniforms, pr.fsUniformBytes, false))
+                return;
+        }
+        {
+            auto kindOf = [](const GLSLVar& s) -> char {
+                if (s.isBuffer) return s.sampleType == "int" ? 'I' : s.sampleType == "uint" ? 'U' : 'B';
+                if (s.isCube) return 'C';
+                if (s.isArray) return 'A';
+                if (s.isShadow) return 'S';
+                if (s.is1D) return '1';
+                if (s.is3D) return s.sampleType == "int" ? 'x' : s.sampleType == "uint" ? 'y' : '3';
+                if (s.sampleType == "int") return 'i';
+                if (s.sampleType == "uint") return 'u';
+                return '2';
+            };
+            std::set<std::string> activeSamplerNames;
+            auto addStage = [&](const ShaderObject& sh, std::vector<ProgramObject::StageSampler>& out,
+                                std::vector<std::string>* names) {
+                for (size_t k = 0; k < sh.conv.samplers.size(); ++k) {
+                    const auto& s = sh.conv.samplers[k];
+                    char kind = kindOf(s);
+                    out.push_back({s.name, (int)k, s.samplerSlot, kind});
+                    if (names) names->push_back(s.name);
+                    pr.samplerKind[s.name] = kind;
+                    if (s.samplerSlot >= 0) pr.samplerSlots[s.name] = s.samplerSlot;
+                    if (!pr.samplerUnits.count(s.name)) pr.samplerUnits[s.name] = 0;
+                    if (activeSamplerNames.insert(s.name).second) {
+                        GLenum ty = GlslTypeToGLEnum(s.glslType);
+                        if (ty) pr.activeUniforms.push_back({s.name, ty, 1});
+                    }
+                }
+            };
+            addStage(*vs, pr.vsCaptureSamplers, &pr.vsSamplers);
+            addStage(*tcs, pr.tcsSamplers, nullptr);
+            addStage(*tes, pr.tesSamplers, nullptr);
+            addStage(*fs, pr.fsTessSamplers, &pr.fsSamplers);
+        }
+        // T4b stage 2c: image units (texture slot = sampler count + index).
+        {
+            auto addImages = [&](const ShaderObject& sh,
+                                 std::vector<ProgramObject::ImageSlot>& out,
+                                 size_t samplerCount) {
+                for (size_t k = 0; k < sh.conv.images.size(); ++k) {
+                    const auto& im = sh.conv.images[k];
+                    int slot = (int)samplerCount + (int)k;
+                    int binding = im.imageBinding;
+                    if (binding < 0) {
+                        auto uit = pr.samplerUnits.find(im.name);
+                        binding = (uit == pr.samplerUnits.end()) ? 0 : (int)uit->second;
+                    }
+                    out.push_back({im.name, slot, binding});
+                    if (!pr.samplerUnits.count(im.name)) pr.samplerUnits[im.name] = (GLuint)binding;
+                }
+            };
+            addImages(*vs, pr.vsImages, pr.vsCaptureSamplers.size());
+            addImages(*tcs, pr.tcsImages, pr.tcsSamplers.size());
+            addImages(*tes, pr.tesImages, pr.tesSamplers.size());
+            addImages(*fs, pr.fsImages, pr.fsTessSamplers.size());
+        }
+        // T4b stage 2b: UBO (block read-only) theo từng stage. Giữ binding từ
+        // lần link trước; layout(binding=N) là mặc định đúng GL.
+        {
+            std::unordered_map<std::string, GLuint> oldBinds;
+            for (auto& b : pr.uniformBlocks) oldBinds[b.name] = b.binding;
+            pr.uniformBlocks.clear();
+            pr.vsBlocks.clear(); pr.fsBlocks.clear();
+            for (auto& bs : vs->conv.blockSlots) pr.vsShaderBlocks.push_back({bs.name, bs.slot, bs.isStorage});
+            for (auto& bs : tcv.blockSlots) pr.tcsShaderBlocks.push_back({bs.name, bs.slot, bs.isStorage});
+            for (auto& bs : tes->conv.blockSlots) pr.tesShaderBlocks.push_back({bs.name, bs.slot, bs.isStorage});
+            for (auto& bs : fs->conv.blockSlots) pr.fsShaderBlocks.push_back({bs.name, bs.slot, bs.isStorage});
+            GLuint idx = 0;
+            auto addBlock = [&](const GLSLBlock& b, bool isVS) {
+                for (auto& ex : pr.uniformBlocks)
+                    if (ex.name == b.name) return;
+                ProgramObject::UniformBlock ub;
+                ub.name = b.name; ub.index = idx++; ub.isVS = isVS;
+                ub.layoutBinding = b.binding;
+                if (b.binding >= 0) ub.binding = (GLuint)b.binding;
+                else {
+                    auto ob = oldBinds.find(b.name);
+                    if (ob != oldBinds.end()) ub.binding = ob->second;
+                }
+                ub.minSize = b.bufferSize;
+                size_t end = 0;
+                for (auto& m : b.members)
+                    end = std::max(end, m.uniformOffset + m.uniformSize);
+                ub.trueSize = end;
+                pr.uniformBlocks.push_back(ub);
+            };
+            for (auto& b : vs->conv.blocks) if (!b.isStorage) { addBlock(b, true); pr.vsBlocks.push_back(b.name); }
+            for (auto& b : tcv.blocks) if (!b.isStorage) addBlock(b, false);
+            for (auto& b : tes->conv.blocks) if (!b.isStorage) addBlock(b, false);
+            for (auto& b : fs->conv.blocks) if (!b.isStorage) { addBlock(b, false); pr.fsBlocks.push_back(b.name); }
+        }
+        // T4b stage 2b: SSBO program-scope (index/dedupe cho override + query).
+        pr.storageBlocks.clear();
+        {
+            auto addStorage = [&](const GLSLBlock& b, unsigned mask) {
+                for (auto& s : pr.storageBlocks)
+                    if (s.name == b.name) { s.stageMask |= mask; return; }
+                pr.storageBlocks.push_back({b.name, b.binding, b.bufferSize,
+                                            (int)b.members.size(), mask});
+            };
+            for (auto& b : vs->conv.blocks) if (b.isStorage) addStorage(b, 1u);
+            for (auto& b : tcv.blocks) if (b.isStorage) addStorage(b, 8u);
+            for (auto& b : tes->conv.blocks) if (b.isStorage) addStorage(b, 16u);
+            for (auto& b : fs->conv.blocks) if (b.isStorage) addStorage(b, 2u);
+        }
+        for (auto& s : tes->conv.tessSlots) {
+            if (s.isGlIn) {
+                if (s.name != "gl_Position" && s.name != "gl_PointSize") {
+                    pr.infoLog = "error: TES gl_in." + s.name + " chưa hỗ trợ";
+                    return;
+                }
+                needCapture = true;
+                continue;
+            }
+            if (!s.isInput) continue;
+            bool found = false;
+            for (auto& o : tcv.tessSlots)
+                if (!o.isInput && !o.isGlIn && o.name == s.name) { found = true; break; }
+            if (!found) {
+                pr.infoLog = "error: TES in `" + s.name + "` không có TCS out tương ứng";
+                return;
+            }
+        }
+        if (c.device && !c.device->isNull()) {
+            std::string err;
+            if (needCapture) {
+                GLSLConvertResult capConv = ConvertGLSLtoMSL(vs->source, 0x8B31, true);
+                if (!capConv.ok) {
+                    pr.infoLog = "error: MSL VS capture convert: " + capConv.log;
+                    return;
+                }
+                pr.vertexCaptureMSL = capConv.msl;
+                pr.vsCaptureIndexSlot = capConv.captureIndexSlot;
+                pr.vsCaptureDrawSlot = capConv.captureDrawSlot;
+                pr.vsCaptureDescSlot = capConv.captureDescSlot;
+                for (auto& s : capConv.captureSlots)
+                    pr.vsCaptureSlots.push_back({s.name, s.slot, s.mslType, s.isGlIn, s.arraySize});
+                // Mọi gl_in/TCS in phải có capture slot (gl_Position/PointSize luôn có).
+                for (auto& s : tcv.tessSlots) {
+                    if (!s.isInput) continue;
+                    bool got = false;
+                    for (auto& cslot : pr.vsCaptureSlots)
+                        if (cslot.name == s.name) { got = true; break; }
+                    if (!got) {
+                        pr.infoLog = "error: VS capture thiếu slot `" + s.name + "`";
+                        return;
+                    }
+                }
+                pr.appleVSCapture = c.device->compileLibrary(pr.vertexCaptureMSL, err);
+                if (!pr.appleVSCapture) {
+                    pr.infoLog = "error: MSL VS capture compile: " + err +
+                                 "\n--- MSL head ---\n" + pr.vertexCaptureMSL.substr(0, 1200);
+                    return;
+                }
+                pr.appleVSCapturePipeline =
+                    c.device->makeComputePipeline(pr.appleVSCapture.get(), "TGLMT_vs_capture");
+                if (!pr.appleVSCapturePipeline) {
+                    pr.infoLog = "error: VS capture compute pipeline create failed";
+                    return;
+                }
+            }
+            pr.appleTCS = c.device->compileLibrary(pr.tessControlMSL, err);
+            if (!pr.appleTCS) {
+                pr.infoLog = "error: MSL TCS compile: " + err + "\n--- MSL head ---\n" +
+                             pr.tessControlMSL.substr(0, 1200);
+                return;
+            }
+            pr.appleTCSPipeline = c.device->makeComputePipeline(pr.appleTCS.get(), "TGLMT_tcs");
+            if (!pr.appleTCSPipeline) {
+                pr.infoLog = "error: TCS compute pipeline create failed (TGLMT_tcs)";
+                return;
+            }
+            pr.appleTES = c.device->compileLibrary(pr.tessEvalMSL, err);
+            if (!pr.appleTES) {
+                pr.infoLog = "error: MSL TES compile: " + err + "\n--- MSL head ---\n" +
+                             pr.tessEvalMSL.substr(0, 1200);
+                return;
+            }
+            pr.appleFS = c.device->compileLibrary(pr.fragmentMSL, err);
+            if (!pr.appleFS) {
+                pr.infoLog = "error: MSL FS compile: " + err + "\n--- MSL head ---\n" +
+                             pr.fragmentMSL.substr(0, 1200);
+                return;
+            }
+            pr.appleVS = c.device->compileLibrary(pr.vertexMSL, err);
+            if (!pr.appleVS) {
+                pr.infoLog = "error: MSL VS compile: " + err + "\n--- MSL head ---\n" +
+                             pr.vertexMSL.substr(0, 1200);
+                return;
+            }
+        }
+        pr.tessControlPoints = tcv.tessVertices;
+        pr.tessPatchType = tes->conv.tessPatchType;
+        pr.tessSpacing = tes->conv.tessSpacing;
+        pr.tessVertexOrder = tes->conv.tessVertexOrder;
+        pr.tessFactorSlot = tcv.tessFactorSlot;
+        pr.tesFactorSlot = tes->conv.tesFactorSlot;
+        // attribFill cho capture descriptor (cùng quy ước class/comps với
+        // AppleDrawGL: 0=float, 1=int, 2=uint).
+        pr.attribFill.clear();
+        auto ClsComps = [](const std::string& t) -> std::pair<int, int> {
+            if (t == "float") return {0, 1};
+            if (t == "vec2") return {0, 2};
+            if (t == "vec3") return {0, 3};
+            if (t == "vec4") return {0, 4};
+            if (t == "int") return {1, 1};
+            if (t == "ivec2") return {1, 2};
+            if (t == "ivec3") return {1, 3};
+            if (t == "ivec4") return {1, 4};
+            if (t == "uint") return {2, 1};
+            if (t == "uvec2") return {2, 2};
+            if (t == "uvec3") return {2, 3};
+            if (t == "uvec4") return {2, 4};
+            return {-1, 0};
+        };
+        for (auto& a : vs->conv.inputs) {
+            auto cc = ClsComps(a.glslType);
+            if (cc.first < 0) continue;
+            if (a.forceUnsignedAttr) cc.first = 2;
+            pr.attribFill.push_back({a.location, (uint8_t)cc.second, (uint8_t)cc.first});
+            pr.attribLoc[a.name] = a.location;
+        }
+        for (auto& s : tcv.tessSlots)
+            pr.tessSlots.push_back({s.name, s.slot, s.isInput, s.isPatch, s.isGlIn,
+                                    s.mslType, s.count, true});
+        for (auto& s : tes->conv.tessSlots)
+            pr.tessSlots.push_back({s.name, s.slot, s.isInput, s.isPatch, s.isGlIn,
+                                    s.mslType, s.count, false});
+        pr.linked = true;
+        pr.reflectionComplete = true;
         return;
     }
     if (!pr.computeMSL.empty()) {
@@ -443,9 +807,9 @@ void glLinkProgram(GLuint p) {
     GLSLConvertResult fsC = fs ? fs->conv : GLSLConvertResult{};
     // Không có fragment: GL cho phép (chỉ depth/raster discard)? — yêu cầu FS để đơn giản
     // và trung thực với M5b (pipeline cần fragment fn). Ghi rõ thay vì im lặng.
-    if (vs && !fs && !pr.separable) {
-        // Vertex-only: hợp lệ trong GL khi không cần màu (rasterizer discard/XFB).
-        // TGLMT M5b cần fragment fn → link OK nhưng AppleDraw trả về trace-only.
+    if (vs && !fs && !pr.separable && pr.xfbVaryings.empty()) {
+        // Vertex-only không XFB: GL chỉ hợp lệ khi rasterizer discard; TGLMT
+        // chưa có pipeline fragment nên vẫn giữ đường trace-only cũ.
         // reflectionComplete giữ false: reflection rỗng (không điền) nên
         // glGetUniformLocation vẫn nới lỏng — không có draw thật để dùng loc.
         pr.linked = true;
@@ -850,12 +1214,79 @@ void glLinkProgram(GLuint p) {
     // Kèm excerpt MSL để log MC hiện đủ nguyên nhân từ xa (không cần DumpProgramMSL).
     if (c.device && !c.device->isNull()) {
         std::string err;
-        if (!pr.vertexMSL.empty()) {
+        // XFB-only: capture kernel thay VS; VS thường không cần và array output
+        // không phải stage-out hợp lệ của Metal.
+        const bool xfbOnly = !pr.xfbVaryings.empty() && !hasF;
+        if (!pr.vertexMSL.empty() && !xfbOnly) {
             pr.appleVS = c.device->compileLibrary(pr.vertexMSL, err);
             if (!pr.appleVS) {
                 pr.linked = false;
                 pr.infoLog = "error: MSL vertex compile: " + err + "\n--- MSL head ---\n" +
                              pr.vertexMSL.substr(0, 1200);
+                return;
+            }
+        }
+        // XFB: Metal không có transform feedback native. Chương trình có
+        // glTransformFeedbackVaryings được capture bằng compute prepass chạy
+        // đúng VS (attributes/uniforms) rồi pack kết quả vào buffer XFB.
+        // Giai đoạn này chỉ nhận VS-only; XFB + GS/tess phải capture sau stage
+        // tương ứng (sẽ mở khi đường GS/TES hoàn chỉnh).
+        if (!pr.xfbVaryings.empty()) {
+            if (hasTC || hasTE) {
+                pr.linked = false;
+                pr.infoLog = "error: XFB + tessellation chưa hỗ trợ capture";
+                return;
+            }
+            if (pr.xfbBufferMode == 0x8C8D && pr.xfbVaryings.size() > 4) {
+                pr.linked = false;
+                pr.infoLog = "error: XFB separate attribs vượt quá 4 buffer";
+                return;
+            }
+            GLSLConvertResult capConv = ConvertGLSLtoMSL(vs->source, 0x8B31, true);
+            if (!capConv.ok) {
+                pr.linked = false;
+                pr.infoLog = "error: MSL VS capture convert (XFB): " + capConv.log;
+                return;
+            }
+            for (auto& nm : pr.xfbVaryings) {
+                std::string base = nm;
+                size_t lb = nm.rfind('[');
+                int idx = -1;
+                if (lb != std::string::npos && !nm.empty() && nm.back() == ']') {
+                    std::string ns = nm.substr(lb + 1, nm.size() - lb - 2);
+                    bool digits = !ns.empty();
+                    for (char ch : ns) if (!isdigit((unsigned char)ch)) digits = false;
+                    if (digits) { base = nm.substr(0, lb); idx = atoi(ns.c_str()); }
+                }
+                bool found = false;
+                for (auto& cs : capConv.captureSlots) {
+                    if (cs.name != base) continue;
+                    if (idx >= 0 && (cs.arraySize <= idx)) break;
+                    found = true; break;
+                }
+                if (!found) {
+                    pr.linked = false;
+                    pr.infoLog = "error: XFB varying `" + nm + "` không có trong VS output";
+                    return;
+                }
+            }
+            pr.vertexCaptureMSL = capConv.msl;
+            pr.vsCaptureIndexSlot = capConv.captureIndexSlot;
+            pr.vsCaptureDrawSlot = capConv.captureDrawSlot;
+            pr.vsCaptureDescSlot = capConv.captureDescSlot;
+            for (auto& cs : capConv.captureSlots)
+                pr.vsCaptureSlots.push_back({cs.name, cs.slot, cs.mslType, cs.isGlIn, cs.arraySize});
+            pr.appleVSCapture = c.device->compileLibrary(pr.vertexCaptureMSL, err);
+            if (!pr.appleVSCapture) {
+                pr.linked = false;
+                pr.infoLog = "error: MSL VS capture compile (XFB): " + err;
+                return;
+            }
+            pr.appleVSCapturePipeline =
+                c.device->makeComputePipeline(pr.appleVSCapture.get(), "TGLMT_vs_capture");
+            if (!pr.appleVSCapturePipeline) {
+                pr.linked = false;
+                pr.infoLog = "error: VS capture compute pipeline create failed (XFB)";
                 return;
             }
         }
