@@ -1,0 +1,18 @@
+{
+  "project": "TGLMT",
+  "repository": "https://github.com/Witch-Launcher/TGLMT",
+  "webSection": "Projects",
+  "languages": ["en", "vi"],
+  "order": [
+    { "group": "Overview", "file": "getting-started.md" },
+    { "group": "Architecture", "file": "architecture.md" },
+    { "group": "API", "file": "api.md" },
+    { "group": "Integration", "file": "integration.md" },
+    { "group": "Integration", "file": "launcher.md" },
+    { "group": "Compatibility", "file": "compatibility.md" },
+    { "group": "Limits", "file": "limits.md" },
+    { "group": "Performance", "file": "perf.md" },
+    { "group": "Legal", "file": "privacy.md" },
+    { "group": "Legal", "file": "terms.md" }
+  ]
+}
