@@ -42,9 +42,9 @@ int main() {
         // `metal -c` khi đó fail MỌI input (kể cả MSL đúng) → FAIL oan.
         // Probe bằng snippet tầm thường; fail → SKIP phần metal -c (trung thực).
         // (Gặp 2026-10-15: metal Analyses fail, runtime compileLibrary vẫn OK.)
-        { std::ofstream f("/tmp/tglmt-conv-toolchain-check.msl");
+        { std::ofstream f("/tmp/tglmt-conv-toolchain-check.metal");
           f << "#include <metal_stdlib>\nusing namespace metal;\nkernel void tglmt_toolchain_probe(){}\n"; }
-        if (!Run("xcrun -sdk macosx metal -c /tmp/tglmt-conv-toolchain-check.msl -o /tmp/tglmt-conv-toolchain-check.air >/dev/null 2>&1"))
+        if (!Run("xcrun -sdk macosx metal -c /tmp/tglmt-conv-toolchain-check.metal -o /tmp/tglmt-conv-toolchain-check.air >/dev/null 2>&1"))
             haveMetal = false;
     }
     for (auto& pr : pairs) {
@@ -69,17 +69,32 @@ int main() {
             assert(u.uniformOffset + u.uniformSize <= vr.uniformBufferSize);
         }
         if (haveMetal) {
+            // Ghi và biên dịch CÙNG một đường dẫn. Trước đây file ghi là
+            // ".metal" nhưng lệnh biên dịch lại trỏ ".msl" ⇒ `metal -c` coi
+            // .msl là linker input, exit 0, KHÔNG sinh .air ⇒ gate "Metal
+            // compiler chấp nhận MSL" KHÔNG BAO GIỜ chạy (và trên máy sạch
+            // thì `metal -c file.msl` trả về 1 ⇒ test fail ngẫu nhiên).
             std::string base = std::string("/tmp/tglmt-conv-") + pr[0];
-            { std::ofstream f(base + ".msl"); f << vr.msl; }
-            { std::ofstream f(base + ".frag.msl"); f << fr.msl; }
-            if (!Run("xcrun -sdk macosx metal -c " + base + ".msl -o " + base + ".air >/dev/null 2>&1")) {
-                printf("FAIL metal -c %s\n", pr[0]);
-                return 1;
-            }
-            if (!Run("xcrun -sdk macosx metal -c " + base + ".frag.msl -o " + base + ".frag.air >/dev/null 2>&1")) {
-                printf("FAIL metal -c %s\n", pr[1]);
-                return 1;
-            }
+            { std::ofstream f(base + ".metal"); f << vr.msl; }
+            { std::ofstream f(base + ".frag.metal"); f << fr.msl; }
+            auto compileCheck = [&](const std::string& src, const std::string& air,
+                                    const char* what) -> bool {
+                if (!Run("xcrun -sdk macosx metal -c " + src + " -o " + air +
+                         " >/dev/null 2>&1")) {
+                    printf("FAIL metal -c %s\n", what);
+                    return false;
+                }
+                // metal -c có thể exit 0 mà không sinh file (vd input bị coi là
+                // linker input) → phải kiểm tra .air thực sự tồn tại.
+                std::ifstream probe(air, std::ios::binary);
+                if (!probe.good()) {
+                    printf("FAIL metal -c %s (không sinh %s)\n", what, air.c_str());
+                    return false;
+                }
+                return true;
+            };
+            if (!compileCheck(base + ".metal", base + ".air", pr[0])) return 1;
+            if (!compileCheck(base + ".frag.metal", base + ".frag.air", pr[1])) return 1;
         }
         printf("ok %s + %s (vsUB=%zu fsUB=%zu)\n", pr[0], pr[1], vr.uniformBufferSize,
                fr.uniformBufferSize);

@@ -49,9 +49,20 @@ void glBlendFuncSeparatei(GLuint i, GLenum srgb, GLenum drgb, GLenum sa, GLenum 
 void glDepthFunc(GLenum f) { Context::Current().state.Depth().func = f; }
 void glDepthMask(GLboolean m) { Context::Current().state.Depth().writeMask = m ? true : false; }
 void glDepthRange(GLdouble n, GLdouble f) { Context::Current().state.SetDepthRange(n, f); }
-void glDepthRangef(GLfloat n, GLfloat f) { Context::Current().state.SetDepthRangef(n, f, 0); }
+void glDepthRangef(GLfloat n, GLfloat f) {
+    // glDepthRangef và glDepthRange set CÙNG một state → giá trị phải đọc lại
+    // được bằng glGetFloatv/glGetDoublev(GL_DEPTH_RANGE). Trước đây hàm inline
+    // SetDepthRangef chỉ cập nhật viewports_ mà KHÔNG ghi shadow ⇒ query trả
+    // giá trị CŨ (sai).
+    Context::Current().state.SetDepthRange((double)n, (double)f, 0);
+}
 void glDepthRangeArrayv(GLuint f, GLsizei n, const GLdouble* v) {
-    for (GLsizei i = 0; i < n; ++i) Context::Current().state.SetDepthRange(v[2*i], v[2*i+1], f + i);
+    Context& c = Context::Current();
+    // GL 4.6 §14.3: INVALID_VALUE nếu count âm; con trỏ NULL khi count>0 →
+    // INVALID_VALUE (trước đây deref NULL ⇒ SEGFAULT).
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    if (n > 0 && !v) { c.errors.Record(0x0501); return; }
+    for (GLsizei i = 0; i < n; ++i) c.state.SetDepthRange(v[2*i], v[2*i+1], f + i);
 }
 void glDepthRangeIndexed(GLuint i, GLdouble n, GLdouble f) { Context::Current().state.SetDepthRange(n, f, i); }
 // P9 viewport_array (ARB/OES/NV forwards sang core DepthRangeArray/Indexed).
@@ -128,29 +139,95 @@ void glPolygonMode(GLenum f, GLenum m) { Context::Current().state.SetPolygonMode
 void glPolygonOffset(GLfloat f, GLfloat u) { Context::Current().state.SetPolygonOffset(f, u, 0.0f); }
 void glPolygonOffsetClamp(GLfloat f, GLfloat u, GLfloat c) { Context::Current().state.SetPolygonOffset(f, u, c); }
 void glLineWidth(GLfloat w) { Context::Current().state.SetLineWidth(w); }
-void glPointSize(GLfloat s) { Context::Current().state.SetShadow(0x0B11, &s, 4); }
-void glPointParameterf(GLenum p, GLfloat v) { Context::Current().state.SetShadow(p, &v, 4); }
-void glPointParameterfv(GLenum p, const GLfloat* v) { Context::Current().state.SetShadow(p, v, 4); }
-void glPointParameteri(GLenum p, GLint v) { Context::Current().state.SetShadow(p, &v, 4); }
-void glPointParameteriv(GLenum p, const GLint* v) { Context::Current().state.SetShadow(p, v, 4); }
+void glPointSize(GLfloat s) {
+    Context& c = Context::Current();
+    // GL 4.6 §14.4: "An INVALID_VALUE error is generated if size is less than
+    // or equal to zero."
+    if (s <= 0.0f) { c.errors.Record(0x0501); return; }
+    c.state.SetShadow(0x0B11 /*POINT_SIZE*/, &s, 4);
+}
+// POINT_FADE_THRESHOLD_SIZE (0x8128) — float; POINT_SPRITE_COORD_ORIGIN
+// (0x8CA0) — enum int. Cả hai đều phải validate pname theo §14.4.
+static bool PointPnameOk(GLenum p, bool* isFloat) {
+    if (p == 0x8128) { *isFloat = true; return true; }
+    if (p == 0x8CA0) { *isFloat = false; return true; }
+    return false;
+}
+void glPointParameterf(GLenum p, GLfloat v) {
+    Context& c = Context::Current();
+    bool isF = false;
+    if (!PointPnameOk(p, &isF) || !isF) { c.errors.Record(0x0500); return; }
+    if (v < 0.0f) { c.errors.Record(0x0501); return; }
+    c.state.SetShadow(p, &v, 4);
+}
+void glPointParameterfv(GLenum p, const GLfloat* v) {
+    Context& c = Context::Current();
+    bool isF = false;
+    if (!PointPnameOk(p, &isF) || !isF || !v) { c.errors.Record(0x0500); return; }
+    if (v[0] < 0.0f) { c.errors.Record(0x0501); return; }
+    c.state.SetShadow(p, v, 4);
+}
+void glPointParameteri(GLenum p, GLint v) {
+    Context& c = Context::Current();
+    bool isF = false;
+    if (!PointPnameOk(p, &isF) || isF) { c.errors.Record(0x0500); return; }
+    // POINT_SPRITE_COORD_ORIGIN: chỉ UPPER_LEFT (0x8CA1) / LOWER_LEFT (0x8CA2).
+    if (v != 0x8CA1 && v != 0x8CA2) { c.errors.Record(0x0501); return; }
+    c.state.SetShadow(p, &v, 4);
+}
+void glPointParameteriv(GLenum p, const GLint* v) {
+    Context& c = Context::Current();
+    bool isF = false;
+    if (!PointPnameOk(p, &isF) || isF || !v) { c.errors.Record(0x0500); return; }
+    if (v[0] != 0x8CA1 && v[0] != 0x8CA2) { c.errors.Record(0x0501); return; }
+    c.state.SetShadow(p, v, 4);
+}
 void glViewport(GLint x, GLint y, GLsizei w, GLsizei h) { Context::Current().state.SetViewport(0, (float)x, (float)y, (float)w, (float)h); }
 void glViewportArrayv(GLuint f, GLsizei n, const GLfloat* v) {
-    for (GLsizei i = 0; i < n; ++i) Context::Current().state.SetViewport(f + i, v[4*i], v[4*i+1], v[4*i+2], v[4*i+3]);
+    Context& c = Context::Current();
+    // INVALID_VALUE nếu count âm hoặc con trỏ NULL (trước đây deref NULL).
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    if (n > 0 && !v) { c.errors.Record(0x0501); return; }
+    for (GLsizei i = 0; i < n; ++i) c.state.SetViewport(f + i, v[4*i], v[4*i+1], v[4*i+2], v[4*i+3]);
 }
 void glViewportIndexedf(GLuint i, GLfloat x, GLfloat y, GLfloat w, GLfloat h) { Context::Current().state.SetViewport(i, x, y, w, h); }
-void glViewportIndexedfv(GLuint i, const GLfloat* v) { Context::Current().state.SetViewport(i, v[0], v[1], v[2], v[3]); }
+void glViewportIndexedfv(GLuint i, const GLfloat* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    c.state.SetViewport(i, v[0], v[1], v[2], v[3]);
+}
+// --- Scissor (ARB_viewport_array / GL 4.6 §14.9.2) ---
+// Mỗi viewport index có một scissor box riêng; lệnh indexed ghi đúng box của
+// index đó (trước đây mọi lệnh đều ghi vào box của viewport 0).
 void glScissor(GLint x, GLint y, GLsizei w, GLsizei h) {
-    Context::Current().state.SetScissor(x, y, w, h);
+    Context& c = Context::Current();
+    if (w < 0 || h < 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE
+    // glScissor đặt box cho TẤT CẢ viewport (spec §14.9.2).
+    c.state.SetScissorAll(x, y, w, h);
 }
 void glScissorArrayv(GLuint f, GLsizei n, const GLint* v) {
-    if (n > 0 && v) Context::Current().state.SetScissor(v[0], v[1], v[2], v[3]);
-    (void)f;
+    Context& c = Context::Current();
+    if (n < 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE (count < 0)
+    if (n > 0 && !v) { c.errors.Record(0x0501); return; } // NULL → INVALID_VALUE
+    if (!v) return;
+    // first+count vượt MAX_VIEWPORTS → INVALID_VALUE. Dùng giới hạn nội bộ
+    // (kMaxViewports) vì gl_get.cpp vẫn báo GL_MAX_VIEWPORTS = 1 (xem report).
+    if ((GLuint)n + f > (GLuint)kMaxViewports) { c.errors.Record(0x0501); return; }
+    for (GLsizei i = 0; i < n; ++i) {
+        const GLint* b = v + 4 * i;
+        if (b[2] < 0 || b[3] < 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE
+        c.state.SetScissor((int)(f + i), b[0], b[1], b[2], b[3]);
+    }
 }
 void glScissorIndexed(GLuint i, GLint x, GLint y, GLsizei w, GLsizei h) {
-    if (i == 0) Context::Current().state.SetScissor(x, y, w, h);
+    Context& c = Context::Current();
+    if (w < 0 || h < 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE
+    if (i >= (GLuint)kMaxViewports) { c.errors.Record(0x0501); return; }
+    c.state.SetScissor((int)i, x, y, w, h);
 }
 void glScissorIndexedv(GLuint i, const GLint* v) {
-    if (i == 0 && v) Context::Current().state.SetScissor(v[0], v[1], v[2], v[3]);
+    if (!v) return;
+    glScissorIndexed(i, v[0], v[1], v[2], v[3]);
 }
 void glClipControl(GLenum o, GLenum d) { Context::Current().state.SetClipControl(o, d); }
 void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
@@ -163,7 +240,13 @@ void glColorMaski(GLuint i, GLboolean r, GLboolean g, GLboolean b, GLboolean a) 
     if ((int)i < 8) Context::Current().state.SetColorMask(i, m);
 }
 void glDepthRangeArrayfvNV(GLuint a, GLsizei b, const GLfloat* c_) { (void)a;(void)b;(void)c_; }
-void glLogicOp(GLenum o) { Context::Current().state.SetShadow(0x0BF1, &o, 4); }
+void glLogicOp(GLenum o) {
+    Context& c = Context::Current();
+    // GL 4.6 §17.3.9: "An INVALID_VALUE error is generated if op is not one of
+    // the logicop modes in table 17.3" (0x1500..0x150F liên tục).
+    if (o < 0x1500 || o > 0x150F) { c.errors.Record(0x0501); return; }
+    c.state.SetShadow(0x0BF1, &o, 4);
+}
 void glSampleCoverage(GLfloat v, GLboolean inv) {
     Context& c = Context::Current();
     if (v < 0.0f) v = 0.0f;
@@ -177,7 +260,16 @@ void glSampleMaski(GLuint m, GLbitfield mask) {
     if (m >= 1) { c.errors.Record(0x0501); return; } // MAX_SAMPLE_MASK_WORDS = 1
     c.state.SetShadow(0x8E52 /*SAMPLE_MASK_VALUE*/, &mask, sizeof(mask), m);
 }
-void glMinSampleShading(GLfloat v) { Context::Current().state.SetShadow(0x8C51, &v, 4); }
+void glMinSampleShading(GLfloat v) {
+    // GL 4.6 §14.3.1.1: "value is clamped to [0, 1] when specified".
+    // Enum đúng: GL_MIN_SAMPLE_SHADING_VALUE = 0x8C37 (trước đây ghi 0x8C51 —
+    // không phải enum GL nào → query luôn trả 0).
+    // GL_SAMPLE_SHADING (0x8C36) là enable cap: glEnable/glDisable generic đã
+    // track qua StateTracker::SetEnabled → glIsEnabled + glGetBooleanv đúng.
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    Context::Current().state.SetShadow(0x8C37 /*MIN_SAMPLE_SHADING_VALUE*/, &v, 4);
+}
 void glHint(GLenum t, GLenum m) { (void)t;(void)m; }
 void glLineStipple(GLint a, GLushort b) { (void)a;(void)b; }
 } // namespace tglmt::gl

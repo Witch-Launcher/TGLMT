@@ -239,8 +239,31 @@ void glReadnPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, 
     glReadPixels(x, y, w, h, f, ty, p);
 }
 // --- misc state ---
-void glClampColor(GLenum t, GLenum cl) { Context::Current().state.SetShadow(t, &cl, 4); }
-void glProvokingVertex(GLenum m) { Context::Current().state.SetShadow(0x8E4F /*PROVOKING_VERTEX*/, &m, 4); }
+void glClampColor(GLenum t, GLenum cl) {
+    Context& c = Context::Current();
+    // GL 4.6 §18.2.8: target phải là CLAMP_READ_COLOR (0x891C) — trong core
+    // profile CLAMP_VERTEX_COLOR/CLAMP_FRAGMENT_COLOR đã deprecated nhưng vẫn
+    // hợp lệ. clamp phải là TRUE/FALSE/FIXED_ONLY. Ngoài ra → INVALID_ENUM.
+    // Trước đây SetShadow(t, ...) lưu theo TARGET ⇒ query GL_CLAMP_READ_COLOR
+    // (0x891C) chỉ đúng khi target trùng, và không validate gì.
+    if (t != 0x891C /*CLAMP_READ_COLOR*/ && t != 0x891A /*CLAMP_VERTEX_COLOR*/ &&
+        t != 0x891B /*CLAMP_FRAGMENT_COLOR*/) {
+        c.errors.Record(0x0500); return;
+    }
+    if (cl != 0 /*FALSE*/ && cl != 1 /*TRUE*/ && cl != 0x891D /*FIXED_ONLY*/) {
+        c.errors.Record(0x0500); return;
+    }
+    // Lưu theo CLAMP_READ_COLOR (đúng pname query được) + theo target gốc.
+    c.state.SetShadow(0x891C /*CLAMP_READ_COLOR*/, &cl, 4);
+    c.state.SetShadow(t, &cl, 4);
+}
+void glProvokingVertex(GLenum m) {
+    Context& c = Context::Current();
+    // GL 4.6 §13.6: provokeMode phải là FIRST_VERTEX_CONVENTION (0x8E4D) hoặc
+    // LAST_VERTEX_CONVENTION (0x8E4E), nếu không → INVALID_ENUM.
+    if (m != 0x8E4D && m != 0x8E4E) { c.errors.Record(0x0500); return; }
+    c.state.SetShadow(0x8E4F /*PROVOKING_VERTEX*/, &m, 4);
+}
 void glTextureBarrier() {
     Context& c = Context::Current();
     // Metal không có lệnh barrier cấp texture như GL. Đóng encoder hiện tại
@@ -411,13 +434,24 @@ static void BindBufTex(GLuint tex, GLenum inf, GLuint buf) {
 }
 void glTexBuffer(GLenum t, GLenum inf, GLuint b) {
     Context& c = Context::Current();
-    for (auto& [id, tx] : c.textures) if (tx.target == t) { BindBufTex(id, inf, b); return; }
+    // GL 4.6 §8.9: buffer texture là texture ĐANG BIND với target (vd
+    // GL_TEXTURE_BUFFER) trên active texture unit. Trước đây code quét
+    // c.textures lấy texture ĐẦU TIÊN có target khớp → với ≥2 buffer texture
+    // thì buffer bị gắn vào texture SAI (app đọc dữ liệu của texture khác).
+    const GLuint unit = c.state.ActiveTexture();
+    const GLuint bound = c.state.BoundTexture(unit, t);
+    if (bound) { BindBufTex(bound, inf, b); return; }
+    // DSA: glTextureBuffer(tex, ...) dùng đường riêng. Không có texture bind
+    // ⇒ INVALID_OPERATION (spec: "no texture bound to target").
     c.errors.Record(0x0502);
 }
 void glTexBufferRange(GLenum t, GLenum inf, GLuint b, GLintptr o, GLsizeiptr s) {
     // Range: slice buffer [o, o+s) trước khi bind (CloudFaces dùng full nên ít gặp).
     Context& c = Context::Current();
     if (o < 0 || s < 0) { c.errors.Record(0x0501); return; }
+    const GLuint unit = c.state.ActiveTexture();
+    const GLuint bound = c.state.BoundTexture(unit, t);
+    if (!bound) { c.errors.Record(0x0502); return; }
     if ((o != 0 || s != 0)) {
         Context::BufferView bv = c.SyncBuffer(b); // shadow có thể rỗng (P1)
         if (!bv.p) { c.errors.Record(0x0502); return; }
@@ -431,10 +465,10 @@ void glTexBufferRange(GLenum t, GLenum inf, GLuint b, GLintptr o, GLsizeiptr s) 
         c.buffers[tmp].size = len;
         c.buffers[tmp].gpu = c.device->newBufferWithBytes(c.buffers[tmp].data.data(), len,
                                                           metal::StorageMode::Shared);
-        glTexBuffer(t, inf, tmp);
+        BindBufTex(bound, inf, tmp);
         return;
     }
-    glTexBuffer(t, inf, b);
+    BindBufTex(bound, inf, b);
 }
 void glTextureBuffer(GLuint t, GLenum inf, GLuint b) { BindBufTex(t, inf, b); }
 void glTextureBufferRange(GLuint t, GLenum inf, GLuint b, GLintptr o, GLsizeiptr s) {
@@ -528,23 +562,83 @@ static void SA(GLuint i, double x, double y, double z, double w) {
     c.state.SetShadow(0x8626, d, 32, i);
 }
 void glVertexAttrib1s(GLuint i, GLshort x) { SA(i,x,0,0,1); }
-void glVertexAttrib1sv(GLuint i, const GLshort* v) { SA(i,v[0],0,0,1); }
+void glVertexAttrib1sv(GLuint i, const GLshort* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0],0,0,1);
+}
 void glVertexAttrib2s(GLuint i, GLshort x, GLshort y) { SA(i,x,y,0,1); }
-void glVertexAttrib2sv(GLuint i, const GLshort* v) { SA(i,v[0],v[1],0,1); }
+void glVertexAttrib2sv(GLuint i, const GLshort* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0],v[1],0,1);
+}
 void glVertexAttrib3s(GLuint i, GLshort x, GLshort y, GLshort z) { SA(i,x,y,z,1); }
-void glVertexAttrib3sv(GLuint i, const GLshort* v) { SA(i,v[0],v[1],v[2],1); }
+void glVertexAttrib3sv(GLuint i, const GLshort* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0],v[1],v[2],1);
+}
 void glVertexAttrib4s(GLuint i, GLshort x, GLshort y, GLshort z, GLshort w) { SA(i,x,y,z,w); }
-void glVertexAttrib4sv(GLuint i, const GLshort* v) { SA(i,v[0],v[1],v[2],v[3]); }
-void glVertexAttrib4bv(GLuint i, const GLbyte* v) { SA(i,v[0],v[1],v[2],v[3]); }
-void glVertexAttrib4iv(GLuint i, const GLint* v) { SA(i,v[0],v[1],v[2],v[3]); }
-void glVertexAttrib4ubv(GLuint i, const GLubyte* v) { SA(i,v[0],v[1],v[2],v[3]); }
-void glVertexAttrib4uiv(GLuint i, const GLuint* v) { SA(i,v[0],v[1],v[2],v[3]); }
-void glVertexAttrib4usv(GLuint i, const GLushort* v) { SA(i,v[0],v[1],v[2],v[3]); }
+void glVertexAttrib4sv(GLuint i, const GLshort* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0],v[1],v[2],v[3]);
+}
+void glVertexAttrib4bv(GLuint i, const GLbyte* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0],v[1],v[2],v[3]);
+}
+void glVertexAttrib4iv(GLuint i, const GLint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0],v[1],v[2],v[3]);
+}
+void glVertexAttrib4ubv(GLuint i, const GLubyte* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0],v[1],v[2],v[3]);
+}
+void glVertexAttrib4uiv(GLuint i, const GLuint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0],v[1],v[2],v[3]);
+}
+void glVertexAttrib4usv(GLuint i, const GLushort* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0],v[1],v[2],v[3]);
+}
 void glVertexAttrib4Nub(GLuint i, GLubyte x, GLubyte y, GLubyte z, GLubyte w) { SA(i,x/255.0,y/255.0,z/255.0,w/255.0); }
-void glVertexAttrib4Nubv(GLuint i, const GLubyte* v) { SA(i,v[0]/255.0,v[1]/255.0,v[2]/255.0,v[3]/255.0); }
-void glVertexAttrib4Nbv(GLuint i, const GLbyte* v) { SA(i,(v[0]/127.0),(v[1]/127.0),(v[2]/127.0),(v[3]/127.0)); }
-void glVertexAttrib4Niv(GLuint i, const GLint* v) { SA(i,v[0]/2147483647.0,v[1]/2147483647.0,v[2]/2147483647.0,v[3]/2147483647.0); }
-void glVertexAttrib4Nsv(GLuint i, const GLshort* v) { SA(i,v[0]/32767.0,v[1]/32767.0,v[2]/32767.0,v[3]/32767.0); }
-void glVertexAttrib4Nuiv(GLuint i, const GLuint* v) { SA(i,v[0]/4294967295.0,v[1]/4294967295.0,v[2]/4294967295.0,v[3]/4294967295.0); }
-void glVertexAttrib4Nusv(GLuint i, const GLushort* v) { SA(i,v[0]/65535.0,v[1]/65535.0,v[2]/65535.0,v[3]/65535.0); }
+void glVertexAttrib4Nubv(GLuint i, const GLubyte* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0]/255.0,v[1]/255.0,v[2]/255.0,v[3]/255.0);
+}
+void glVertexAttrib4Nbv(GLuint i, const GLbyte* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,(v[0]/127.0),(v[1]/127.0),(v[2]/127.0),(v[3]/127.0));
+}
+void glVertexAttrib4Niv(GLuint i, const GLint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0]/2147483647.0,v[1]/2147483647.0,v[2]/2147483647.0,v[3]/2147483647.0);
+}
+void glVertexAttrib4Nsv(GLuint i, const GLshort* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0]/32767.0,v[1]/32767.0,v[2]/32767.0,v[3]/32767.0);
+}
+void glVertexAttrib4Nuiv(GLuint i, const GLuint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0]/4294967295.0,v[1]/4294967295.0,v[2]/4294967295.0,v[3]/4294967295.0);
+}
+void glVertexAttrib4Nusv(GLuint i, const GLushort* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }  // NULL → INVALID_VALUE
+    SA(i,v[0]/65535.0,v[1]/65535.0,v[2]/65535.0,v[3]/65535.0);
+}
 } // namespace tglmt::gl

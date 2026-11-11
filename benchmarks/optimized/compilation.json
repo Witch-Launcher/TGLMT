@@ -1,0 +1,27 @@
+{
+  "benchmark": "compilation",
+  "repeats": 30,
+  "warmup": 5,
+  "metal": true,
+  "device": "TGLMT Apple (Intel(R) KBL Unknown)",
+  "stages": {
+    "vs_complex": {
+      "glsl_to_msl": {"median_ms": 0.2357, "p95_ms": 0.3165, "min_ms": 0.2323, "max_ms": 0.3675, "mean_ms": 0.2510, "n": 30},
+      "msl_to_metal_library": {"median_ms": 0.0584, "p95_ms": 0.0905, "min_ms": 0.0576, "max_ms": 7.8843, "mean_ms": 0.3235, "n": 30},
+      "pipeline_creation": {"median_ms": 0.0066, "p95_ms": 0.0107, "min_ms": 0.0064, "max_ms": 0.0469, "mean_ms": 0.0084, "n": 30},
+      "total": {"median_ms": 0.3003, "p95_ms": 0.4604, "min_ms": 0.2967, "max_ms": 8.2183, "mean_ms": 0.5832, "n": 30}
+    },
+    "fs_complex": {
+      "glsl_to_msl": {"median_ms": 0.7718, "p95_ms": 1.1722, "min_ms": 0.7385, "max_ms": 1.3297, "mean_ms": 0.8959, "n": 30},
+      "msl_to_metal_library": {"median_ms": 0.0742, "p95_ms": 0.1780, "min_ms": 0.0631, "max_ms": 0.1820, "mean_ms": 0.0990, "n": 30},
+      "pipeline_creation": {"median_ms": 0.0086, "p95_ms": 0.0225, "min_ms": 0.0063, "max_ms": 0.0246, "mean_ms": 0.0112, "n": 30},
+      "total": {"median_ms": 0.8467, "p95_ms": 1.3730, "min_ms": 0.8082, "max_ms": 1.5198, "mean_ms": 1.0066, "n": 30}
+    },
+    "cs_compute": {
+      "glsl_to_msl": {"median_ms": 0.2846, "p95_ms": 0.3256, "min_ms": 0.2784, "max_ms": 0.3819, "mean_ms": 0.2930, "n": 30},
+      "msl_to_metal_library": {"median_ms": 0.0550, "p95_ms": 0.0770, "min_ms": 0.0546, "max_ms": 0.0792, "mean_ms": 0.0590, "n": 30},
+      "pipeline_creation": {"median_ms": 0.0041, "p95_ms": 0.0053, "min_ms": 0.0040, "max_ms": 0.0058, "mean_ms": 0.0043, "n": 30},
+      "total": {"median_ms": 0.3445, "p95_ms": 0.3987, "min_ms": 0.3409, "max_ms": 0.4597, "mean_ms": 0.3565, "n": 30}
+    }
+  }
+}

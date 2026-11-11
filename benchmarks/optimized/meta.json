@@ -1,0 +1,8 @@
+{
+  "phase": "optimized",
+  "host": "Darwin 24.6.0 x86_64",
+  "os": "15.7.7",
+  "build": "Release (-O3 -DNDEBUG), TGLMT_APPLE_METAL=ON",
+  "git": "10ff95f+dirty",
+  "date": "2026-11-11T10:01:14Z"
+}

@@ -26,15 +26,21 @@ const GLubyte* glGetString(GLenum n) {
     }
 }
 // Danh sách extension: CỐ TÌNH giữ nguyên các mục cũ.
-// KHÔNG thêm GL_ARB_direct_state_access / GL_ARB_vertex_attrib_binding /
-// GL_ARB_buffer_storage dù TGLMT "làm được": LWJGL dựng Capabilities từ
-// ĐÚNG danh sách string này, nên thêm vào sẽ đảo quyết định của Minecraft:
+// KHÔNG thêm GL_ARB_direct_state_access dù TGLMT "làm được": LWJGL dựng
+// Capabilities từ ĐÚNG danh sách string này, nên thêm vào sẽ đảo quyết định
+// của Minecraft:
 //   DirectStateAccess.Core  (glNamedBufferSubData thay glBufferSubData)
 //   VertexArrayCache.Separate (glVertexAttribFormat/glBindVertexBuffer)
 //   BufferStorage.Immutable    (persistent mapping UBO/terrain)
-// Cả 3 đường đó chưa được kiểm chứng trên TGLMT và làm MC treo/mất dữ liệu
+// Đường DSA đó chưa được kiểm chứng trên TGLMT và làm MC treo/mất dữ liệu
 // (đo được: chỉ 12 frame rồi đứng, uboMap 0 → 48). Danh sách phải khớp với
 // đường nào đã test, không phải đường nào "lý thuyết" hỗ trợ được.
+//
+// CẬN NHẬT 2026-11-10: GL_ARB_vertex_attrib_binding và GL_ARB_buffer_storage
+// ĐÃ được implement thật (glVertexAttribFormat/FormatI/LFormat/glVertexAttribBinding/
+// glBindVertexBuffer/glVertexBindingDivisor — src/gl/gl_vertex.cpp; glBufferStorage —
+// src/gl/gl_buffer.cpp) và đã có test, nên đã advertise (dòng 181, 286). Comment
+// cũ ở đây nói "KHÔNG thêm" là STALE — đã sửa cho khớp code.
 //
 // ĐÃ BỎ GL_ARB_pipeline_statistics_query (P0.3): extension này bắt buộc mọi
 // target query phải trả kết quả thật, trong đó có GL_FRAGMENT_SHADER_INVOCATIONS_
@@ -44,6 +50,21 @@ const GLubyte* glGetString(GLenum n) {
 // cáo extension cho tới khi đường counter GPU (P5) chạy thật. Quảng cáo extension
 // rồi trả 0 cho fragment invocations = nói dối, đúng thứ hạng "No-op accepted"
 // mà vocabulary docs cấm.
+//
+// ĐO ĐƯỢC THẬT (2026-11-10) — 2 nhóm query trước đây trả 0, nay đo trên GPU:
+//  - Occlusion (GL_ARB_occlusion_query, GL_ARB_occlusion_query2,
+//    GL_EXT_occlusion_query_boolean): Metal visibility result buffer.
+//    GL_SAMPLES_PASSED trả SỐ SAMPLE thật (mode Counting — GPU family Apple3+),
+//    GL_ANY_SAMPLES_PASSED(_CONSERVATIVE) trả boolean (0/1) đúng spec §4.2.1.
+//    Mỗi draw trong query ghi 1 slot riêng rồi cộng dồn (Metal ghi ĐÈ offset).
+//  - Timer (GL_ARB_timer_query, GL_EXT_timer_query, GL_EXT_disjoint_timer_query):
+//    GL_TIME_ELAPSED đo thời gian GPU thật bằng mốc timestamp của command
+//    buffer (MTLCommandBuffer.GPUEndTime — macOS 10.15+/iOS 10.3+); lệnh của
+//    query được tách vào CB riêng (flush ở glBegin/glEndQuery) rồi lấy chênh
+//    lệch giữa hai mốc trên đồng hồ GPU.
+// Cả hai đường đo được trên GPU thật (test_query_samples_passed chạy cả Null
+// lẫn Metal backend); GPU không có Counting mode thì GL_SAMPLES_PASSED trả 0
+// (không có số để trả) chứ không giả số.
 //
 // RETRACTED 2026-10-23 (tools/ext_behavior_audit.py): ARB_gl_spirv,
 // ARB_multisample, EXT_provoking_vertex,

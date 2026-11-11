@@ -62,7 +62,8 @@ void glBindFramebuffer(GLenum t, GLuint f) {
     c.state.BindFBO(t, f);
 }
 static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex,
-                        GLint level, GLint layer = -1);
+                        GLint level, GLint layer = -1,
+                        GLenum objType = 0x8DE1 /*GL_TEXTURE*/, GLuint objName = 0);
 static GLuint ResolveFBOForTarget(Context& c, GLenum t);
 
 static bool SupportedRenderbufferFormat(GLenum inf) {
@@ -180,7 +181,10 @@ static bool AttachRenderbuffer(Context& c, GLuint fbo, GLenum attach, GLenum rt,
     if (rit == c.renderbuffers.end() || !rit->second.texture) {
         c.errors.Record(0x0502); return false;
     }
-    return AttachToFBO(c, fbo, attach, rit->second.texture, 0);
+    // Vẫn attach texture nền của RBO (draw path dùng), nhưng PHẢI ghi nhớ là
+    // attachment là RENDERBUFFER (spec §9.2 OBJECT_TYPE/OBJECT_NAME).
+    return AttachToFBO(c, fbo, attach, rit->second.texture, 0, -1,
+                       0x8D41 /*GL_RENDERBUFFER*/, rbId);
 }
 void glFramebufferRenderbuffer(GLenum t, GLenum a, GLenum rt, GLuint r) {
     Context& c = Context::Current();
@@ -234,23 +238,37 @@ void glFramebufferTextureFace(GLenum t, GLenum a, GLuint x, GLint l, GLenum face
 }
 // Helper attach tôn trọng fbo chỉ định (fix bug bỏ qua `f` ở Named variants).
 static bool AttachToFBO(Context& c, GLuint fbo, GLenum attach, GLuint tex,
-                        GLint level, GLint layer) {
+                        GLint level, GLint layer, GLenum objType, GLuint objName) {
     if (fbo == 0) { c.errors.Record(0x0502); return false; } // default FB không attach
     auto it = c.fbos.find(fbo);
     if (it == c.fbos.end()) { c.errors.Record(0x0502); return false; }
     if (level < 0) { c.errors.Record(0x0501); return false; }
     auto& f = it->second;
-    if (attach == 0x8CE0) { f.colorTex[0] = tex; f.colorLevel[0] = level; f.colorLayer[0] = layer; }
-    else if (attach >= 0x8CE0 && attach <= 0x8CE7) {
-        f.colorTex[attach - 0x8CE0] = tex; f.colorLevel[attach - 0x8CE0] = level;
-        f.colorLayer[attach - 0x8CE0] = layer;
+    if (objName == 0) objName = tex;  // texture: tên object = id texture
+    if (attach == 0x8CE0) {
+        f.colorTex[0] = tex; f.colorLevel[0] = level; f.colorLayer[0] = layer;
+        f.colorObjType[0] = tex ? objType : 0; f.colorObjName[0] = tex ? objName : 0;
     }
-    else if (attach == 0x8D00) { f.depthTex = tex; f.depthLevel = level; f.depthLayer = layer; }
-    else if (attach == 0x8D20) { f.stencilTex = tex; f.stencilLevel = level; f.stencilLayer = layer; }
+    else if (attach >= 0x8CE0 && attach <= 0x8CE7) {
+        const GLenum k = attach - 0x8CE0;
+        f.colorTex[k] = tex; f.colorLevel[k] = level; f.colorLayer[k] = layer;
+        f.colorObjType[k] = tex ? objType : 0; f.colorObjName[k] = tex ? objName : 0;
+    }
+    else if (attach == 0x8D00) {
+        f.depthTex = tex; f.depthLevel = level; f.depthLayer = layer;
+        f.depthObjType = tex ? objType : 0; f.depthObjName = tex ? objName : 0;
+    }
+    else if (attach == 0x8D20) {
+        f.stencilTex = tex; f.stencilLevel = level; f.stencilLayer = layer;
+        f.stencilObjType = tex ? objType : 0; f.stencilObjName = tex ? objName : 0;
+    }
     else if (attach == 0x821A || attach == 0x84F9) { // DEPTH_STENCIL_ATTACHMENT aliases; draw path reads depthTex
         f.depthStencilTex = tex; f.depthStencilLevel = level; f.depthStencilLayer = layer;
         f.depthTex = tex; f.depthLevel = level; f.depthLayer = layer;
         f.stencilTex = tex; f.stencilLevel = level; f.stencilLayer = layer;
+        f.depthStencilObjType = tex ? objType : 0; f.depthStencilObjName = tex ? objName : 0;
+        f.depthObjType = tex ? objType : 0; f.depthObjName = tex ? objName : 0;
+        f.stencilObjType = tex ? objType : 0; f.stencilObjName = tex ? objName : 0;
     }
     else { c.errors.Record(0x0500); return false; }
     auto txt = c.textures.find(tex);
@@ -352,6 +370,24 @@ void glGetNamedFramebufferParameteriv(GLuint f, GLenum p, GLint* v) {
     else if (p == 0x9314) *v = fo.defaultFixedSampleLocations;
     else if (p == 0x9342) *v = fo.programmableSampleLocations;
     else if (p == 0x9343) *v = fo.sampleLocationPixelGrid;
+    // §9.2.2: các pname attachment áp cho attachment 0 (COLOR_ATTACHMENT0).
+    else if (p == 0x8CD0) { // FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE
+        auto ot = fo.colorObjType.find(0);
+        *v = (ot != fo.colorObjType.end()) ? (GLint)ot->second : 0;
+    }
+    else if (p == 0x8CD1) { // FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+        auto on = fo.colorObjName.find(0);
+        *v = (on != fo.colorObjName.end()) ? (GLint)on->second : 0;
+    }
+    else if (p == 0x8CD2) { // FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL
+        auto lv = fo.colorLevel.find(0);
+        *v = (lv != fo.colorLevel.end()) ? lv->second : 0;
+    }
+    else if (p == 0x8CD3) *v = 0;   // FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE
+    else if (p == 0x8CD4) {         // FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER
+        auto ly = fo.colorLayer.find(0);
+        *v = (ly != fo.colorLayer.end()) ? ly->second : -1;
+    }
     else { c.errors.Record(0x0500); return; }
 }
 // --- Draw/Read buffer constant validation -----------------------------------
@@ -975,9 +1011,70 @@ void glInvalidateFramebuffer(GLenum t, GLsizei n, const GLenum* a) {
     if (n == 0 || !a) return; // không liệt kê gì = không invalidate gì
     for (GLsizei i = 0; i < n; ++i) MarkInvalidate(c, fbo, a[i]);
 }
-void glInvalidateSubFramebuffer(GLenum t, GLsizei n, const GLenum* a, GLint x, GLint y, GLsizei w, GLsizei h) { (void)t;(void)n;(void)a;(void)x;(void)y;(void)w;(void)h; }
-void glInvalidateNamedFramebufferData(GLuint f, GLsizei n, const GLenum* a) { (void)f;(void)n;(void)a; }
-void glInvalidateNamedFramebufferSubData(GLuint f, GLsizei n, const GLenum* a, GLint x, GLint y, GLsizei w, GLsizei h) { (void)f;(void)n;(void)a;(void)x;(void)y;(void)w;(void)h; }
+
+// GL 4.6 §9.4.3 — InvalidateSubFramebuffer:
+//   INVALID_VALUE  if x, y, width or height is negative.
+//   INVALID_OPERATION if target is not one of FRAMEBUFFER/DRAW_FRAMEBUFFER/
+//                      READ_FRAMEBUFFER.
+//   INVALID_OPERATION if the framebuffer is not framebuffer complete.
+// Nội dung sau invalidate là undefined, nên phần "discard" hợp lệ; phần bắt
+// buộc sinh lỗi thì không — trước đây hàm này là no-op nên thiếu cả hai.
+void glInvalidateSubFramebuffer(GLenum t, GLsizei n, const GLenum* a,
+                                GLint x, GLint y, GLsizei w, GLsizei h) {
+    Context& c = Context::Current();
+    if (t != 0x8CA8 /*GL_READ_FRAMEBUFFER*/ && t != 0x8CA9 /*GL_DRAW_FRAMEBUFFER*/ &&
+        t != 0x8D40 /*GL_FRAMEBUFFER*/) {
+        c.errors.Record(0x0502); // INVALID_OPERATION
+        return;
+    }
+    if (x < 0 || y < 0 || w < 0 || h < 0) { c.errors.Record(0x0501); return; }
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    GLuint fbo = (t == 0x8CA8) ? c.state.BoundReadFBO()
+             : (t == 0x8CA9) ? c.state.BoundDrawFBO()
+                             : c.state.BoundDrawFBO();
+    if (fbo) {
+        auto fit = c.fbos.find(fbo);
+        if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
+        if (CheckFramebufferComplete(c, fit->second) != 0x8CD5 /*FRAMEBUFFER_COMPLETE*/) {
+            c.errors.Record(0x0502); // INVALID_OPERATION: framebuffer không complete
+            return;
+        }
+    }
+    if (c.pendingEncoder && c.pendingDrawFBO == fbo) c.FlushPendingEncoder();
+    if (n == 0 || !a) return;
+    for (GLsizei i = 0; i < n; ++i) MarkInvalidate(c, fbo, a[i]);
+}
+
+// GL 4.6 §9.4.4 — InvalidateNamedFramebufferData:
+//   INVALID_OPERATION if framebuffer is not the name of an existing FBO.
+void glInvalidateNamedFramebufferData(GLuint f, GLsizei n, const GLenum* a) {
+    Context& c = Context::Current();
+    if (!f || !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    if (c.pendingEncoder && c.pendingDrawFBO == f) c.FlushPendingEncoder();
+    if (n == 0 || !a) return;
+    for (GLsizei i = 0; i < n; ++i) MarkInvalidate(c, f, a[i]);
+}
+
+// GL 4.6 §9.4.5 — InvalidateNamedFramebufferSubData:
+//   INVALID_VALUE    if x, y, width or height is negative.
+//   INVALID_OPERATION if framebuffer is not the name of an existing FBO.
+void glInvalidateNamedFramebufferSubData(GLuint f, GLsizei n, const GLenum* a,
+                                         GLint x, GLint y, GLsizei w, GLsizei h) {
+    Context& c = Context::Current();
+    if (!f || !c.fbos.count(f)) { c.errors.Record(0x0502); return; }
+    if (x < 0 || y < 0 || w < 0 || h < 0) { c.errors.Record(0x0501); return; }
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    auto fit = c.fbos.find(f);
+    if (fit == c.fbos.end()) { c.errors.Record(0x0502); return; }
+    if (CheckFramebufferComplete(c, fit->second) != 0x8CD5 /*FRAMEBUFFER_COMPLETE*/) {
+        c.errors.Record(0x0502);
+        return;
+    }
+    if (c.pendingEncoder && c.pendingDrawFBO == f) c.FlushPendingEncoder();
+    if (n == 0 || !a) return;
+    for (GLsizei i = 0; i < n; ++i) MarkInvalidate(c, f, a[i]);
+}
 void glClear(GLbitfield m) {
     Context& c = Context::Current();
     Context::PhaseTimer pt(c.appleStats, &Context::AppleStats::nsClear);
@@ -1061,8 +1158,15 @@ void glClearBufferuiv(GLenum b, GLint d, const GLuint* v) {
 }
 void glClearBufferfi(GLenum b, GLint d, GLfloat dep, GLint st) {
     Context& c = Context::Current();
-    (void)d; // DEPTH/STENCIL/DEPTH_STENCIL: d không dùng
     GLbitfield m = 0;
+    // GL 4.6 §9.2.3: "If buffer is COLOR, the value of depth is used to clear
+    // the color buffer." Trước đây GL_COLOR bị từ chối (INVALID_ENUM) ⇒
+    // glClearBufferfi(GL_COLOR, ...) hỏng hoàn toàn.
+    if (b == 0x1800 /*COLOR*/) {
+        const GLfloat v[4] = {dep, dep, dep, dep};
+        glClearBufferfv(b, d, v);
+        return;
+    }
     if (b == 0x1801 /*DEPTH*/) { c.clearDepth = dep; m = 0x00000100u; }
     else if (b == 0x1802 /*STENCIL*/) { c.clearStencil = st; m = 0x00000400u; }
     else if (b == 0x84F9 /*GL_DEPTH_STENCIL*/) {

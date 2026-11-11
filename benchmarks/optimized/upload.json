@@ -1,0 +1,36 @@
+{
+  "benchmark": "merged",
+  "runs": 9,
+  "metrics": {
+    "managed_staging_plus_blit_macos_path": {
+      "median_us": 25.521,
+      "min_us": 24.882,
+      "max_us": 39.701,
+      "n_runs": 9
+    },
+    "newBufferWithBytes_16KB": {
+      "median_us": 8.527,
+      "min_us": 8.367,
+      "max_us": 8.602,
+      "n_runs": 9
+    },
+    "newTexture_64x64": {
+      "median_us": 10.339,
+      "min_us": 10.231,
+      "max_us": 10.461,
+      "n_runs": 9
+    },
+    "shared_replaceRegion_x1_ios_path": {
+      "median_us": 0.586,
+      "min_us": 0.531,
+      "max_us": 2.837,
+      "n_runs": 9
+    },
+    "shared_replaceRegion_x2_old_buggy_path": {
+      "median_us": 1.664,
+      "min_us": 1.329,
+      "max_us": 7.342,
+      "n_runs": 9
+    }
+  }
+}

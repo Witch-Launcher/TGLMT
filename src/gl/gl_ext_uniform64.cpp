@@ -23,13 +23,13 @@ static void Put(GLint loc, const void* v, size_t n) {
     if (!v) return;
     ProgramObject* p = CurProg();
     if (!p) return;
-    p->uniforms[loc].assign((const uint8_t*)v, (const uint8_t*)v + n);
+    p->uniforms[loc].bytes.assign((const uint8_t*)v, (const uint8_t*)v + n);
 }
 static void PutP(GLuint prog, GLint loc, const void* v, size_t n) {
     if (!v) return;
     ProgramObject* p = Prog(prog);
     if (!p) return;
-    p->uniforms[loc].assign((const uint8_t*)v, (const uint8_t*)v + n);
+    p->uniforms[loc].bytes.assign((const uint8_t*)v, (const uint8_t*)v + n);
 }
 static void Get64(GLuint prog, GLint loc, GLsizei bufSize, GLint64* out) {
     Context& c = Context::Current();
@@ -37,8 +37,8 @@ static void Get64(GLuint prog, GLint loc, GLsizei bufSize, GLint64* out) {
     if (!p) return;
     auto it = p->uniforms.find(loc);
     if (it == p->uniforms.end()) { if (out) out[0] = 0; return; }
-    if (bufSize < (GLsizei)it->second.size()) { c.errors.Record(0x0502); return; }
-    if (out) std::memcpy(out, it->second.data(), it->second.size());
+    if (bufSize < (GLsizei)it->second.bytes.size()) { c.errors.Record(0x0502); return; }
+    if (out) std::memcpy(out, it->second.bytes.data(), it->second.bytes.size());
 }
 } // namespace
 

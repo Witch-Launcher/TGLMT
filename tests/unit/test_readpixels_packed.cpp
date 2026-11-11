@@ -1,5 +1,6 @@
 // test_readpixels_packed.cpp — ReadPixels readback, P* packed unpack, Getn* robustness, VAO DSA.
 #include "tglmt/gl46.h"
+#include "test_util.h"
 #include "tglmt/Context.h"
 #include <cassert>
 #include <cstdio>
@@ -12,18 +13,18 @@ int main() {
     glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
     unsigned char px[16] = {0};
     glReadPixels(0, 0, 2, 2, 0x1908, 0x1401, px); // RGBA/UBYTE
-    assert(px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255);
-    assert(glGetError() == 0);
+    TGLMT_CHECK((px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255), "px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255");
+    TGLMT_CHECK((glGetError() == 0), "glGetError() == 0");
     // --- ReadnPixels bufSize guard ---
     glReadnPixels(0, 0, 2, 2, 0x1908, 0x1401, 16, px);
-    assert(glGetError() == 0);
+    TGLMT_CHECK((glGetError() == 0), "glGetError() == 0");
     glReadnPixels(0, 0, 2, 2, 0x1908, 0x1401, 4, px); // quá nhỏ → INVALID_OPERATION
-    assert(glGetError() == 0x0502);
+    TGLMT_CHECK((glGetError() == 0x0502), "glGetError() == 0x0502");
     // --- P* packed: glVertexP3ui UNSIGNED_INT_2_10_10_10_REV max → ~1.0 ---
     glVertexP3ui(0x8368, 0x3FFFFFFF); // x=y=z=1023 max, w=3 max
     double cur[4] = {0};
     ctx.state.GetShadow(0x8626, cur, 32, 0);
-    assert(cur[0] > 0.99 && cur[1] > 0.99 && cur[2] > 0.99);
+    TGLMT_CHECK((cur[0] > 0.99 && cur[1] > 0.99 && cur[2] > 0.99), "cur[0] > 0.99 && cur[1] > 0.99 && cur[2] > 0.99");
     glColorP4ui(0x8368, 0x3FFFFFFF);
     // --- TexCoordP1 (từng thiếu trong mapping) ---
     glTexCoordP1ui(0x8368, 0x3FF);
@@ -40,7 +41,7 @@ int main() {
     glUniform1f(loc, 3.14f);
     float v = 0;
     glGetnUniformfv(p, loc, 4, &v);
-    assert(v > 3.13f && v < 3.15f);
+    TGLMT_CHECK((v > 3.13f && v < 3.15f), "v > 3.13f && v < 3.15f");
     // --- VAO DSA ---
     tglmt::GLuint vao, vbo;
     glCreateVertexArrays(1, &vao);
@@ -50,8 +51,8 @@ int main() {
     glVertexArrayAttribBinding(vao, 0, 0);
     glVertexArrayElementBuffer(vao, vbo);
     glEnableVertexArrayAttrib(vao, 0);
-    assert(ctx.vaos[vao].attribs[0].enabled);
-    assert(ctx.vaos[vao].elementBuffer == vbo);
+    TGLMT_CHECK((ctx.vaos[vao].attribs[0].enabled), "ctx.vaos[vao].attribs[0].enabled");
+    TGLMT_CHECK((ctx.vaos[vao].elementBuffer == vbo), "ctx.vaos[vao].elementBuffer == vbo");
     // --- TexBuffer view ---
     tglmt::GLuint t;
     glGenTextures(1, &t);
@@ -60,24 +61,24 @@ int main() {
     glBindBuffer(0x8C2A, vbo);
     glBufferData(0x8C2A, sizeof(bufdata), bufdata, 0x88E4);
     glTexBuffer(0x8C2A, 0x822E /*R32F*/, vbo);
-    assert(ctx.textures[t].pixels.size() == sizeof(bufdata));
+    TGLMT_CHECK((ctx.textures[t].pixels.size() == sizeof(bufdata)), "ctx.textures[t].pixels.size() == sizeof(bufdata)");
     // contentGen: gl*BufferData / flush staging phải tăng → cache glTexBuffer
     // (MC gọi glTexBuffer MỖI FRAME, trước đây upload lại 2.8MB mỗi lần) chỉ
     // re-upload khi THẬT SỰ đổi. glTexBuffer không đổi gì → gen giữ nguyên.
     {
         unsigned long long g0 = ctx.buffers[vbo].contentGen;
-        assert(g0 != 0); // id tạo là duy nhất trong context
+        TGLMT_CHECK((g0 != 0), "g0 != 0"); // id tạo là duy nhất trong context
         glBufferData(0x8C2A, sizeof(bufdata), bufdata, 0x88E4);
-        assert(ctx.buffers[vbo].contentGen != g0);
+        TGLMT_CHECK((ctx.buffers[vbo].contentGen != g0), "ctx.buffers[vbo].contentGen != g0");
         unsigned long long g1 = ctx.buffers[vbo].contentGen;
         glTexBuffer(0x8C2A, 0x822E /*R32F*/, vbo);
-        assert(ctx.buffers[vbo].contentGen == g1);
+        TGLMT_CHECK((ctx.buffers[vbo].contentGen == g1), "ctx.buffers[vbo].contentGen == g1");
         // gen do Context::bufGenNext cấp → luôn duy nhất, không bao giờ 0
         tglmt::GLuint vb = 0;
         glGenBuffers(1, &vb);
-        assert(vb != 0);
-        assert(ctx.buffers[vb].contentGen != 0);
-        assert(ctx.buffers[vb].contentGen != ctx.buffers[vbo].contentGen);
+        TGLMT_CHECK((vb != 0), "vb != 0");
+        TGLMT_CHECK((ctx.buffers[vb].contentGen != 0), "ctx.buffers[vb].contentGen != 0");
+        TGLMT_CHECK((ctx.buffers[vb].contentGen != ctx.buffers[vbo].contentGen), "ctx.buffers[vb].contentGen != ctx.buffers[vbo].contentGen");
         glDeleteBuffers(1, &vb);
     }
     // --- GetTexImage roundtrip ---
@@ -89,7 +90,7 @@ int main() {
     glTexImage2D(0x0DE1, 0, 0x8058, 2, 2, 0, 0x1908, 0x1401, img);
     unsigned char back[16] = {0};
     glGetTexImage(0x0DE1, 0, 0x1908, 0x1401, back);
-    assert(memcmp(img, back, 16) == 0);
+    TGLMT_CHECK((memcmp(img, back, 16) == 0), "memcmp(img, back, 16) == 0");
     printf("test_readpixels_packed PASS\n");
-    return 0;
+    return TGLMT_RESULT;
 }

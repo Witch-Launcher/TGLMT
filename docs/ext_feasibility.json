@@ -1,0 +1,459 @@
+{
+  "schema": 1,
+  "updated": "2026-10-23",
+  "notes": "Curated feasibility metadata for docs/EXTENSION_MATRIX.md. 'verify' means behavior must be proven by a test before advertising. 'impossible' means no spec-valid Metal path on the supported GPU families.",
+  "extensions": {
+    "GL_ARB_gpu_shader_fp64": {
+      "class": "impossible",
+      "reason": "Apple GPUs and MSL have no fp64; a software double emulation would not satisfy GLSL fp64 semantics."
+    },
+    "GL_NV_shader_atomic_float64": {
+      "class": "impossible",
+      "reason": "Requires fp64 atomics; MSL/Apple GPUs do not expose fp64."
+    },
+    "GL_ARB_shader_clock": {
+      "class": "impossible",
+      "reason": "No per-invocation shader clock; only coarse GPU timestamps are available."
+    },
+    "GL_ARB_derivative_control": {
+      "class": "impossible",
+      "reason": "MSL exposes dfdx/dfdy/fwidth but no fine/coarse derivative control."
+    },
+    "GL_NV_path_rendering": {
+      "class": "impossible",
+      "reason": "No path-rendering hardware; a CPU path rasterizer is outside the scope of this layer."
+    },
+    "GL_NV_path_rendering_shared_edge": {
+      "class": "impossible",
+      "reason": "Depends on NV_path_rendering."
+    },
+    "GL_NV_command_list": {
+      "class": "impossible",
+      "reason": "Vendor command-list token stream has no Metal equivalent; not worth a CPU interpreter."
+    },
+    "GL_NV_draw_vulkan_image": {
+      "class": "impossible",
+      "reason": "Metal has no Vulkan image interop."
+    },
+    "GL_ARB_cl_event": {
+      "class": "impossible",
+      "reason": "No OpenCL event interop."
+    },
+    "GL_EXT_EGL_image_storage": {
+      "class": "impossible",
+      "reason": "No EGL images on the Metal backend."
+    },
+    "GL_EXT_EGL_sync": {
+      "class": "impossible",
+      "reason": "No EGL sync objects."
+    },
+    "GL_NV_memory_attachment": {
+      "class": "impossible",
+      "reason": "No external memory-object attachment."
+    },
+    "GL_NV_memory_object_sparse": {
+      "class": "impossible",
+      "reason": "No external sparse memory objects; ARB_sparse_* is emulated by full allocation."
+    },
+    "GL_ARB_imaging": {
+      "class": "impossible",
+      "reason": "Legacy fixed-function imaging subset removed from the core profile; not applicable."
+    },
+    "GL_INTEL_framebuffer_CMAA": {
+      "class": "impossible",
+      "reason": "No CMAA hardware path."
+    },
+    "GL_INTEL_conservative_rasterization": {
+      "class": "impossible",
+      "reason": "No conservative raster hardware; compute expansion is not spec-exact."
+    },
+    "GL_NV_conservative_raster": {
+      "class": "impossible",
+      "reason": "No conservative raster hardware; compute expansion is not spec-exact."
+    },
+    "GL_NV_conservative_raster_dilate": {
+      "class": "impossible",
+      "reason": "No conservative raster hardware."
+    },
+    "GL_NV_conservative_raster_pre_snap": {
+      "class": "impossible",
+      "reason": "No conservative raster hardware."
+    },
+    "GL_NV_conservative_raster_pre_snap_triangles": {
+      "class": "impossible",
+      "reason": "No conservative raster hardware."
+    },
+    "GL_NV_conservative_raster_underestimation": {
+      "class": "impossible",
+      "reason": "No conservative raster hardware."
+    },
+    "GL_NV_shader_texture_footprint": {
+      "class": "impossible",
+      "reason": "Metal exposes no texture-footprint query."
+    },
+    "GL_NV_representative_fragment_test": {
+      "class": "impossible",
+      "reason": "No representative-fragment hardware path."
+    },
+    "GL_ARB_robust_buffer_access_behavior": {
+      "class": "impossible",
+      "reason": "Cannot guarantee robust behavior for arbitrary translated shaders without full bounds instrumentation."
+    },
+    "GL_KHR_robust_buffer_access_behavior": {
+      "class": "impossible",
+      "reason": "Same constraint as ARB_robust_buffer_access_behavior."
+    },
+    "GL_ARB_robustness_isolation": {
+      "class": "impossible",
+      "reason": "No process/context isolation primitive in Metal."
+    },
+    "GL_EXT_mesh_shader": {
+      "class": "gated",
+      "gate": "Apple7+ (mesh/task shaders); compute fallback below"
+    },
+    "GL_NV_mesh_shader": {
+      "class": "gated",
+      "gate": "Apple7+ (mesh shaders); compute fallback below"
+    },
+    "GL_EXT_fragment_shading_rate": {
+      "class": "gated",
+      "gate": "Apple6+ variable rasterization rate"
+    },
+    "GL_NV_shading_rate_image": {
+      "class": "gated",
+      "gate": "Apple6+ variable rasterization rate"
+    },
+    "GL_NV_primitive_shading_rate": {
+      "class": "gated",
+      "gate": "Apple6+ variable rasterization rate"
+    },
+    "GL_NV_shader_atomic_int64": {
+      "class": "gated",
+      "gate": "Apple8+ 64-bit atomics"
+    },
+    "GL_NV_fragment_shader_barycentric": {
+      "class": "gated",
+      "gate": "Apple7+ barycentric coordinates"
+    },
+    "GL_EXT_texture_compression_s3tc": {
+      "class": "gated",
+      "gate": "BC natively only on some Apple7/8 iPadOS; CPU decode fallback otherwise"
+    },
+    "GL_ARB_texture_compression_bptc": {
+      "class": "gated",
+      "gate": "BC natively only on some Apple7/8 iPadOS; CPU decode fallback otherwise"
+    },
+    "GL_ARB_texture_compression_rgtc": {
+      "class": "gated",
+      "gate": "BC natively only on some Apple7/8 iPadOS; CPU decode fallback otherwise"
+    },
+    "GL_NV_texture_rectangle_compressed": {
+      "class": "gated",
+      "gate": "BC natively only on some Apple7/8 iPadOS; CPU decode fallback otherwise"
+    },
+    "GL_ARB_bindless_texture": {
+      "class": "emulated",
+      "reason": "Argument buffers; A11 is argument-buffer Tier 1, so limits are lower than desktop GL."
+    },
+    "GL_NV_bindless_texture": {
+      "class": "emulated",
+      "reason": "Argument buffers with Tier-1 limits."
+    },
+    "GL_NV_bindless_multi_draw_indirect": {
+      "class": "emulated",
+      "reason": "Bindless handles + indirect draw expansion."
+    },
+    "GL_NV_bindless_multi_draw_indirect_count": {
+      "class": "emulated",
+      "reason": "Bindless handles + indirect draw expansion."
+    },
+    "GL_ARB_sparse_texture": {
+      "class": "emulated",
+      "reason": "Allocate full storage; page commitment is a no-op and queries report committed."
+    },
+    "GL_ARB_sparse_texture2": {
+      "class": "emulated",
+      "reason": "Full allocation; no sparse residency."
+    },
+    "GL_ARB_sparse_texture_clamp": {
+      "class": "emulated",
+      "reason": "Full allocation; no sparse residency."
+    },
+    "GL_ARB_sparse_buffer": {
+      "class": "emulated",
+      "reason": "Full buffer allocation; page commitment is a no-op."
+    },
+    "GL_EXT_direct_state_access": {
+      "class": "emulated",
+      "reason": "Core-object DSA subset is implementable; legacy client/matrix state is not valid in core."
+    },
+    "GL_ARB_texture_border_clamp": {
+      "class": "emulated",
+      "reason": "Metal sampler border color is limited; arbitrary border color needs shader emulation."
+    },
+    "GL_ARB_texture_filter_minmax": {
+      "class": "emulated",
+      "reason": "Metal samplers lack min/max filtering; emulate with shader taps."
+    },
+    "GL_EXT_texture_filter_minmax": {
+      "class": "emulated",
+      "reason": "Metal samplers lack min/max filtering; emulate with shader taps."
+    },
+    "GL_ARB_cull_distance": {
+      "class": "emulated",
+      "reason": "MSL exposes clip_distance but not cull_distance; map to clip as an approximation."
+    },
+    "GL_ARB_provoking_vertex": {
+      "class": "emulated",
+      "reason": "Reorder indices/expand strips to match the requested provoking-vertex convention."
+    },
+    "GL_ARB_geometry_shader4": {
+      "class": "emulated",
+      "reason": "Metal has no geometry stage; compute fallback on A11 and mesh path on Apple7+."
+    },
+    "GL_ARB_tessellation_shader": {
+      "class": "native",
+      "reason": "Metal tessellation pipeline (tess factor buffer + post-tessellation vertex function)."
+    },
+    "GL_ARB_transform_feedback2": {
+      "class": "emulated",
+      "reason": "No native transform-feedback stage; capture via shader writes/second pass."
+    },
+    "GL_ARB_transform_feedback3": {
+      "class": "emulated",
+      "reason": "No native transform-feedback stage; capture via shader writes/second pass."
+    },
+    "GL_ARB_transform_feedback_instanced": {
+      "class": "emulated",
+      "reason": "No native transform-feedback stage; capture via shader writes/second pass."
+    },
+    "GL_OVR_multiview": {
+      "class": "emulated",
+      "reason": "Multi-pass layered rendering; no native multiview draw."
+    },
+    "GL_OVR_multiview2": {
+      "class": "emulated",
+      "reason": "Multi-pass layered rendering; no native multiview draw."
+    },
+    "GL_EXT_multiview_tessellation_geometry_shader": {
+      "class": "emulated",
+      "reason": "Multi-pass layered rendering."
+    },
+    "GL_EXT_multiview_texture_multisample": {
+      "class": "emulated",
+      "reason": "Multi-pass layered rendering."
+    },
+    "GL_EXT_multiview_timer_query": {
+      "class": "emulated",
+      "reason": "Multi-pass layered rendering with per-view timer queries."
+    },
+    "GL_NV_stereo_view_rendering": {
+      "class": "emulated",
+      "reason": "Render each view separately."
+    },
+    "GL_AMD_performance_monitor": {
+      "class": "gated",
+      "gate": "Metal GPU counters; availability depends on device and counter set"
+    },
+    "GL_INTEL_performance_query": {
+      "class": "gated",
+      "gate": "Metal GPU counters; availability depends on device and counter set"
+    },
+    "GL_NV_framebuffer_mixed_samples": {
+      "class": "emulated",
+      "reason": "Metal render passes require a single sample count; resolve/expand as needed."
+    },
+    "GL_NV_framebuffer_multisample_coverage": {
+      "class": "emulated",
+      "reason": "No separate coverage-sample count; approximate with MSAA."
+    },
+    "GL_EXT_raster_multisample": {
+      "class": "emulated",
+      "reason": "No separate raster/color sample counts; approximate with MSAA."
+    },
+    "GL_NV_fill_rectangle": {
+      "class": "emulated",
+      "reason": "No rectangle rasterization mode; expand/emulate."
+    },
+    "GL_NV_shader_atomic_fp16_vector": {
+      "class": "emulated",
+      "reason": "MSL has no half-vector atomics; emulate with CAS."
+    },
+    "GL_NV_shader_subgroup_partitioned": {
+      "class": "emulated",
+      "reason": "MSL SIMD-group operations cover most of this; partitioned ballots need emulation."
+    },
+    "GL_ARB_vertex_attrib_64bit": {
+      "class": "emulated",
+      "reason": "No fp64 vertex pipeline; downconvert attributes to float."
+    },
+    "GL_NV_vertex_attrib_integer_64bit": {
+      "class": "emulated",
+      "reason": "No 64-bit integer vertex fetch; downconvert or split."
+    },
+    "GL_ARB_framebuffer_object": {
+      "class": "native",
+      "reason": "Core FBO path; renderbuffer storage still needs implementation."
+    },
+    "GL_ARB_texture_storage": {
+      "class": "native",
+      "reason": "Immutable texture storage is already mapped to Metal textures."
+    },
+    "GL_ARB_texture_view": {
+      "class": "native",
+      "reason": "Metal texture views."
+    },
+    "GL_ARB_texture_multisample": {
+      "class": "native",
+      "reason": "Metal multisample textures/render targets."
+    },
+    "GL_ARB_texture_storage_multisample": {
+      "class": "native",
+      "reason": "Metal multisample textures/render targets."
+    },
+    "GL_ARB_sample_locations": {
+      "class": "native",
+      "reason": "Metal programmable sample positions."
+    },
+    "GL_NV_sample_locations": {
+      "class": "native",
+      "reason": "Metal programmable sample positions."
+    },
+    "GL_ARB_shader_stencil_export": {
+      "class": "native",
+      "reason": "MSL fragment [[stencil]] output (Metal 2.1+)."
+    },
+    "GL_ARB_fragment_shader_interlock": {
+      "class": "native",
+      "reason": "MSL raster order groups (Metal 2+)."
+    },
+    "GL_NV_fragment_shader_interlock": {
+      "class": "native",
+      "reason": "MSL raster order groups (Metal 2+)."
+    },
+    "GL_ARB_fragment_layer_viewport": {
+      "class": "native",
+      "reason": "MSL fragment render_target_array_index/viewport_array_index inputs."
+    },
+    "GL_ARB_shader_viewport_layer_array": {
+      "class": "native",
+      "reason": "MSL vertex render_target_array_index/viewport_array_index outputs."
+    },
+    "GL_ARB_post_depth_coverage": {
+      "class": "native",
+      "reason": "MSL [[post_depth_coverage]] with early_fragment_tests."
+    },
+    "GL_EXT_post_depth_coverage": {
+      "class": "native",
+      "reason": "MSL [[post_depth_coverage]] with early_fragment_tests."
+    },
+    "GL_EXT_window_rectangles": {
+      "class": "native",
+      "reason": "Scissor/discard emulation over the supported window rectangles."
+    },
+    "GL_MESA_framebuffer_flip_x": {
+      "class": "native",
+      "reason": "Flip in the vertex/output path."
+    },
+    "GL_MESA_framebuffer_flip_y": {
+      "class": "native",
+      "reason": "Flip in the vertex/output path."
+    },
+    "GL_MESA_framebuffer_swap_xy": {
+      "class": "native",
+      "reason": "Swap X/Y in the vertex/output path."
+    },
+    "GL_NV_depth_buffer_float": {
+      "class": "native",
+      "reason": "Depth32Float storage and clear."
+    },
+    "GL_NV_scissor_exclusive": {
+      "class": "native",
+      "reason": "Scissor/predicate emulation."
+    },
+    "GL_NV_viewport_swizzle": {
+      "class": "native",
+      "reason": "Vertex-output swizzle."
+    },
+    "GL_NV_clip_space_w_scaling": {
+      "class": "native",
+      "reason": "Vertex-output W scaling."
+    },
+    "GL_NV_fragment_coverage_to_color": {
+      "class": "native",
+      "reason": "Sample-mask fragment output."
+    },
+    "GL_ARB_query_buffer_object": {
+      "class": "native",
+      "reason": "Copy query results into buffer storage."
+    },
+    "GL_ARB_pipeline_statistics_query": {
+      "class": "native",
+      "reason": "Software/Metal counter aggregation."
+    },
+    "GL_ARB_transform_feedback_overflow_query": {
+      "class": "native",
+      "reason": "Overflow flag on the emulated XFB capture."
+    },
+    "GL_ARB_shader_subroutine": {
+      "class": "native",
+      "reason": "Translate subroutine uniforms to a switch in MSL."
+    },
+    "GL_ARB_shader_ballot": {
+      "class": "native",
+      "reason": "MSL SIMD-group operations."
+    },
+    "GL_ARB_shader_group_vote": {
+      "class": "native",
+      "reason": "MSL SIMD-group operations."
+    },
+    "GL_KHR_shader_subgroup": {
+      "class": "native",
+      "reason": "MSL SIMD-group operations."
+    },
+    "GL_NV_shader_thread_group": {
+      "class": "native",
+      "reason": "MSL SIMD-group operations."
+    },
+    "GL_NV_shader_thread_shuffle": {
+      "class": "native",
+      "reason": "MSL SIMD-group shuffle operations."
+    },
+    "GL_ARB_gpu_shader_int64": {
+      "class": "native",
+      "reason": "MSL long/ulong and 64-bit integer uniform support."
+    },
+    "GL_ARB_shading_language_include": {
+      "class": "native",
+      "reason": "Preprocessor include resolution."
+    },
+    "GL_ARB_spirv_extensions": {
+      "class": "native",
+      "reason": "SPIR-V input via SPIRV-Cross; requires vendored dependency."
+    },
+    "GL_EXT_shader_framebuffer_fetch": {
+      "class": "native",
+      "reason": "MSL [[color(n)]] fragment input / programmable blending."
+    },
+    "GL_EXT_shader_framebuffer_fetch_non_coherent": {
+      "class": "native",
+      "reason": "MSL framebuffer fetch plus a barrier."
+    },
+    "GL_KHR_blend_equation_advanced": {
+      "class": "native",
+      "reason": "Raster order groups / framebuffer fetch."
+    },
+    "GL_KHR_blend_equation_advanced_coherent": {
+      "class": "native",
+      "reason": "Raster order groups / framebuffer fetch."
+    },
+    "GL_NV_blend_equation_advanced": {
+      "class": "native",
+      "reason": "Raster order groups / framebuffer fetch."
+    },
+    "GL_NV_blend_equation_advanced_coherent": {
+      "class": "native",
+      "reason": "Raster order groups / framebuffer fetch."
+    }
+  }
+}

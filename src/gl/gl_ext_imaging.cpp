@@ -145,7 +145,9 @@ void glGetColorTableParameterfv(GLenum target, GLenum pname, GLfloat* params) {
 }
 void glGetColorTableParameteriv(GLenum target, GLenum pname, GLint* params) {
     Context& c=Context::Current(); if(!params){c.errors.Record(0x0501);return;}
-    if(pname==0x80D6||pname==0x80D7){GLfloat f[4];glGetColorTableParameterfv(target,pname,f);for(int i=0;i<4;++i)params[i]=(GLint)f[i];return;}
+    // Mọi pname của GetColorTableParameter là giá trị ĐƠN (SIZE/WIDTH/FORMAT/
+    // *_SIZE) → chỉ ghi 1 giá trị. Trước đây ghi 4 → ghi đè stack của app.
+    if(pname==0x80D6||pname==0x80D7){GLfloat f=0;glGetColorTableParameterfv(target,pname,&f);params[0]=(GLint)f;return;}
     GLfloat f=0;glGetColorTableParameterfv(target,pname,&f);params[0]=(GLint)f;
 }
 
@@ -224,11 +226,26 @@ void glGetConvolutionParameterfv(GLenum target, GLenum pname, GLfloat* params) {
     if(!params){c.errors.Record(0x0501);return;}
     if(pname==0x8018||pname==0x8019){params[0]=(GLfloat)(pname==0x8018?ConvWidth(c,target):ConvHeight(c,target));return;}
     auto it=c.ext.imagingF.find(Key(target,pname)); if(it!=c.ext.imagingF.end()){OutF(it->second,params);return;}
-    auto ii=c.ext.imagingI.find(Key(target,pname)); if(ii!=c.ext.imagingI.end()){for(int i=0;i<4;++i)params[i]=(GLfloat)ii->second[i];return;}
-    for(int i=0;i<4;++i)params[i]=0;
+    auto ii=c.ext.imagingI.find(Key(target,pname));
+    if(ii!=c.ext.imagingI.end()){
+        params[0]=(GLfloat)ii->second[0];
+        if(pname==0x8010) params[1]=(GLfloat)ii->second[1];  // GL_FILTER: 2 giá trị
+        return;
+    }
+    params[0]=0;
+    if(pname==0x8010) params[1]=0;
 }
 void glGetConvolutionParameteriv(GLenum target, GLenum pname, GLint* params) {
-    GLfloat f[4]={};glGetConvolutionParameterfv(target,pname,f);if(params)for(int i=0;i<4;++i)params[i]=(GLint)f[i];
+    // Spec (GL 1.1 §6.3.3 / ARB_imaging): GetConvolutionParameter ghi TỐI ĐA
+    // 2 giá trị (GL_FILTER → filter + MIME type). Trước đây ghi 4 → ghi đè
+    // stack của app (ASan: stack-buffer-overflow WRITE of size 4).
+    if (!params) return;
+    GLfloat f[4] = {};
+    glGetConvolutionParameterfv(target, pname, f);
+    params[0] = (GLint)f[0];
+    // Chỉ pname = GL_FILTER (0x8010) mới trả 2 giá trị (filter + MIME type);
+    // các pname khác trả 1 → ghi thêm sẽ vượt buffer của app.
+    if (pname == 0x8010) params[1] = (GLint)f[1];
 }
 void glGetSeparableFilter(GLenum target, GLenum format, GLenum type, void* row, void* column, void* span) {
     (void)format;(void)type;(void)row;(void)column;(void)span;

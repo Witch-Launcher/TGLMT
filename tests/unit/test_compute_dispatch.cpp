@@ -2,6 +2,11 @@
 // Trên backend Metal thật: dispatch 8 workgroup × local_size 8 = 64 thread, verify SSBO.
 // Trên backend Null / không có MTLDevice: skip (return 0) — Null không dispatch được.
 #include "tglmt/gl46.h"
+// Access flags của MapBufferRange: 0x0008|0x0010 là
+// INVALIDATE_BUFFER|FLUSH_EXPLICIT, nhưng GL 4.6 §6.3 yêu cầu
+// FLUSH_EXPLICIT phải kèm MAP_WRITE_BIT (thiếu → INVALID_OPERATION).
+// Dùng WRITE|INVALIDATE_BUFFER|UNSYNCHRONIZED — đúng ý định map để
+// đọc kết quả compute.
 #include "tglmt/Context.h"
 #include <cstdio>
 #include <cstdlib>
@@ -52,7 +57,8 @@ int main() {
     if (glGetError() != 0) { printf("test_compute_dispatch FAIL: MemoryBarrierByRegion\n"); return 1; }
 
     glBindBuffer(0x90D2, buf);
-    const float* r = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z), 0x0008 | 0x0010);
+    const float* r = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z),
+                          0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
     if (!r) { printf("test_compute_dispatch FAIL: map buffer\n"); return 1; }
     int bad = 0;
     for (int i = 0; i < 64; ++i)
@@ -85,7 +91,7 @@ int main() {
         glBindBufferBase(0x90D2, 0, buf2);
         glDispatchCompute(8, 1, 1); glMemoryBarrier(0x0020 | 0x0040);
         glBindBuffer(0x90D2, buf2);
-        const float* r2 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z2), 0x0008 | 0x0010);
+        const float* r2 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z2), 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
         if (!r2) { printf("test_compute_dispatch FAIL uniform map\n"); return 1; }
         int bad2 = 0;
         for (int i = 0; i < 64; ++i) if (r2[i] != 100.0f + (float)i) ++bad2;
@@ -116,7 +122,7 @@ int main() {
         glBindBufferBase(0x90D2, 0, buf3);
         glDispatchCompute(8, 1, 1); glMemoryBarrier(0x0020 | 0x0040);
         glBindBuffer(0x90D2, buf3);
-        const float* r3 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z3), 0x0008 | 0x0010);
+        const float* r3 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z3), 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
         if (!r3) { printf("test_compute_dispatch FAIL texture map\n"); return 1; }
         int bad3 = 0;
         for (int i = 0; i < 64; ++i) if (r3[i] < 0.99f) ++bad3;
@@ -184,14 +190,14 @@ int main() {
         glUseProgram(pr5);
         glDispatchCompute(8, 1, 1); glMemoryBarrier(0x00000040 | 0x00002000);
         glBindBuffer(0x90D2, sbuf);
-        const unsigned int* r5 = (const unsigned int*)glMapBufferRange(0x90D2, 0, sizeof(z5), 0x0008 | 0x0010);
+        const unsigned int* r5 = (const unsigned int*)glMapBufferRange(0x90D2, 0, sizeof(z5), 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
         if (!r5) { printf("test_compute_dispatch FAIL atomic map\n"); return 1; }
         int seen[64] = {0};
         for (int i = 0; i < 64; ++i) if (r5[i] < 64) seen[r5[i]] = 1;
         int uniq = 0; for (int i = 0; i < 64; ++i) uniq += seen[i];
         glUnmapBuffer(0x90D2);
         glBindBuffer(0x92C0, abuf);
-        const unsigned int* ac = (const unsigned int*)glMapBufferRange(0x92C0, 0, 4, 0x0008 | 0x0010);
+        const unsigned int* ac = (const unsigned int*)glMapBufferRange(0x92C0, 0, 4, 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
         unsigned int cnt = ac ? ac[0] : 0;
         if (ac) glUnmapBuffer(0x92C0);
         if (uniq != 64 || cnt != 64) {
@@ -234,7 +240,7 @@ int main() {
         glDispatchComputeIndirect(0);
         glMemoryBarrier(0x0020 | 0x0040);
         glBindBuffer(0x90D2, buf6);
-        const float* r6 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z6), 0x0008 | 0x0010);
+        const float* r6 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z6), 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
         if (!r6) { printf("test_compute_dispatch FAIL indirect map\n"); return 1; }
         int bad6 = 0;
         for (int i = 0; i < 64; ++i) if (r6[i] != (float)i + 7.0f) ++bad6;
@@ -277,7 +283,7 @@ int main() {
         glDispatchCompute(8, 1, 1);                    // CB2 (deferred), đọc A ghi B
         glMemoryBarrier(0x0020 | 0x0040);
         glBindBuffer(0x90D2, bufB);
-        const unsigned int* rB = (const unsigned int*)glMapBufferRange(0x90D2, 0, sizeof(zB), 0x0008 | 0x0010);
+        const unsigned int* rB = (const unsigned int*)glMapBufferRange(0x90D2, 0, sizeof(zB), 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
         if (!rB) { printf("test_compute_dispatch FAIL chain map\n"); return 1; }
         int badB = 0;
         for (int i = 0; i < 64; ++i) {
@@ -307,7 +313,7 @@ int main() {
         glDispatchCompute(0, 1, 1); // x=0 → KHÔNG thread nào chạy
         glMemoryBarrier(0x0020 | 0x0040);
         glBindBuffer(0x90D2, buf8);
-        const float* r8 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z8), 0x0008 | 0x0010);
+        const float* r8 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z8), 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
         if (!r8) { printf("test_compute_dispatch FAIL zero-group map\n"); return 1; }
         int bad8 = 0;
         for (int i = 0; i < 64; ++i) if (r8[i] != 5.0f) ++bad8;
@@ -338,7 +344,7 @@ int main() {
             glUseProgram(pr9);
             glDispatchCompute(8, 1, 1); // sync mode: commit+wait ngay
             // KHÔNG barrier/map-sync — sync mode đã wait, contents phải sẵn sàng.
-            const float* r9 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z9), 0x0008 | 0x0010);
+            const float* r9 = (const float*)glMapBufferRange(0x90D2, 0, sizeof(z9), 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
             if (!r9) { printf("test_compute_dispatch FAIL sync map\n"); return 1; }
             int bad9 = 0;
             for (int i = 0; i < 64; ++i) if (r9[i] != (float)i) ++bad9;

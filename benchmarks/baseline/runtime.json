@@ -1,0 +1,66 @@
+{
+  "benchmark": "merged",
+  "runs": 9,
+  "metrics": {
+    "frame_100_draws": {
+      "median_us": 208.1995,
+      "min_us": 118.2445,
+      "max_us": 257.3727,
+      "n_runs": 9
+    },
+    "glBindBuffer": {
+      "median_us": 0.062,
+      "min_us": 0.06,
+      "max_us": 0.087,
+      "n_runs": 9
+    },
+    "glBufferSubData_64B": {
+      "median_us": 0.073,
+      "min_us": 0.071,
+      "max_us": 0.109,
+      "n_runs": 9
+    },
+    "glClear": {
+      "median_us": 10.613,
+      "min_us": 7.593,
+      "max_us": 11.134,
+      "n_runs": 9
+    },
+    "glDrawArrays_3": {
+      "median_us": 1.727,
+      "min_us": 0.93,
+      "max_us": 1.831,
+      "n_runs": 9
+    },
+    "glDrawElements_3": {
+      "median_us": 2.011,
+      "min_us": 1.055,
+      "max_us": 2.063,
+      "n_runs": 9
+    },
+    "glGetIntegerv": {
+      "median_us": 0.042,
+      "min_us": 0.041,
+      "max_us": 0.059,
+      "n_runs": 9
+    },
+    "glTexImage2D_64x64_full_upload": {
+      "median_us": 74.287,
+      "min_us": 62.855,
+      "max_us": 89.951,
+      "n_runs": 9
+    },
+    "glTexSubImage2D_64x64_staged": {
+      "median_us": 7.334,
+      "min_us": 7.281,
+      "max_us": 12.282,
+      "n_runs": 9
+    },
+    "glUniform1f": {
+      "median_us": 0.05,
+      "min_us": 0.049,
+      "max_us": 0.07,
+      "n_runs": 9
+    }
+  }
+}

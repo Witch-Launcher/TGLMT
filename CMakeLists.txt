@@ -15,6 +15,14 @@ endif()
 
 include_directories(include)
 
+# Linker nhanh: lld (LLVM) link nhanh hơn ld64 ~40%. Có sẵn trên máy dev thì
+# dùng, không có thì fallback ld64 (build vẫn đúng, chỉ chậm hơn).
+find_program(TGLMT_LLD ld.lld)
+if(TGLMT_LLD)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fuse-ld=lld")
+endif()
+
 # Số bản dựng TGLMT — nguồn duy nhất cho glGetString(GL_VERSION) (hiện trên F3
 # qua GpuDevice.getVersion) và dòng diag [TGLMT] build=. Lấy từ git lúc
 # configure; commit mới tự kích hoạt configure lại nhờ CONFIGURE_DEPENDS trên
@@ -53,7 +61,23 @@ if(TGLMT_APPLE_METAL AND APPLE)
   set_source_files_properties(src/metal/AppleMetalBridge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
-add_library(tglmt STATIC ${TGLMT_CORE} ${TGLMT_GL} ${TGLMT_METAL})
+# Object library: nguồn cho CẢ static lẫn shared. Trước đây add_library cho
+# từng target với cùng danh sách source → MỖI file .cpp biên dịch HAI LẦN
+# (một cho tglmt static, một cho tglmt_shared) → build sạch tốn ~2× thời gian.
+# Giờ biên dịch 1 lần, link ra 2 target.
+add_library(tglmt_objs OBJECT ${TGLMT_CORE} ${TGLMT_GL} ${TGLMT_METAL})
+target_include_directories(tglmt_objs PUBLIC include)
+set_target_properties(tglmt_objs PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# glsl_to_msl.cpp biên dịch -O3 mất ~29s (file này có MỘT hàm ConvertGLSLtoMSL
+# ~4200 dòng → LLVM CodeGen + optimizer superlinear theo kích thước hàm).
+# Converter CHỈ chạy lúc compile/link shader (không phải mỗi frame) nên hạ
+# optim xuống -O1 không tốn runtime: đo thực tế 0.71ms/convert (-O3) vs
+# 0.74ms (-O1) trên shader nặng nhất → +4% ở thời điểm load, đổi lại build
+# nhanh hơn ~6s.
+set_source_files_properties(src/gl/glsl_to_msl.cpp PROPERTIES COMPILE_OPTIONS "-O1")
+
+add_library(tglmt STATIC $<TARGET_OBJECTS:tglmt_objs>)
 target_include_directories(tglmt PUBLIC include)
 
 if(APPLE AND TGLMT_APPLE_METAL)
@@ -63,7 +87,7 @@ endif()
 # Shared dylib cho launcher (dlopen/dlsym lwjgl): cùng sources với static.
 # Output: libtglmt.dylib (macOS) / libtglmt.dylib arm64 (iOS device).
 if(TGLMT_BUILD_SHARED)
-  add_library(tglmt_shared SHARED ${TGLMT_CORE} ${TGLMT_GL} ${TGLMT_METAL})
+  add_library(tglmt_shared SHARED $<TARGET_OBJECTS:tglmt_objs>)
   target_include_directories(tglmt_shared PUBLIC include)
   set_target_properties(tglmt_shared PROPERTIES
     OUTPUT_NAME tglmt
@@ -80,17 +104,57 @@ endif()
 
 if(TGLMT_BUILD_TESTS)
   enable_testing()
-  file(GLOB TGLMT_TESTS CONFIGURE_DEPENDS tests/unit/*.cpp tests/integration/*.cpp)
+  file(GLOB TGLMT_TESTS CONFIGURE_DEPENDS
+       tests/unit/*.cpp tests/integration/*.cpp tests/regression/*.cpp
+       tests/api/*.cpp tests/conformance/*.cpp tests/shaders/*.cpp)
+  # PCH DÙNG CHUNG cho mọi test: 140/167 file đều include "tglmt/gl46.h" +
+  # "tglmt/Context.h" (Context.h kéo theo MetalInterface.h + GLSLConverter.h).
+  # Không có PCH thì mỗi test parse lại ~4k dòng header → ~1.2s/test →
+  # ~200s CPU cho 167 test.
+  # Một PCH cho TẤT CẢ test (REUSE_FROM) — không phải PCH riêng cho từng
+  # target: 167 bản PCH (~30MB mỗi bản) sẽ đầy đĩa.
+  add_library(tglmt_test_pch OBJECT EXCLUDE_FROM_ALL tests/pch_stub.cpp)
+  target_precompile_headers(tglmt_test_pch PRIVATE
+    <tglmt/gl46.h> <tglmt/Context.h>)
   foreach(T ${TGLMT_TESTS})
     get_filename_component(NAME ${T} NAME_WE)
     add_executable(${NAME} ${T})
     target_link_libraries(${NAME} PRIVATE tglmt)
+    target_precompile_headers(${NAME} REUSE_FROM tglmt_test_pch)
+    target_include_directories(${NAME} PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     target_compile_definitions(${NAME} PRIVATE
-      TGLMT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus/mc-26.1.2-shaders")
-    add_test(NAME ${NAME} COMMAND ${NAME})
+      TGLMT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus/mc-26.1.2-shaders"
+      TGLMT_ROOT="${CMAKE_SOURCE_DIR}")
+    # WORKING_DIRECTORY = source dir: 10 test dùng đường dẫn tương đối tới
+    # fixture (shaders/*.metal, apps/aquarium/shaders/...) nên khi chạy từ
+    # build dir chúng tự SKIP — ctest vẫn báo PASS ⇒ mất ngay các test pixel
+    # mạnh nhất của repo (blend, msaa, raster, rop, spirv chain, tess...).
+    add_test(NAME ${NAME} COMMAND ${NAME} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
   endforeach()
 
   # Diagnostic runtime probe for known static gaps (not a CTest gate).
   add_executable(truth_probe tests/truth/probe_gaps.cpp)
   target_link_libraries(truth_probe PRIVATE tglmt)
+
+  # --- Benchmarks -------------------------------------------------------
+  # Đo thời gian biên dịch shader + hiệu năng runtime. KHÔNG phải CTest gate
+  # (số đo phụ thuộc máy) — chạy tay và lưu JSON vào benchmarks/<phase>/.
+  file(GLOB TGLMT_BENCH CONFIGURE_DEPENDS
+       benchmarks/compilation/*.cpp benchmarks/compilation/*.mm
+       benchmarks/runtime/*.cpp)
+  foreach(B ${TGLMT_BENCH})
+    get_filename_component(BN ${B} NAME_WE)
+    add_executable(${BN} ${B})
+    target_link_libraries(${BN} PRIVATE tglmt)
+    target_include_directories(${BN} PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    if(B MATCHES "\\.mm$")
+      # bench_upload.mm đo API Metal thô (đường shared storage = iOS/A11).
+      enable_language(OBJCXX)
+      set_source_files_properties(${B} PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc" LANGUAGE OBJCXX)
+      if(APPLE)
+        target_link_libraries(${BN} PRIVATE "-framework Metal" "-framework Foundation")
+      endif()
+    endif()
+  endforeach()
 endif()

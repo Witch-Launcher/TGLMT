@@ -190,6 +190,9 @@ void Context::FlushPendingEncoder() {
     pendingDepthState.reset();
     pendingFillValid = false;
     pendingScissorValid = false;
+    // Bind state thuộc encoder cũ → encoder mới bắt đầu từ state mặc định
+    // Metal ⇒ phải reset để draw sau bind lại (nếu không sẽ đọc texture/buffer
+    // của draw trước).
     pendingKeep.clear();
     pendingUsedBuffers.clear();
     pendingUsedTextures.clear();

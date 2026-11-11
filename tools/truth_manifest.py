@@ -30,11 +30,21 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import gl46_catalog
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GLXML = ROOT / "docs/khronos/gl.xml"
 GL_ERR = ROOT / "src/gl/gl_error_string_debug.cpp"
 SRC_GL = ROOT / "src/gl"
-TEST_DIRS = (ROOT / "tests/unit", ROOT / "tests/integration")
+TEST_DIRS = (
+    ROOT / "tests/unit",
+    ROOT / "tests/integration",
+    ROOT / "tests/regression",
+    ROOT / "tests/api",
+    ROOT / "tests/conformance",
+    ROOT / "tests/shaders",
+)
 OUT_JSON = ROOT / "tests/truth/api_manifest.json"
 OUT_MD = ROOT / "docs/TRUTH_MANIFEST.md"
 
@@ -55,36 +65,25 @@ def strip_comments(text):
 
 
 def parse_core_versions():
-    """Return {function: sorted versions} for the GL 4.6 core profile."""
-    root = ET.parse(str(GLXML)).getroot()
-    current = {}
-    for feature in root.findall("feature"):
-        if feature.get("api") != "gl":
-            continue
-        name = feature.get("name") or ""
-        if not name.startswith("GL_VERSION_") or "ES" in name:
-            continue
-        try:
-            ver = name[len("GL_VERSION_"):].replace("_", ".")
-        except ValueError:
-            continue
-        for req in feature.findall("require"):
-            for cmd in req.findall("command"):
-                fn = cmd.get("name")
-                if fn:
-                    current.setdefault(fn, set()).add(ver)
-    # Match the project's definition of "GL 4.6 core": anything removed by a
-    # later core feature is not part of the 4.6 core surface.
-    for feature in root.findall("feature"):
-        if feature.get("api") != "gl":
-            continue
-        for rm in feature.findall("remove"):
-            for cmd in rm.findall("command"):
-                fn = cmd.get("name")
-                if fn:
-                    current.pop(fn, None)
-    return {fn: sorted(vers, key=lambda v: tuple(int(x) for x in v.split(".")))
-            for fn, vers in current.items()}
+    """Return {function: sorted versions} for the GL 4.6 core profile.
+
+    Delegates to tools/gl46_catalog.py so the measurement layer and the code
+    generators share ONE derivation.  The previous local copy had two defects:
+    it ignored ``profile="compatibility"`` on ``<require>`` (42 compat-only
+    entry points were counted as core) and it applied ``<remove>`` blocks
+    after all ``<require>`` blocks instead of in version order (``glGetPointerv``
+    -- removed for core in 3.2, re-required in 4.3 -- was dropped).
+    """
+    core = gl46_catalog.parse_core_commands(GLXML)
+    return {fn: [ver] for fn, ver in core.items()}
+
+
+def parse_compat_only_versions():
+    """Return {function: version} for compatibility-profile-only entry points.
+
+    These are implemented and exported by TGLMT but are NOT OpenGL 4.6 Core.
+    """
+    return dict(gl46_catalog.parse_compat_only_commands(GLXML))
 
 
 def parse_extensions():
@@ -184,14 +183,69 @@ def scan_defs(path, aliases=False):
         body = text[start + 1:end - 1]
         yield m.group(1), classify_body(body), body.strip()[:160]
 
+    # Macro-generated definitions.  The line-oriented regex above cannot see
+    # functions emitted by a macro invocation, e.g.
+    #     #define PK_N(fn, idx, n)  void fn(...) {...} void fn##v(...) {...}
+    #     PK_N(glVertexP2ui, 0, 2);
+    # or
+    #     #define GLMT_UNIFORM_MATRIX_FV(fn, cols, rows) void fn(...) {...}
+    #     GLMT_UNIFORM_MATRIX_FV(glUniformMatrix2fv, 2, 2)
+    # Without this branch those functions were mislabelled "symbol-only"
+    # even though `nm` proves they are defined text symbols.
+    #
+    # Dò tên macro TỔNG QUÁT: mọi "#define NAME(...)" có '{' trong thân đều
+    # là macro sinh hàm; mọi lời gọi "NAME(glXxx, ...)" sinh ra hàm glXxx.
+    macro_defs = {}
+    for m in re.finditer(r"(?m)^[ \t]*#\s*define\s+([A-Z][A-Z0-9_]*)\s*\(([^)]*)\)(.*)$",
+                         text):
+        # Thân macro có thể trải nhiều dòng (nối bằng backslash) → phải gom
+        # TOÀN BỘ thân, nếu không sẽ không thấy dấu '{' nằm ở dòng sau.
+        body = m.group(3)
+        end = m.end()
+        while body.rstrip().endswith("\\") and end < len(text):
+            nl = text.find("\n", end)
+            if nl < 0:
+                break
+            body += "\n" + text[end:nl]
+            end = nl + 1
+        macro_defs[m.group(1)] = body
+    if not macro_defs:
+        return
+    for name, body in list(macro_defs.items()):
+        if "{" not in body:
+            continue
+        for inv in re.finditer(r"\b" + re.escape(name) + r"\s*\(\s*(gl[A-Za-z0-9_]+)",
+                               text):
+            base = inv.group(1)
+            yield base, "real", "macro-generated"
+            # Token-paste "fn##v" → sinh thêm biến thể "v".
+            if "##" in body and base.endswith("ui"):
+                yield base + "v", "real", "macro-generated"
+
+
 
 # No-ops that are explicitly allowed by the GL spec (performance hints or
 # operations whose post-state is undefined). Everything else is a static gap.
+#
+# NOTE: the previous version of this function granted "allowed:discard" to ANY
+# function whose name started with "glInvalidate", purely by name prefix.  That
+# is not a spec check: the *discard* half of the behaviour is legal (the
+# post-invalidate contents are undefined), but GL 4.6 still mandates error
+# generation for bad arguments.  The five Invalidate entry points below did
+# not generate those errors, so they are recorded as gaps rather than being
+# silently excused.
+NOOP_ALLOWED = {
+    # GL 4.6 §17.2: hints may be silently ignored.  (glHint still has to
+    # raise INVALID_ENUM for an unknown target -- tracked separately.)
+    "glHint",
+    # Pure hint, no errors listed in the spec.
+    "glReleaseShaderCompiler",
+}
+
+
 def noop_triage(fn):
-    if fn in {"glHint", "glReleaseShaderCompiler"}:
+    if fn in NOOP_ALLOWED:
         return "allowed:hint"
-    if fn.startswith("glInvalidate"):
-        return "allowed:discard"
     return "gap"
 
 
@@ -205,6 +259,137 @@ def classify_body(body):
     if re.fullmatch(r"(?:tglmt::)?gl::(gl[A-Za-z0-9_]+)\s*\([^;]*\)\s*;", clean):
         return "alias"
     return "real"
+
+
+# --- Enum correctness -------------------------------------------------------
+# Bug class #1 (đã gặp thật trong TGLMT): hàm ghi state dưới MÃ ENUM KHÔNG tồn tại
+# trong registry (vd 0x8C51 thay vì GL_MIN_SAMPLE_SHADING_VALUE=0x8C37) → query
+# đọc lại luôn trả 0, app tưởng chưa set. Đây là "real" về hình thức nên
+# classify_body không bắt được. Ta đối chiếu MỌI hằng hex dùng làm pname trong
+# SetShadow/GetShadow với danh sách enum của gl.xml.
+def _enum_values():
+    """{enum_name: value} cho mọi enum trong gl.xml."""
+    root = ET.parse(str(GLXML)).getroot()
+    out = {}
+    for e in root.iter("enum"):
+        n, v = e.get("name"), e.get("value")
+        if n and v:
+            try:
+                out.setdefault(n, int(v, 0))
+            except ValueError:
+                pass
+    return out
+
+
+def _valid_pnames():
+    """Tập giá trị hợp lệ cho pname: mọi enum có group GetPName/EnableCap/
+    GetPName, cộng mọi giá trị enum bất kỳ (state pname riêng của app)."""
+    root = ET.parse(str(GLXML)).getroot()
+    vals = set()
+    for e in root.iter("enum"):
+        v = e.get("value")
+        if not v:
+            continue
+        try:
+            vals.add(int(v, 0))
+        except ValueError:
+            pass
+    return vals
+
+
+# Pname "private" của TGLMT: dùng để tra cứu nội bộ, không phải enum GL.
+# Danh sách này phải được cập nhật khi thêm pname mới.
+_PRIVATE_PNAMES = {
+    0x825A,  # PROGRAM_PIPELINE_BINDING (đã là enum GL thật — giữ để rà)
+}
+
+
+def find_bad_enum_pnames():
+    """Trả về [(file, line, hexvalue, hint)] cho mọi SetShadow/GetShadow dùng
+    hằng hex KHÔNG phải enum nào trong gl.xml.
+
+    Đây không phải lỗi tuyệt đối (TGLMT có pname nội bộ), nhưng mọi pname
+    PHẢI được glGet trả lại đúng → hằng sai = query sai. Đánh dấu để review.
+    """
+    valid = _valid_pnames()
+    out = []
+    for path in sorted(SRC_GL.glob("*.cpp")):
+        if path.name in GENERATED:
+            continue
+        for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            if "SetShadow" not in line and "GetShadow" not in line:
+                continue
+            for m in re.finditer(r"0[xX]([0-9A-Fa-f]+)", line):
+                try:
+                    v = int(m.group(1), 16)
+                except ValueError:
+                    continue
+                if v in valid:
+                    continue
+                out.append((str(path.relative_to(ROOT)), i, hex(v), line.strip()[:110]))
+    return out
+
+
+# --- Shadow-only detection --------------------------------------------------
+# Bug class #2: hàm chỉ ghi state (SetShadow) mà KHÔNG hành động gì khác —
+# state được set nhưng draw path / pipeline không đọc → app đặt xong không
+# thấy tác dụng. classify_body gọi đây là "real" nên không bắt được.
+def find_shadow_only():
+    """Trả về [(fn, file)] cho hàm mà body CHỈ ghi state mà state đó KHÔNG
+    được đọc lại ở bất kỳ đâu trong src/.
+
+    Bug class #2 (đã gặp thật): hàm chỉ ghi state (SetShadow) mà draw path /
+    pipeline không đọc → app đặt xong không thấy tác dụng. classify_body gọi
+    đây là "real" nên không bắt được.
+    """
+    # Gom mọi pname được ĐỌC lại (GetShadow) trong toàn src.
+    read_pnames = set()
+    for path in sorted(SRC_GL.glob("*.cpp")):
+        if path.name in GENERATED:
+            continue
+        for line in path.read_text(errors="replace").splitlines():
+            if "GetShadow" not in line:
+                continue
+            for m in re.finditer(r"0[xX]([0-9A-Fa-f]+)", line):
+                read_pnames.add(int(m.group(1), 16))
+    # Và mọi pname được đọc qua accessor có tên (vd GetScissor(idx)).
+    out = []
+    for path in sorted(SRC_GL.glob("*.cpp")):
+        if path.name in GENERATED:
+            continue
+        text = strip_comments(path.read_text(errors="replace"))
+        for fn, kind, body in scan_defs(path):
+            if kind != "real":
+                continue
+            calls = re.findall(r"([A-Za-z_][\w:.]*)\s*\(", body)
+            setters = ("SetShadow", "SetEnabled", "SetEnabledI", "SetColorMask",
+                       "SetPolygonOffset", "SetCullFace", "SetFrontFace")
+            sig = [c for c in calls if c.split(".")[-1] in setters]
+            if not sig:
+                continue
+            other = [c for c in calls if c.split(".")[-1] not in setters]
+            # Hàm có side effect thật ngoài state (Record lỗi, flush encoder,
+            # gọi hàm khác) → không phải shadow-only.
+            if any(c.split(".")[-1] in ("Record", "std", "if", "for", "return")
+                   or c.startswith("c.state") for c in other):
+                continue
+            if any(c.split(".")[-1] not in
+                   ("SetShadow", "SetEnabled", "SetEnabledI", "SetColorMask",
+                    "SetPolygonOffset", "SetCullFace", "SetFrontFace", "GetShadow")
+                   for c in other):
+                continue
+            # Hằng pname mà hàm này ghi ra.
+            written = set()
+            for m in re.finditer(r"0[xX]([0-9A-Fa-f]+)", body):
+                written.add(int(m.group(1), 16))
+            if not written:
+                continue
+            # Nếu pname nào trong số đó được GetShadow đọc lại → state có
+            # đường vào → không phải shadow-only.
+            if written & read_pnames:
+                continue
+            out.append((fn, str(path.relative_to(ROOT)), sorted(hex(v) for v in written)))
+    return out
 
 
 def build_impl_map():
@@ -282,6 +467,22 @@ def main():
             "tests": refs(fn),
         })
 
+    # Compatibility-profile-only entry points.  Implemented and exported, but
+    # NOT part of the OpenGL 4.6 Core Profile -- tracked separately so the
+    # core coverage number is never inflated by them.
+    compat_rows = []
+    for fn in sorted(parse_compat_only_versions()):
+        meta = impl.get(fn, {})
+        compat_rows.append({
+            "name": fn,
+            "versions": [parse_compat_only_versions()[fn]],
+            "symbol": fn in symbols,
+            "impl_file": meta.get("file"),
+            "impl_kind": meta.get("kind", "missing" if fn not in symbols else "symbol-only"),
+            "profile": "compatibility",
+            "tests": refs(fn),
+        })
+
     ext_rows = []
     for name in sorted(all_ext):
         info = all_ext[name]
@@ -320,11 +521,20 @@ def main():
         print(f"symbols: {sym_err}")
     print(f"core functions: {len(core_rows)} | with symbol: {len(core_rows) - len(core_missing)} | missing: {len(core_missing)}")
     print(f"core without direct test refs: {len(core_no_test)}")
+    print(f"compat-profile-only functions (NOT core): {len(compat_rows)} "
+          f"| missing symbol: {len([r for r in compat_rows if not r['symbol']])}")
     print(f"core no-op/constant bodies: {len(core_noop)} ({len(core_noop_gaps)} static gaps, {len(core_noop) - len(core_noop_gaps)} allowed)")
     print(f"extension rows: {len(ext_rows)} | advertised: {len(adv)}")
     print(f"advertised missing symbols: {len(adv_missing)}")
     print(f"advertised no-op/constant: {len(adv_noop)}")
     print(f"advertised with no direct test refs: {len(adv_no_test)}")
+
+    # Bug class #1: pname ghi state bằng hằng không phải enum GL nào → query sai.
+    bad_enum = find_bad_enum_pnames()
+    print(f"state pnames not in gl.xml registry: {len(bad_enum)}")
+    # Bug class #2: hàm chỉ ghi state, không có hành động quan sát được.
+    shadow_only = find_shadow_only()
+    print(f"state-only (shadow-only) functions: {len(shadow_only)}")
 
     if args.write:
         payload = {
@@ -334,6 +544,8 @@ def main():
             "library": str(lib.relative_to(ROOT)) if lib.is_relative_to(ROOT) else str(lib),
             "summary": {
                 "core_functions": len(core_rows),
+                "compat_only_functions": len(compat_rows),
+                "core_catalog_source": "Khronos gl.xml, reg.py PASS-1 profile semantics (tools/gl46_catalog.py)",
                 "core_missing_symbol": len(core_missing),
                 "core_without_test_refs": len(core_no_test),
                 "core_noop_or_constant": len(core_noop),
@@ -345,6 +557,7 @@ def main():
                 "advertised_without_test_refs": len(adv_no_test),
             },
             "core": core_rows,
+            "compat_only": compat_rows,
             "extensions": ext_rows,
         }
         OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
@@ -357,7 +570,8 @@ def main():
             "",
             f"- Git: `{git_state()}`",
             f"- Library: `{payload['library']}`",
-            f"- Core functions: **{len(core_rows)}**",
+            f"- Core functions: **{len(core_rows)}** (canonical OpenGL 4.6 Core Profile, Khronos registry)",
+            f"- Compatibility-profile-only functions (NOT core): **{len(compat_rows)}**",
             f"- Core missing symbol: **{len(core_missing)}**",
             f"- Core without direct test references: **{len(core_no_test)}**",
             f"- Core no-op/constant bodies: **{len(core_noop)}** (**{len(core_noop_gaps)} static gaps**, {len(core_noop) - len(core_noop_gaps)} spec-allowed)",

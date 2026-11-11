@@ -139,6 +139,11 @@ struct TextureObject {
     // đến từ render, CPU shadow luôn rỗng → probe iconatlas# đọc GPU trực tiếp.
     bool wasRT = false;
     std::unordered_map<GLenum, GLint> params; // MIN_FILTER/WRAP_S/...
+    // Float-valued texture params (GL_ARB_texture_filter_anisotropic:
+    // TEXTURE_MAX_ANISOTROPY là float; TEXTURE_LOD_BIAS, TEXTURE_MAX_ANISOTROPY_EXT).
+    // Trước đây chỉ có map int → glTexParameterf ép về int → mất phần thập phân
+    // và draw path không đọc → texture-level anisotropy KHÔNG bao giờ áp dụng.
+    std::unordered_map<GLenum, GLfloat> fparams;
     // EXT_texture_swizzle: GL_TEXTURE_SWIZZLE_RGBA decode tại glTexParm.
     // Code = MTLTextureSwizzle (0=Zero,1=One,2=R,3=G,4=B,5=A); mặc định
     // identity {R,G,B,A}. Bind lúc draw → ITexture::swizzledView (gl_apple_draw).
@@ -210,6 +215,11 @@ struct ShaderObject {
 
 struct ProgramObject {
     GLuint id = 0;
+    // Số lần link. Tăng mỗi lần glLinkProgram thành công. Dùng làm một
+    // phần của khoá cache pipeline: nếu chỉ dựa vào identity của ILibrary
+    // thì vẫn có thể trùng nếu allocator trả lại cùng địa chỉ. Với link
+    // generation, cache KHÔNG BAO GIỜ trả nhầm pipeline của shader cũ.
+    uint64_t linkGen = 0;
     std::vector<GLuint> shaders;
     bool linked = false;
     bool validateStatus = false;
@@ -220,8 +230,35 @@ struct ProgramObject {
     std::string infoLog;
     std::string vertexMSL, fragmentMSL, computeMSL;
     std::unordered_map<std::string, GLint> uniformLoc;   // name -> loc
-    std::unordered_map<GLint, std::vector<uint8_t>> uniforms; // loc -> bytes
+    // loc -> (spec + bytes) — GỘP 2 map vào 1 để mỗi lệnh uniform chỉ cần
+    // MỘT phép tra hash thay vì hai (spec + bytes). Đây là đường nóng: app
+    // gọi glUniform* hàng trăm lần mỗi frame.
+    struct UniformSlot {
+        std::vector<uint8_t> bytes;
+        // Thông tin uniform theo location (GL 4.6 §7.6.1) — dùng để kiểm tra
+        // lệnh uniform theo đúng lỗi mà spec yêu cầu.
+        // type == 0 ⇒ không xác định được kiểu (converter đã prune) ⇒ permissive.
+        struct Spec {
+            uint32_t type = 0;   // GL_FLOAT_VEC4, GL_SAMPLER_2D, GL_FLOAT_MAT3, ...
+            GLint arraySize = 1; // số phần tử mảng (1 = không phải mảng)
+            bool isSampler = false;
+            bool isImage = false;
+            // Kiểu byte đang lưu (GL_FLOAT/GL_INT/GL_UNSIGNED_INT/GL_DOUBLE)
+            // — cập nhật mỗi lần nạp, để glGetUniform* chuyển đổi về kiểu
+            // yêu cầu (spec: "Type conversion is done by the GL").
+            uint32_t storeType = 0;
+        } spec;
+    };
+    std::unordered_map<GLint, UniformSlot> uniforms; // loc -> slot
+    // (Spec của uniform đã gộp vào UniformSlot trong `uniforms` — tra uniform
+    // theo location chỉ cần MỘT phép tra hash, thay vì hai.)
     bool separable = false;
+    // ARB_get_program_binary: app báo "binary này sẽ được lấy sau".
+    // Mặc định TRUE (khác spec ghi FALSE) vì TGLMT luôn giữ GLSL gốc — binary
+    // (source) luôn sẵn có, nên chặn mặc định sẽ phá app đã gọi
+    // GetProgramBinary mà không set hint. Set FALSE → GetProgramBinary báo
+    // INVALID_OPERATION (spec §7.5 / ARB_get_program_binary).
+    bool binaryRetrievable = true;
     // Transform feedback varyings (glTransformFeedbackVaryings, gọi trước link)
     std::vector<std::string> xfbVaryings;
     GLenum xfbBufferMode = 0x8C8C; // INTERLEAVED_ATTRIBS mặc định
@@ -264,7 +301,14 @@ struct ProgramObject {
     // T4b stage 2: uniform (không phải block/sampler) theo TỪNG stage tess.
     // Mỗi stage có TGLMTUniforms riêng nên backend copy từ pr.uniforms[loc]
     // vào buffer stage-local trước khi bind buffer(16).
-    struct StageUniform { std::string name; size_t offset = 0, size = 0; };
+    struct StageUniform {
+        std::string name;
+        size_t offset = 0, size = 0;
+        // Kiểu GLSL + số phần tử mảng — cần để nới cột ma trận khi đóng gói
+        // dữ liệu GL (column-major chặt) vào layout MSL (cột stride 16).
+        std::string glslType;
+        int arraySize = 0;
+    };
     std::vector<StageUniform> vsUniforms, tcsUniforms, tesUniforms, fsUniforms;
     size_t vsUniformBytes = 0, tcsUniformBytes = 0, tesUniformBytes = 0, fsUniformBytes = 0;
     // T4b stage 2: sampler theo TỪNG stage. texSlot = thứ tự khai báo trong
@@ -283,6 +327,12 @@ struct ProgramObject {
         GLint loc = -1; // điền khi glGetUniformLocation
         bool isVS = true;
         GLenum glType = 0; // P10: GL enum type (FLOAT_VEC4...) cho program_interface_query
+        // Kiểu GLSL của uniform ("mat3", "vec4", ...). Cần để biết layout byte
+        // MSL khi đóng gói dữ liệu: MSL float3x3 = 3 cột float3 stride 16 (=48B)
+        // còn GL mat3 = 9 float column-major chặt (=36B) → phải nới cột.
+        std::string glslType;
+        // Số phần tử của mảng uniform (0 = không phải mảng).
+        int arraySize = 0;
     };
     std::vector<UniformEntry> uniformLayout;
     // P10b: reflection glGetActiveUniform (Iris ProgramUniforms.buildUniforms đọc
@@ -295,6 +345,13 @@ struct ProgramObject {
         GLint size = 1;
     };
     std::vector<ActiveUniform> activeUniforms;
+    // glGetActiveAttrib reflection — điền lúc link từ vsC.inputs (ACTIVE attrs).
+    struct ActiveAttrib {
+        std::string name;
+        GLenum type = 0;
+        GLint size = 1;
+    };
+    std::vector<ActiveAttrib> activeAttribs;
     struct FragOutput {
         std::string name;
         GLint location = 0;
@@ -436,6 +493,13 @@ inline GLint DrawBufferAttachmentIndex(GLenum db) {
 struct FramebufferObject {
     GLuint id = 0;
     std::unordered_map<GLenum, GLuint> colorTex; // attachment -> texture id
+    // Loại object đính kèm + tên object GỐC (spec §9.2): attach renderbuffer
+    // phải báo OBJECT_TYPE = GL_RENDERBUFFER, OBJECT_NAME = tên renderbuffer.
+    // Trước đây TGLMT flatten renderbuffer thành texture ⇒ báo sai.
+    std::unordered_map<GLenum, GLenum> colorObjType; // 0 = none, GL_TEXTURE, GL_RENDERBUFFER
+    std::unordered_map<GLenum, GLuint> colorObjName; // tên texture hoặc renderbuffer
+    GLenum depthObjType = 0, stencilObjType = 0, depthStencilObjType = 0;
+    GLuint depthObjName = 0, stencilObjName = 0, depthStencilObjName = 0;
     // Mip level của từng attachment (vanilla 26.x bake animation per-mip qua
     // GlTextureView(texture, baseMipLevel, 1) + bindFrameBufferTextures(..., level)).
     // Bỏ qua level (luôn 0) làm mọi mip bake alias level 0 → smear atlas.
@@ -929,6 +993,10 @@ public:
     bool pendingScissorValid = false;
     bool pendingScissorEnabled = false;
     metal::ScissorRect pendingScissor{0,0,0,0};
+    // Bind-state dedupe KHÔNG đặt ở Context: mọi site bind (tess/capture/
+    // atomic/image) đều phải cập nhật thì dễ quên → cache sai → đọc nhầm
+    // buffer. Thay vào đó chính IRenderEncoder tự nhớ state đã encode (state
+    // Metal sống trong encoder) và bỏ qua lệnh lặp. Xem MetalInterface.h.
     // Uniform staging cache: program → bytes lần cuối đã upload (tránh newBuffer mỗi draw
     // khi uniforms không đổi). Chỉ dùng cho vs/fsUB 16-slot; UBO per-draw vẫn upload
     // vì buffer source có thể đổi qua glBufferSubData.
@@ -945,8 +1013,14 @@ public:
     // Nếu key giống pending → tái dùng pendingPipeline, BỎ CẢ bridge lookup
     // (trước đây mỗi draw vẫn build string + mutex dù đã cache PSO).
     struct PipelineKey {
-        const void* vsLib = nullptr;
-        const void* fsLib = nullptr;
+        // identity của ILibrary (serial ổn định theo vòng đời), KHÔNG phải
+        // con trỏ: relink tạo library mới có thể trùng địa chỉ cũ ⇒ cache
+        // trả về pipeline của shader cũ (shader mới không bao giờ chạy).
+        uint64_t vsLib = 0;
+        uint64_t fsLib = 0;
+        // Số lần link của program (xem ProgramObject::linkGen) — đảm bảo
+        // cache KHÔNG BAO GIỜ trùng khoá dù identity có bị trùng.
+        uint64_t programGen = 0;
         metal::PixelFormat fmt = metal::PixelFormat::Invalid;
         uint32_t stride = 0;
         bool depth = false;
@@ -962,7 +1036,8 @@ public:
         uint32_t nAttribs = 0;
         metal::CustomAttrib attribs[16] = {};
         bool operator==(const PipelineKey& o) const {
-            if (vsLib != o.vsLib || fsLib != o.fsLib || fmt != o.fmt ||
+            if (vsLib != o.vsLib || fsLib != o.fsLib ||
+                programGen != o.programGen || fmt != o.fmt ||
                 stride != o.stride || depth != o.depth || samples != o.samples ||
                 stencil != o.stencil || colorCount != o.colorCount)
                 return false;

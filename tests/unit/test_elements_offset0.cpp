@@ -2,6 +2,7 @@
 // bound và offset NULL ((void*)0) PHẢI đi đường indexed (spec §10.4), không được
 // nhầm thành drawPrimitives (đọc lố VBO: macOS thoát nhờ zero-pad, iOS ra neon).
 #include "tglmt/gl46.h"
+#include "test_util.h"
 #include "tglmt/Context.h"
 #include <cassert>
 #include <cstdio>
@@ -22,12 +23,12 @@ int main() {
     glGenBuffers(1, &ebo);
     glBindBuffer(0x8893, ebo);
     glBufferData(0x8893, sizeof(idx), idx, 0x88E4);
-    assert(ctx.vaos[vao].elementBuffer == ebo); // EBO là state của VAO
+    TGLMT_CHECK((ctx.vaos[vao].elementBuffer == ebo), "ctx.vaos[vao].elementBuffer == ebo"); // EBO là state của VAO
     ctx.device->clearTrace();
     glDrawElements(0x0004, 6, 0x1405, (void*)0); // offset 0 + EBO → INDEXED
     auto& tr = ctx.device->drawTrace();
-    assert(tr.size() == 1);
-    assert(tr[0].indexed && tr[0].count == 6);
+    TGLMT_CHECK((tr.size() == 1), "tr.size() == 1");
+    TGLMT_CHECK((tr[0].indexed && tr[0].count == 6), "tr[0].indexed && tr[0].count == 6");
     // Không EBO + NULL → INVALID_OPERATION (thay vì đọc bừa).
     // (Gỡ cả EBO khỏi VAO lẫn binding global.)
     glBindVertexArray(0);
@@ -37,8 +38,8 @@ int main() {
     glBindVertexArray(vao2); // VAO trống, không EBO
     ctx.device->clearTrace();
     glDrawElements(0x0004, 3, 0x1405, nullptr);
-    assert(glGetError() == 0x0502);
-    assert(ctx.device->drawTrace().empty());
+    TGLMT_CHECK((glGetError() == 0x0502), "glGetError() == 0x0502");
+    TGLMT_CHECK((ctx.device->drawTrace().empty()), "ctx.device->drawTrace().empty()");
     printf("test_elements_offset0 PASS\n");
-    return 0;
+    return TGLMT_RESULT;
 }

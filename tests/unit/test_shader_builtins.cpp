@@ -120,6 +120,38 @@ int main() {
     };
 
     int fail = 0;
+    // GLSL `double`/`dvec`/`dmat`: Metal không có kiểu double → converter
+    // hạ xuống float (emulation kiểu ANGLE trên Metal). Độ chính xác bị giảm
+    // (xem docs/METAL_A11_LIMITATIONS.md) nhưng API GL vẫn đúng.
+    {
+        struct D { const char* name; const char* glsl; };
+        const D dcases[] = {
+            {"double_scalar",
+             "#version 460 core\nout vec4 c;\nvoid main(){ double d = 1.0; c = vec4(d);}"},
+            {"double_literal_lf",
+             "#version 460 core\nout vec4 c;\nvoid main(){ double d = 1.5lf; c = vec4(d);}"},
+            {"dvec4",
+             "#version 460 core\nout vec4 c;\nvoid main(){ dvec4 d = dvec4(1.0lf); c = d;}"},
+        };
+        for (const D& dc : dcases) {
+            auto r = ConvertGLSLtoMSL(dc.glsl, 0x8B30);
+            if (!r.ok) {
+                printf("DOUBLE-CONV-FAIL %-18s %s\n", dc.name, r.log.c_str());
+                ++fail;
+                continue;
+            }
+            if (dev) {
+                std::string err;
+                auto lib = dev->compileLibrary(r.msl, err);
+                if (!lib) {
+                    printf("DOUBLE-MSL-FAIL %-14s %s\n", dc.name, err.c_str());
+                    ++fail;
+                    continue;
+                }
+            }
+        }
+    }
+
     for (auto& cs : cases) {
         auto r = ConvertGLSLtoMSL(cs.glsl, cs.stage);
         if (!r.ok) {
@@ -143,8 +175,6 @@ int main() {
     struct Neg { const char* name; uint32_t stage; const char* glsl; };
     std::vector<Neg> negs = {
         {"gl_DrawID", 0x8B31, "#version 460 core\nvoid main(){ gl_Position = vec4(gl_DrawID);}"},
-        {"double_type", 0x8B30,
-         "#version 460 core\nout vec4 c;\nvoid main(){ double d = 1.0; c = vec4(d);}"},
         {"gl_SampleMask_N1", 0x8B30,
          "#version 460 core\nout vec4 c;\nvoid main(){ gl_SampleMask[1] = 1; c = vec4(1);}"},
         // Lưu ý: compute/image/atomic/subroutine CHƯA nằm đây vì P6f/P6g sắp

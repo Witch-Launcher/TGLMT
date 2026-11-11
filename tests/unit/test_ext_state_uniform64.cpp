@@ -95,9 +95,10 @@ int main() {
     Check(glGetError() == GL_INVALID_OPERATION, "getn int64 short buffer");
 
     glVertexAttribL1i64NV(5, (GLint64)0x7FFFFFFFFFFFFFFFLL);
-    GLint64 attr = 0;
-    glGetVertexAttribLi64vNV(5, GL_CURRENT_VERTEX_ATTRIB, &attr);
-    Check(attr == (GLint64)0x7FFFFFFFFFFFFFFFLL, "vertex attrib int64");
+    // CURRENT_VERTEX_ATTRIB trả 4 giá trị (spec NV_vertex_attrib_long_64).
+    GLint64 attr[4] = {0, 0, 0, 0};
+    glGetVertexAttribLi64vNV(5, GL_CURRENT_VERTEX_ATTRIB, attr);
+    Check(attr[0] == (GLint64)0x7FFFFFFFFFFFFFFFLL, "vertex attrib int64");
 
     GLuint vao = 0;
     glGenVertexArrays(1, &vao);

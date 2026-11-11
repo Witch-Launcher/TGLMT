@@ -2,6 +2,7 @@
 // Spec §7 (Programs). Metal: newLibraryWithSource(MSL) + newRenderPipelineState.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include "tglmt/glsl_type.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -10,6 +11,76 @@
 #include <string>
 #include <unordered_map>
 using namespace tglmt;
+
+
+// Dựng bảng loc -> thông tin uniform (GL 4.6 §7.6.1). Gọi 1 lần lúc link
+// để validate glUniform*/glProgramUniform* chỉ tốn O(1) mỗi lệnh — nếu
+// quét danh sách mỗi lệnh thì mỗi frame phải O(uniforms × lệnh).
+//
+// Nguồn kiểu:
+//   • pr.activeUniforms — tên + GL type + số phần tử (đã theo spec: mảng ghi
+//     "name[0]" + size).
+//   • pr.uniformLayout — fallback cho uniform không có trong activeUniforms
+//     (converter prune type lạ), có glType + arraySize.
+//   • danh sách sampler/image — để biết uniform đó là sampler hay image
+//     (spec: chỉ Uniform1i{v} mới nạp được).
+static void BuildUniformSpecMap(ProgramObject& pr) {
+    // (spec đã gộp vào `uniforms`; clear map ở đây để tránh giữ slot cũ.)
+
+    auto isSamplerName = [&](const std::string& nm) {
+        auto in = [&](const std::vector<std::string>& v) {
+            for (const auto& s : v)
+                if (s == nm) return true;
+            return false;
+        };
+        auto inStage = [&](const std::vector<ProgramObject::StageSampler>& v) {
+            for (const auto& s : v)
+                if (s.name == nm) return true;
+            return false;
+        };
+        if (in(pr.vsSamplers) || in(pr.fsSamplers) || in(pr.computeSamplers)) return true;
+        if (inStage(pr.vsCaptureSamplers) || inStage(pr.tcsSamplers) || inStage(pr.tesSamplers) ||
+            inStage(pr.fsTessSamplers))
+            return true;
+        return false;
+    };
+    auto isImageName = [&](const std::string& nm) {
+        auto in = [&](const std::vector<ProgramObject::ImageSlot>& v) {
+            for (const auto& im : v)
+                if (im.name == nm) return true;
+            return false;
+        };
+        return in(pr.vsImages) || in(pr.fsImages) || in(pr.computeImages) ||
+               in(pr.tcsImages) || in(pr.tesImages);
+    };
+
+    for (const auto& kv : pr.uniformLoc) {
+        const std::string& nm = kv.first;
+        const GLint loc = kv.second;
+        ProgramObject::UniformSlot::Spec sp;
+        // 1) Kiểu + kích thước mảng từ activeUniforms.
+        for (const auto& au : pr.activeUniforms) {
+            if (au.name == nm || au.name == nm + "[0]") {
+                sp.type = au.type;
+                sp.arraySize = au.size > 0 ? au.size : 1;
+                break;
+            }
+        }
+        // 2) Fallback: uniformLayout (có glType chính xác + arraySize).
+        if (!sp.type) {
+            for (const auto& e : pr.uniformLayout) {
+                if (e.name != nm) continue;
+                sp.type = e.glType;
+                sp.arraySize = e.arraySize > 0 ? e.arraySize : 1;
+                break;
+            }
+        }
+        // 3) Sampler / image: ưu tiên danh sách chuyên biệt, fallback theo type.
+        sp.isSampler = isSamplerName(nm) || UniformTypeIsSampler(sp.type);
+        sp.isImage = isImageName(nm) || UniformTypeIsImage(sp.type);
+        pr.uniforms[loc].spec = sp;
+    }
+}
 
 namespace tglmt::gl {
 static bool IsIdentChar(char c, bool first) {
@@ -90,6 +161,12 @@ GLuint glCreateShaderProgramv(GLenum type, GLsizei n, const GLchar* const* s) {
 void glDeleteProgram(GLuint p) {
     Context& c = Context::Current();
     GLuint a[1]={p}; c.registry.Delete(ObjectKind::Program, 1, a);
+    // GL 4.6 §7.3: "If a program object is deleted while it is current, the
+    // current program is reverted to 0."  Nếu không, glGetIntegerv(CURRENT_PROGRAM)
+    // trả name đã xoá và glUniform* sinh INVALID_OPERATION oan.
+    if (c.state.BoundProgram() == p) c.state.BindProgram(0);
+    for (auto& kv : c.pipelines)
+        if (kv.second.activeProgram == p) kv.second.activeProgram = 0;
     c.programs.erase(p);
 }
 GLboolean glIsProgram(GLuint p) {
@@ -326,6 +403,7 @@ void glLinkProgram(GLuint p) {
     // (name → loc) VẪN giữ: app cache loc trước link là hành vi được hỗ trợ.
     pr.uniforms.clear();
     pr.attribLoc.clear(); pr.appleVS.reset(); pr.appleFS.reset();
+    pr.activeAttribs.clear();
     pr.appleCS.reset(); pr.appleCSPipeline.reset(); pr.computeMSL.clear();
     pr.computeBlockSlots.clear(); pr.computeSamplers.clear(); pr.computeUBSize = 0;
     pr.vsShaderBlocks.clear(); pr.fsShaderBlocks.clear();
@@ -392,7 +470,8 @@ void glLinkProgram(GLuint p) {
             // Uniforms: 1 stage (isVS=true), offset/size từ converter.
             for (auto& u : its->second.conv.uniforms) {
                 if (u.isSampler) continue;
-                pr.uniformLayout.push_back({u.name, u.uniformOffset, u.uniformSize, -1, true, GlslTypeToGLEnum(u.glslType)});
+                pr.uniformLayout.push_back({u.name, u.uniformOffset, u.uniformSize, -1, true,
+                                            GlslTypeToGLEnum(u.glslType), u.glslType, u.arraySize});
             }
             pr.computeUBSize = its->second.conv.uniformBufferSize;
             // P9 atomic counters: copy slots (binding→slot+offset) cho dispatch bind.
@@ -522,13 +601,14 @@ void glLinkProgram(GLuint p) {
                     pr.uniformLoc[u.name] = loc;
                     if (firstSeen) {
                         pr.uniformLayout.push_back({u.name, u.uniformOffset, u.uniformSize,
-                                                    loc, isVS, ty});
+                                                    loc, isVS, ty, u.glslType, u.arraySize});
                         std::string nm = u.name;
                         GLint sz = (u.arraySize > 0) ? (GLint)u.arraySize : 1;
                         if (u.arraySize > 0) nm += "[0]";
                         pr.activeUniforms.push_back({nm, ty, sz});
                     }
-                    out.push_back({u.name, u.uniformOffset, u.uniformSize});
+                    out.push_back({u.name, u.uniformOffset, u.uniformSize, u.glslType,
+                                   u.arraySize});
                 }
                 bytes = sh.conv.uniformBufferSize;
                 return true;
@@ -760,6 +840,8 @@ void glLinkProgram(GLuint p) {
             if (a.forceUnsignedAttr) cc.first = 2;
             pr.attribFill.push_back({a.location, (uint8_t)cc.second, (uint8_t)cc.first});
             pr.attribLoc[a.name] = a.location;
+            GLenum aty = GlslTypeToGLEnum(a.glslType);
+            if (aty) pr.activeAttribs.push_back({a.name, aty, 1});
         }
         for (auto& s : tcv.tessSlots)
             pr.tessSlots.push_back({s.name, s.slot, s.isInput, s.isPatch, s.isGlIn,
@@ -767,8 +849,9 @@ void glLinkProgram(GLuint p) {
         for (auto& s : tes->conv.tessSlots)
             pr.tessSlots.push_back({s.name, s.slot, s.isInput, s.isPatch, s.isGlIn,
                                     s.mslType, s.count, false});
-        pr.linked = true;
+        pr.linked = true; ++pr.linkGen;
         pr.reflectionComplete = true;
+        BuildUniformSpecMap(pr);
         return;
     }
     if (!pr.computeMSL.empty()) {
@@ -790,8 +873,9 @@ void glLinkProgram(GLuint p) {
                 return;
             }
         }
-        pr.linked = true;
+        pr.linked = true; ++pr.linkGen;
         pr.reflectionComplete = true;
+        BuildUniformSpecMap(pr);
         return;
     }
     if (!hasV && !hasF) { pr.infoLog = "error: graphics program needs a shader"; return; }
@@ -812,7 +896,7 @@ void glLinkProgram(GLuint p) {
         // chưa có pipeline fragment nên vẫn giữ đường trace-only cũ.
         // reflectionComplete giữ false: reflection rỗng (không điền) nên
         // glGetUniformLocation vẫn nới lỏng — không có draw thật để dùng loc.
-        pr.linked = true;
+        pr.linked = true; ++pr.linkGen;
         return;
     }
     // 1. Varying matching: mọi fs.in phải có vs.out cùng tên (đúng GL: thiếu → link lỗi).
@@ -898,6 +982,10 @@ void glLinkProgram(GLuint p) {
                 a.location = assigned;
             }
             pr.attribLoc[a.name] = assigned;
+            {
+                GLenum aty = GlslTypeToGLEnum(a.glslType);
+                if (aty) pr.activeAttribs.push_back({a.name, aty, 1});
+            }
         }
         // Kiểu attribute (cho fill-zero ở AppleDrawGL khi GL array tắt): chỉ các
         // kiểu scalar/vector float/int/uint — mat/bool/double hiếm, không bù.
@@ -941,15 +1029,102 @@ void glLinkProgram(GLuint p) {
         size_t off = 0;
         for (auto& u : vsC.uniforms) {
             if (u.isSampler) continue;
-            pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, true, GlslTypeToGLEnum(u.glslType)});
+            pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, true,
+                                        GlslTypeToGLEnum(u.glslType), u.glslType, u.arraySize});
         }
         pr.vsUBSize = vsC.uniformBufferSize;
         off = (pr.vsUBSize + 15) & ~((size_t)15);
         for (auto& u : fsC.uniforms) {
             if (u.isSampler) continue;
-            pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, false, GlslTypeToGLEnum(u.glslType)});
+            pr.uniformLayout.push_back({u.name, off + u.uniformOffset, u.uniformSize, -1, false,
+                                        GlslTypeToGLEnum(u.glslType), u.glslType, u.arraySize});
         }
         pr.fsUBSize = fsC.uniformBufferSize;
+    }
+    // 4b. GL_ARB_explicit_uniform_location: uniform khai báo layout(location=N)
+    // giữ đúng location N; uniform còn lại được GÁN location trống (không đụng
+    // location explicit) — spec: "The generated locations will never take the
+    // location of a uniform with an explicit location defined in the shader".
+    // Trước đây layout(location=N) bị bỏ qua hoàn toàn → app hardcode loc 3
+    // ghi đè uniform khác (sai hẳn so với GL).
+    {
+        // 1) Thu thập location explicit (ưu tiên VS; FS cùng tên thì phải khớp).
+        std::unordered_map<std::string, GLint> explicitLoc;
+        std::set<GLint> taken;
+        std::unordered_map<GLint, std::string> locOwner; // location → tên uniform chiếm
+        auto collect = [&](const std::vector<GLSLVar>& us) {
+            for (auto& u : us) {
+                if (u.isSampler) continue;
+                if (u.location < 0 || u.location >= kTempLocBase) continue; // chỉ explicit thật
+                auto it = explicitLoc.find(u.name);
+                if (it != explicitLoc.end()) {
+                    if (it->second != u.location) {
+                        pr.infoLog = "error: uniform `" + u.name +
+                                     "` khác location explicit giữa các stage (" +
+                                     std::to_string(it->second) + " vs " +
+                                     std::to_string(u.location) + ")";
+                        return false;
+                    }
+                    continue;
+                }
+                // Hai uniform KHÁC NHAU cùng location explicit → cũng là lỗi
+                // link (spec §7.3: "the location of a uniform must not conflict
+                // with the location of any other uniform").
+                auto own = locOwner.find(u.location);
+                if (own != locOwner.end()) {
+                    pr.infoLog = "error: uniform `" + u.name + "` và `" + own->second +
+                                 "` cùng location explicit " + std::to_string(u.location);
+                    return false;
+                }
+                explicitLoc[u.name] = u.location;
+                locOwner[u.location] = u.name;
+                taken.insert(u.location);
+            }
+            return true;
+        };
+        if (!collect(vsC.uniforms) || !collect(fsC.uniforms)) {
+            pr.linked = false;   // link fail → LINK_STATUS=0 (MC báo lỗi shader)
+            return;
+        }
+        // 2) Gán location cho uniform còn lại, bỏ qua location đã explicit chiếm.
+        //    uniformLoc đã có (app cache trước link) → giữ nguyên nếu còn trống.
+        GLint next = 0;
+        for (auto& kv : pr.uniformLoc) {
+            if (explicitLoc.count(kv.first)) continue; // explicit thắng
+            next = std::max(next, kv.second + 1);
+        }
+        for (auto& [name, loc] : explicitLoc) {
+            pr.uniformLoc[name] = loc;
+        }
+        // Cùng một uniform khai ở CẢ VS và FS là MỘT uniform → phải cùng
+        // location (spec §7.3). uniformLayout có 2 entry cùng tên (mỗi stage
+        // một bản sao) → phải dùng chung location, nếu không VS nhận loc 0 còn
+        // FS nhận loc 1 thì glUniform*(loc) chỉ tới 1 stage → VS đọc 0.
+        std::unordered_map<std::string, GLint> assigned;
+        for (auto& e : pr.uniformLayout) {
+            if (e.loc >= 0) continue;               // đã gán
+            auto ex = explicitLoc.find(e.name);
+            if (ex != explicitLoc.end()) {
+                e.loc = ex->second;
+                assigned[e.name] = ex->second;
+                continue;
+            }
+            auto as = assigned.find(e.name);
+            if (as != assigned.end()) { e.loc = as->second; continue; }
+            auto old = pr.uniformLoc.find(e.name);
+            if (old != pr.uniformLoc.end() && !taken.count(old->second)) {
+                e.loc = old->second;
+                taken.insert(old->second);
+                assigned[e.name] = old->second;
+                continue;
+            }
+            while (taken.count(next)) ++next;
+            e.loc = next;
+            taken.insert(next);
+            assigned[e.name] = next;
+            pr.uniformLoc[e.name] = next;
+            ++next;
+        }
     }
     RefreshSubroutines(c, pr);
     // 4c. GL_ACTIVE_UNIFORMS reflection — glGetActiveUniform phải trả type/size
@@ -959,6 +1134,17 @@ void glLinkProgram(GLuint p) {
     // UV = 0 → terrain/entity đen (CR r5.9.3, iPhone 8 Plus build 107).
     // Name mảng theo spec GL: "name[0]" + size = số phần tử.
     pr.activeUniforms.clear();
+    pr.activeAttribs.clear();
+    {
+        std::set<std::string> seenA;
+        for (auto& a : vsC.inputs) {
+            if (a.isSampler || a.isImage || a.isAtomicCounter) continue;
+            if (!seenA.insert(a.name).second) continue;
+            GLenum aty = GlslTypeToGLEnum(a.glslType);
+            if (!aty) continue;
+            pr.activeAttribs.push_back({a.name, aty, 1});
+        }
+    }
     pr.fragOutputs.clear();
     for (size_t i = 0; i < fsC.outputs.size(); ++i) {
         auto& o = fsC.outputs[i];
@@ -971,10 +1157,20 @@ void glLinkProgram(GLuint p) {
         else if (fb != pr.fragDataBind.end()) loc = (GLint)fb->second.color;
         else loc = (GLint)i;
         if (fb != pr.fragDataBind.end()) outIdx = fb->second.index;
-        // Single-output converter luôn phát [[color(0)]] (bất kể layout/binding);
-        // MRT dùng [[color(location tạm 900+)]]. Viết lại đúng nguồn.
-        int srcColor = (fsC.outputs.size() > 1) ? o.location : 0;
-        pr.fragmentMSL = RewriteColorIndex(pr.fragmentMSL, srcColor, loc);
+        else outIdx = (GLuint)o.index; // layout(location, index) — dual-source
+        // srcColor = index [[color(N)]] mà converter đã emit; dstColor = GL
+        // location cuối + dual-source index.
+        //   • MRT (>1 output): converter emit [[color(location+index)]] — khớp.
+        //   • Struct 1 output (có gl_FragDepth/sample mask): emit [[color(0)]]
+        //     trừ khi output có layout tường minh.
+        //   • Đường trả float4 trần: KHÔNG có [[color]] nào để sửa.
+        int srcColor;
+        if (fsC.outputs.size() > 1) srcColor = o.location + o.index;
+        else if (fsC.fragStructOutputs)
+            srcColor = o.hasExplicitLocation ? (o.location + o.index) : 0;
+        else srcColor = -1; // không có [[color]] trong MSL
+        int dstColor = loc + (int)outIdx;
+        if (srcColor >= 0) pr.fragmentMSL = RewriteColorIndex(pr.fragmentMSL, srcColor, dstColor);
         pr.fragOutputs.push_back({o.name, loc, GlslTypeToGLEnum(o.glslType), outIdx});
         o.location = loc; // để debug/reflection phía sau
     }
@@ -1207,8 +1403,9 @@ void glLinkProgram(GLuint p) {
                             nTintProg, p, e.name.c_str(), e.offset, e.size, e.loc, (int)e.isVS);
         }
     }
-    pr.linked = true;
+    pr.linked = true; ++pr.linkGen;
     pr.reflectionComplete = true;
+    BuildUniformSpecMap(pr);
     (void)hasF;
     // 5. Apple backend: biên dịch MTLLibrary ngay tại link (lỗi biên dịch → link fail thật).
     // Kèm excerpt MSL để log MC hiện đủ nguyên nhân từ xa (không cần DumpProgramMSL).
@@ -1334,7 +1531,18 @@ void glProgramParameteri(GLuint p, GLenum n, GLint v) {
     Context& c = Context::Current();
     auto it = c.programs.find(p);
     if (it == c.programs.end()) { c.errors.Record(0x0502); return; }
-    if (n == 0x8258 && v) it->second.separable = true; // PROGRAM_SEPARABLE
+    if (n == 0x8258) {
+        // PROGRAM_SEPARABLE
+        if (v != 0 && v != 1) { c.errors.Record(0x0501); return; } // value phải TRUE/FALSE
+        it->second.separable = (v != 0);
+    } else if (n == 0x8257) {
+        // GL_ARB_get_program_binary: app tắt hint → glGetProgramBinary phải báo
+        // INVALID_OPERATION (binary không còn được phép lấy).
+        if (v != 0 && v != 1) { c.errors.Record(0x0501); return; }
+        it->second.binaryRetrievable = (v != 0);
+    } else {
+        c.errors.Record(0x0500); // INVALID_ENUM: pname lạ (spec §7.3)
+    }
 }
 void glBindAttribLocation(GLuint p, GLuint i, const GLchar* n) {
     Context& c = Context::Current();
@@ -1418,6 +1626,15 @@ void glGetProgramBinary(GLuint p, GLsizei n, GLsizei* l, GLenum* f, void* b) {
         return;
     }
     auto& pr = it->second;
+    // GL_ARB_get_program_binary: app đã tắt PROGRAM_BINARY_RETRIEVABLE_HINT →
+    // không có binary hợp lệ để lấy → INVALID_OPERATION (spec §7.5).
+    if (!pr.binaryRetrievable) {
+        c.errors.Record(0x0502);
+        if (l) *l = 0;
+        if (f) *f = 0;
+        if (b && n > 0) memset(b, 0, (size_t)n);
+        return;
+    }
     std::vector<const ShaderObject*> sh = BinShaders(c, pr);
     // Chưa link / không có nguồn → không có binary (length=0 = "không có", đúng
     // spec — caller đọc length trước khi cấp buffer).
@@ -1507,7 +1724,7 @@ void glActiveShaderProgram(GLuint pl, GLuint pr) {
 void glBindProgramPipeline(GLuint p) {
     Context& c = Context::Current();
     if (p && !c.pipelines.count(p)) { c.errors.Record(0x0502); return; }
-    c.state.SetShadow(0x8254 /*PROGRAM_PIPELINE_BINDING*/, &p, 4);
+    c.state.SetShadow(0x825A /*PROGRAM_PIPELINE_BINDING*/, &p, 4);
 }
 void glGenProgramPipelines(GLsizei n, GLuint* p) {
     Context& c = Context::Current();
@@ -1522,13 +1739,13 @@ void glCreateProgramPipelines(GLsizei n, GLuint* p) {
 void glDeleteProgramPipelines(GLsizei n, const GLuint* p) {
     Context& c = Context::Current();
     GLuint bound = 0;
-    c.state.GetShadow(0x8254, &bound, 4);
+    c.state.GetShadow(0x825A /*PROGRAM_PIPELINE_BINDING*/, &bound, 4);
     bool unbind = false;
     for (GLsizei i = 0; i < n; ++i) {
         if (bound && p[i] == bound) unbind = true;
         c.pipelines.erase(p[i]);
     }
-    if (unbind) { GLuint z = 0; c.state.SetShadow(0x8254, &z, 4); }
+    if (unbind) { GLuint z = 0; c.state.SetShadow(0x825A /*PROGRAM_PIPELINE_BINDING*/, &z, 4); }
     c.registry.Delete(ObjectKind::ProgramPipeline, n, p);
 }
 GLboolean glIsProgramPipeline(GLuint p) { return Context::Current().registry.Is(ObjectKind::ProgramPipeline, p) ? 1 : 0; }

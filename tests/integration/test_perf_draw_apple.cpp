@@ -142,6 +142,10 @@ int main() {
     printf("perf mid=(%u,%u,%u)\n", mid[0], mid[1], mid[2]);
     if (mid[0] < 200) { printf("test_perf_draw_apple FAIL: pixels\n"); return 1; }
     double n = (double)dn;
+    printf("perf pipeLookups=%llu pipeLookupSkipped=%llu noPipeline=%llu\n",
+           (unsigned long long)ctx.appleStats.pipelineLookups,
+           (unsigned long long)ctx.appleStats.pipelineLookupSkipped,
+           (unsigned long long)ctx.appleStats.noPipeline);
     printf("perf draws=%llu pipe=%.1fus uniform=%.1fus ubo=%.1fus samp=%.1fus idx=%.1fus draw=%.1fus\n",
            (unsigned long long)dn, ctx.appleStats.nsPipe / n / 1000.0,
            ctx.appleStats.nsUniform / n / 1000.0, ctx.appleStats.nsUbo / n / 1000.0,

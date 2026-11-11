@@ -116,8 +116,13 @@ void glGetProgramResourceiv(GLuint program, GLenum programInterface, GLuint inde
     ProgramObject* pr = GetLinkedProg(program);
     if (!pr || !props || !params) return;
     if (length) *length = 0;
-    // Props hỗ trợ: TYPE(0x92FA), ARRAY_SIZE(0x92FB), OFFSET(0x92FC), BLOCK_INDEX(0x92FA?),
-    // LOCATION(0x92E9), NAME_LENGTH(0x92F9). Mỗi prop ghi 1 int (trừ mảng — không hỗ trợ array props ở đây).
+    // Zero-init toàn bộ params trước: nếu prop không hỗ trợ và ta `return`
+    // sớm, app vẫn không đọc rác uninitialized (spec: INVALID_ENUM → giá trị
+    // các prop đã ghi vẫn phải hợp lệ).
+    for (GLsizei k = 0; k < count; ++k) params[k] = 0;
+    // Props hỗ trợ: TYPE(0x92FA), ARRAY_SIZE(0x92FB), OFFSET(0x92FC), BLOCK_INDEX(0x92FD),
+    // LOCATION(0x92E9), NAME_LENGTH(0x92F9), BUFFER_BINDING(0x9302),
+    // BUFFER_DATA_SIZE(0x9303). Mỗi prop ghi 1 int (trừ mảng — không hỗ trợ array props ở đây).
     for (GLsizei k = 0; k < propCount && k < count; ++k) {
         GLenum p = props[k];
         GLint v = 0;
@@ -133,13 +138,15 @@ void glGetProgramResourceiv(GLuint program, GLenum programInterface, GLuint inde
         } else if (programInterface == 0x92E2 && index < pr->uniformBlocks.size()) {
             auto& b = pr->uniformBlocks[index];
             if (p == 0x92F9 /*NAME_LENGTH*/) v = (GLint)b.name.size() + 1;
-            else if (p == 0x92FD /*BINDING? Thực tế BUFFER_BINDING=0x92FA? Dùng BINDING=0x8A30?*/) {
-                // UNIFORM_BLOCK props: BINDING (0x8A30? Không — BUFFER_BINDING cho block là 0x92FA?).
-                // Đơn giản: trả binding point.
-                v = (GLint)b.binding;
-            } else if (p == 0x92F5 /*DATA_SIZE? Thực tế UNIFORM_BLOCK_DATA_SIZE=0x8A30*/) {
-                v = (GLint)b.minSize;
-            } else { Context::Current().errors.Record(0x0500); return; }
+            // ARB_program_interface_query §"Program Resource Properties":
+            // BUFFER_BINDING = 0x9302, BUFFER_DATA_SIZE = 0x9303 — hợp lệ cho
+            // interface UNIFORM_BLOCK. Trước đây code dùng nhầm 0x92FD
+            // (BLOCK_INDEX) / 0x92F5 (ACTIVE_RESOURCES) → app đọc props[] rác.
+            else if (p == 0x9302 /*BUFFER_BINDING*/) v = (GLint)b.binding;
+            else if (p == 0x9303 /*BUFFER_DATA_SIZE*/) v = (GLint)b.minSize;
+            else if (p == 0x92FD /*BLOCK_INDEX*/) v = (GLint)b.index;
+            else if (p == 0x92FC /*OFFSET*/) v = 0;
+            else { Context::Current().errors.Record(0x0500); return; }
         } else if (programInterface == 0x92E4 /*PROGRAM_OUTPUT*/ &&
                    index < pr->fragOutputs.size()) {
             auto& o = pr->fragOutputs[index];
@@ -184,7 +191,9 @@ GLint glGetProgramResourceLocation(GLuint program, GLenum programInterface, cons
                 auto f = pr->uniformLoc.find(nm);
                 if (f != pr->uniformLoc.end()) e.loc = f->second;
                 else {
-                    GLint loc = (GLint)pr->uniformLoc.size();
+                    // Tránh location đã chiếm (explicit location có thể rải rác).
+                    GLint loc = 0;
+                    for (auto& kv : pr->uniformLoc) loc = std::max(loc, kv.second + 1);
                     pr->uniformLoc[nm] = loc;
                     e.loc = loc;
                 }

@@ -25,7 +25,75 @@ enum class PixelFormat : uint32_t {
     // Buffer textures MC 26.1: samplerBuffer R8I/R8UI/R16I/R16UI/R16F (bug A).
     R8Sint = 14, R8Uint = 13,
     R16Sint = 24, R16Uint = 23, R16Float = 25,
+    // --- Format NÉN (số = MTLPixelFormat thật, MTLPixelFormat.h) ---
+    // Metal cho phép pixel format nén cho texture 2D/2DArray/Cube; texture nén
+    // KHÔNG làm được render target → usage chỉ ShaderRead.
+    // BC1/2/3, BC4/5, BC6H/7: iOS 16.4+ (device.supportsBCTextureCompression).
+    // ETC2/EAC/ASTC LDR: iOS 8.0+ (mọi GPU Apple).
+    BC1_RGBA = 130, BC1_RGBA_sRGB = 131,
+    BC2_RGBA = 132, BC2_RGBA_sRGB = 133,
+    BC3_RGBA = 134, BC3_RGBA_sRGB = 135,
+    BC4_RUnorm = 140, BC4_RSnorm = 141,
+    BC5_RGUnorm = 142, BC5_RGSnorm = 143,
+    BC6H_RGBFloat = 150, BC6H_RGBUfloat = 151,
+    BC7_RGBAUnorm = 152, BC7_RGBAUnorm_sRGB = 153,
+    EAC_R11Unorm = 170, EAC_R11Snorm = 172,
+    EAC_RG11Unorm = 174, EAC_RG11Snorm = 176,
+    EAC_RGBA8 = 178, EAC_RGBA8_sRGB = 179,
+    ETC2_RGB8 = 180, ETC2_RGB8_sRGB = 181,
+    ETC2_RGB8A1 = 182, ETC2_RGB8A1_sRGB = 183,
+    ASTC_4x4_LDR = 204, ASTC_5x4_LDR = 205, ASTC_5x5_LDR = 206,
+    ASTC_6x5_LDR = 207, ASTC_6x6_LDR = 208, ASTC_8x5_LDR = 210,
+    ASTC_8x6_LDR = 211, ASTC_8x8_LDR = 212, ASTC_10x5_LDR = 213,
+    ASTC_10x6_LDR = 214, ASTC_10x8_LDR = 215, ASTC_10x10_LDR = 216,
+    ASTC_12x10_LDR = 217, ASTC_12x12_LDR = 218,
 };
+
+// Kích thước block của 1 format nén. bytes = byte mỗi block, width/height =
+// số texel của block theo trục (ETC2/EAC/DXT/RGTC/BPTC = 4x4; ASTC = 4x4..12x12).
+// bytes==0 ⇒ format KHÔNG nén (PixelFormatBytes trả 0 cho các case này).
+struct CompressedBlockInfo {
+    uint32_t bytes = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+inline CompressedBlockInfo CompressedBlock(PixelFormat f) {
+    switch (f) {
+        // 4x4, 8 byte/block: BC1, BC4, ETC2 RGB8/RGB8A1, EAC R11.
+        case PixelFormat::BC1_RGBA: case PixelFormat::BC1_RGBA_sRGB:
+        case PixelFormat::BC4_RUnorm: case PixelFormat::BC4_RSnorm:
+        case PixelFormat::ETC2_RGB8: case PixelFormat::ETC2_RGB8_sRGB:
+        case PixelFormat::ETC2_RGB8A1: case PixelFormat::ETC2_RGB8A1_sRGB:
+        case PixelFormat::EAC_R11Unorm: case PixelFormat::EAC_R11Snorm:
+            return {8, 4, 4};
+        // 4x4, 16 byte/block: BC2/BC3, BC5, BC6H, BC7, EAC RG11, EAC RGBA8, ASTC.
+        case PixelFormat::BC2_RGBA: case PixelFormat::BC2_RGBA_sRGB:
+        case PixelFormat::BC3_RGBA: case PixelFormat::BC3_RGBA_sRGB:
+        case PixelFormat::BC5_RGUnorm: case PixelFormat::BC5_RGSnorm:
+        case PixelFormat::BC6H_RGBFloat: case PixelFormat::BC6H_RGBUfloat:
+        case PixelFormat::BC7_RGBAUnorm: case PixelFormat::BC7_RGBAUnorm_sRGB:
+        case PixelFormat::EAC_RG11Unorm: case PixelFormat::EAC_RG11Snorm:
+        case PixelFormat::EAC_RGBA8: case PixelFormat::EAC_RGBA8_sRGB:
+            return {16, 4, 4};
+        // ASTC: block luôn 16 byte, kích thước block thay đổi theo họ.
+        case PixelFormat::ASTC_4x4_LDR: return {16, 4, 4};
+        case PixelFormat::ASTC_5x4_LDR: return {16, 5, 4};
+        case PixelFormat::ASTC_5x5_LDR: return {16, 5, 5};
+        case PixelFormat::ASTC_6x5_LDR: return {16, 6, 5};
+        case PixelFormat::ASTC_6x6_LDR: return {16, 6, 6};
+        case PixelFormat::ASTC_8x5_LDR: return {16, 8, 5};
+        case PixelFormat::ASTC_8x6_LDR: return {16, 8, 6};
+        case PixelFormat::ASTC_8x8_LDR: return {16, 8, 8};
+        case PixelFormat::ASTC_10x5_LDR: return {16, 10, 5};
+        case PixelFormat::ASTC_10x6_LDR: return {16, 10, 6};
+        case PixelFormat::ASTC_10x8_LDR: return {16, 10, 8};
+        case PixelFormat::ASTC_10x10_LDR: return {16, 10, 10};
+        case PixelFormat::ASTC_12x10_LDR: return {16, 12, 10};
+        case PixelFormat::ASTC_12x12_LDR: return {16, 12, 12};
+        default: return {};
+    }
+}
+inline bool PixelFormatIsCompressed(PixelFormat f) { return CompressedBlock(f).bytes != 0; }
 
 // Bytes/texel (level 0) — nguồn sự thật cho bpr readback/guard. Stencil8 trùng
 // giá trị R32Uint (53) nên không tách case được → quy ước 4B (xem TexelBytes).
@@ -87,7 +155,13 @@ struct SamplerDesc {
     // GL_TEXTURE_COMPARE_MODE = COMPARE_REF_TO_TEXTURE (0x884E) → set
     // MTL sampler compareFunction. Cần cho sampler2DShadow (shadowtex*): thiếu
     // compare thì sample_compare sai/validation fail → mất bóng. 0 = tắt.
-    uint32_t compareFunc = 0;};
+    uint32_t compareFunc = 0;
+    // GL_ARB_texture_border_clamp: GL_TEXTURE_BORDER_COLOR (0x1004) → Metal
+    // MTLSamplerDescriptor.borderColor (float4). Metal CHỈ dùng giá trị này khi
+    // address mode = clamp-to-border; không set thì viền lấy màu mặc định
+    // (0,0,0,0) ≠ màu app đặt.
+    float borderColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+};
 struct ScissorRect {
     uint32_t x = 0;
     uint32_t y = 0;
@@ -186,6 +260,9 @@ public:
     // P3: depth của texture 3D (GL_TEXTURE_3D / sampler3D). 2D/cube → 1.
     virtual uint32_t depth() const { return 1; }
     virtual PixelFormat pixelFormat() const = 0;
+    // Texture nén (BC/ETC2/EAC/ASTC): nội dung là block nén, không phải texel.
+    // Backend khác (Null) trả false → GL layer biết phải giữ shadow CPU.
+    virtual bool isCompressed() const { return false; }
     // Số mip level trên GPU (quyết định lọc mip an toàn; default 1).
     virtual uint32_t levelCount() const { return 1; }
     // FBO attachment của texture 3D: render pass dùng chính MTLTextureType3D +
@@ -236,6 +313,14 @@ public:
 class ILibrary {
 public:
     virtual ~ILibrary() = default;
+    // Định danh ỔN ĐỊNH của library, dùng làm khoá cache pipeline.
+    //
+    // KHÔNG được dùng con trỏ làm identity: `glLinkProgram` giải phóng
+    // ILibrary cũ rồi tạo mới, và allocator thường TRẢ LẠI ĐÚNG ĐỊA CHỈ CŨ
+    // cho object mới ⇒ cache key trùng ⇒ tái dùng pipeline compile từ shader
+    // CŨ (shader mới không bao giờ có hiệu lực, không có lỗi nào báo).
+    // Backend thật phải trả về một số thứ tự duy nhất cho mỗi lần tạo.
+    virtual uint64_t identity() const { return (uint64_t)(uintptr_t)this; }
 };
 
 class IRenderPipeline {
@@ -352,9 +437,18 @@ public:
     // Occlusion ANY_SAMPLES (EXT_occlusion_query_boolean): Metal
     // setVisibilityResultMode:Boolean + setVisibilityResultBuffer. Buffer shared
     // (unified memory A11) → CPU đọc được sau khi GPU xong. enable=false → ModeDisabled.
+    // Backend có đếm được SỐ sample (Metal Counting mode) thì ghi số sample;
+    // không thì ghi boolean. enable=false → ModeDisabled.
     virtual void setVisibilityResult(IBuffer* b, uint64_t off, bool enable) {
         (void)b; (void)off; (void)enable;
     }
+    // Cấp offset slot visibility cho draw kế tiếp (Metal: mỗi draw ghi 1 slot
+    // RIÊNG để cộng dồn ra tổng số sample của cả query — Metal ghi đè nếu
+    // nhiều draw dùng chung offset). Không có provider → dùng offset truyền vào.
+    virtual void setVisibilitySlotProvider(std::function<uint64_t()>) {}
+    // Báo device "CB này vừa commit" (void* = id<MTLCommandBuffer> ở backend Metal)
+    // — device dùng để lấy mốc thời gian GPU cho GL_TIME_ELAPSED.
+    virtual void setCommitObserver(std::function<void(void*)>) {}
     // Blend color (glBlendColor) cho factors CONSTANT_*.
     virtual void setBlendColor(float r, float g, float b, float a) {
         (void)r; (void)g; (void)b; (void)a;
@@ -408,6 +502,9 @@ public:
     // P1: commit CB đang giữ (sau endEncodingNoCommit), không waitUntilCompleted.
     virtual void commitNoWait() {}
     virtual bool endAndCommit() { return false; }
+    // Báo device "CB này vừa commit" (void* = id<MTLCommandBuffer> ở backend Metal)
+    // — device dùng để lấy mốc thời gian GPU cho GL_TIME_ELAPSED.
+    virtual void setCommitObserver(std::function<void(void*)>) {}
 };
 
 class IDevice {
@@ -434,7 +531,56 @@ public:
     // Đính trên MTLRenderPassDescriptor (không set được sau khi tạo encoder);
     // encoder chỉ đổi setVisibilityResultMode:offset:. Null backend → nullptr.
     virtual IBuffer* visibilityBuffer() { return nullptr; }
+    // ---- Occlusion query: số sample thật (GL_SAMPLES_PASSED) ----
+    // Metal visibility buffer ghi kết quả theo offset 8 byte: mode Counting =
+    // SỐ sample pass depth+stencil, mode Boolean = 0/1. Mỗi draw ghi đè offset
+    // của nó → muốn có TỔNG của cả query thì mỗi draw phải ghi 1 slot riêng.
+    // beginVisibilityQuery(id): bắt đầu query mới (mở bộ đếm slot).
+    // visibilitySampleTotal(id): tổng số sample của query (đọc sau khi GPU
+    // xong). 0 = query chưa có draw / backend không đếm được số.
+    virtual void beginVisibilityQuery(uint32_t queryId) { (void)queryId; }
+    virtual uint64_t visibilitySampleTotal(uint32_t queryId) { (void)queryId; return 0; }
+    // Backend có hỗ trợ đếm số sample không (Metal Counting mode chỉ có trên
+    // GPU family Apple3+; GPU cũ chỉ có Boolean). Không có → GL_SAMPLES_PASSED
+    // không có số để trả (trả 0, không giả số).
+    virtual bool visibilityCountingSupported() const { return false; }
+    // ---- Đo thời gian GPU cho GL_TIME_ELAPSED ----
+    // Metal chỉ có timestamp ở ranh giới command buffer (MTLCommandBuffer.
+    // GPUStartTime/GPUEndTime — macOS 10.15+/iOS 10.3+), không có mốc ở giữa
+    // buffer. TGLMT tách lệnh của query vào CB riêng (flush ở glBegin/
+    // glEndQuery) rồi đo chênh lệch giữa hai mốc trên đồng hồ GPU.
+    // beginTimerQuery(id): mốc A = CB chứa lệnh TRƯỚC query (đã flush).
+    // endTimerQuery(id): mốc B = CB chứa lệnh TRONG query (đã flush).
+    // timerQueryElapsedNs(id): ns đo được (đọc sau khi GPU xong hết).
+    virtual void beginTimerQuery(uint32_t queryId) { (void)queryId; }
+    virtual void endTimerQuery(uint32_t queryId) { (void)queryId; }
+    virtual uint64_t timerQueryElapsedNs(uint32_t queryId) { (void)queryId; return 0; }
+    // GL_GPU_DISJOINT_EXT (0x8FBB): TRUE nếu số đo TIME_ELAPSED không đáng tin
+    // (thiết bị không có timestamp GPU) → app phải bỏ qua kết quả đo.
+    virtual bool timerQueryDisjoint(uint32_t queryId) { (void)queryId; return true; }
+    // Query đã xong chưa — đọc KHÔNG chặn (không đợi GPU). Cần cho
+    // GL_QUERY_RESULT_AVAILABLE: MC poll mỗi frame; nếu ta chờ GPU mỗi lần
+    // thì mất frame rate (stall toàn bộ pipeline).
+    virtual bool timerQueryReady(uint32_t queryId) { (void)queryId; return false; }
     virtual std::shared_ptr<ITexture> newTexture(uint32_t w, uint32_t h, PixelFormat f) = 0;
+    // Texture NÉN: pixel format phải là format nén (CompressedBlock().bytes>0).
+    // data = block nén của level 0, bytesPerRow = số byte MỘT HÀNG block
+    // (ceil(w/blockW) * bytesPerBlock), levels = số mip level cấp phát.
+    // Default nullptr → backend không tạo texture nén được; GL layer giữ
+    // shadow CPU và texture không có GPU (sample ra đen, không crash).
+    virtual std::shared_ptr<ITexture> newCompressedTexture(uint32_t w, uint32_t h, PixelFormat f,
+            uint32_t levels, const void* data, size_t bytesPerRow) {
+        (void)w; (void)h; (void)f; (void)levels; (void)data; (void)bytesPerRow;
+        return nullptr;
+    }
+    // Ghi vùng block nén vào texture nén (CompressedTexSubImage*). Vùng phải
+    // canh theo block. bytesPerRow = byte/hàng block của vùng đó.
+    virtual bool updateCompressedTexture(ITexture* tex, uint32_t level, uint32_t x, uint32_t y,
+            uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) {
+        (void)tex; (void)level; (void)x; (void)y; (void)w; (void)h;
+        (void)data; (void)bytesPerRow;
+        return false;
+    }
     virtual std::shared_ptr<ITexture> newTextureLevels(uint32_t w, uint32_t h, PixelFormat f,
                                                        uint32_t levels) {
         (void)levels; return newTexture(w, h, f);

@@ -25,6 +25,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
+#include <vector>
 
 static int gFails = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); ++gFails; } } while (0)
@@ -48,15 +50,45 @@ static bool MetalAvail() {
     }
     return cached == 1;
 }
+// Biên dịch MSL bằng `metal -c`. GHI file .metal ra đĩa, biên dịch TỪNG file
+// riêng vì `metal -c` nhận nhiều input nhưng chỉ báo lỗi tổng (không biết
+// file nào hỏng) → không đọc được message lỗi cụ thể.
+static std::vector<std::pair<std::string, std::string>> gMetalJobs; // (file, msg)
 static void MetalCheck(const std::string& tag, const std::string& msl, const char* msg) {
     if (!MetalAvail()) return;
     std::string p = "/tmp/tglmt-packreg-" + tag + ".metal";
-    std::string a = "/tmp/tglmt-packreg-" + tag + ".air";
     FILE* f = fopen(p.c_str(), "w");
     if (!f) return;
     fputs(msl.c_str(), f);
     fclose(f);
-    CHECK(Run("xcrun -sdk macosx metal -c " + p + " -o " + a + " >/dev/null 2>&1"), msg);
+    gMetalJobs.emplace_back(p, msg);
+}
+// Gọi 1 lần cuối: chạy `metal -c` cho TẤT CẢ file trong MỘT lệnh.
+// Lý do: mỗi lần gọi `xcrun metal -c` là 1 process + 1 lần load toolchain
+// (~390ms) → 20 file = 7.8s. Gộp 1 lệnh = 0.7s (metal tự song song hoá).
+//
+// `metal -c` với nhiều input ghi .air vào THƯ MỤC HIỆN TẠI (không phải cạnh
+// file .metal) → phải chạy trong thư mục tạm, nếu không test sẽ rơi file
+// .air vào thư mục repo (bẩn thư mục làm việc).
+static void MetalCheckAll() {
+    if (gMetalJobs.empty()) return;
+    const char* outDir = "/tmp/tglmt-packreg-out";
+    std::string mk = "mkdir -p " + std::string(outDir) + " && ";
+    std::string cmd = mk + "cd " + std::string(outDir) + " && xcrun -sdk macosx metal -c";
+    for (auto& j : gMetalJobs) cmd += " " + j.first;
+    cmd += " >/dev/null 2>&1";
+    bool allOk = Run(cmd);
+    for (auto& j : gMetalJobs) {
+        // .air nằm trong outDir, tên theo basename của file .metal.
+        size_t slash = j.first.rfind('/');
+        std::string base = (slash == std::string::npos) ? j.first : j.first.substr(slash + 1);
+        std::string a = std::string(outDir) + "/" + base.substr(0, base.size() - 6) + ".air";
+        FILE* f = fopen(a.c_str(), "rb");
+        bool have = f != nullptr;
+        if (f) fclose(f);
+        // metal -c tạo .air cạnh .metal khi biên dịch thành công.
+        CHECK(allOk && have, j.second.c_str());
+    }
 }
 
 int main() {
@@ -620,6 +652,8 @@ int main() {
     } else {
         printf("SKIP: metal toolchain thiếu component\n");
     }
+
+    MetalCheckAll();
 
     if (gFails) { printf("test_pack_regressions FAIL (%d)\n", gFails); return 1; }
     printf("test_pack_regressions PASS\n");

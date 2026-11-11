@@ -74,8 +74,13 @@ static void testMipLevel() {
     GLuint tex = 0, fbo = 0;
     glGenTextures(1, &tex);
     glBindTexture(0x0DE1, tex); // TEXTURE_2D
-    for (int i = 0; i < 4 * 4; ++i) {
-        unsigned char px[4] = {1, 2, 3, 255};
+    // 4x4 RGBA8 = 64 byte (trước đây px chỉ 4 byte ⇒ đọc tràn stack).
+    {
+        unsigned char px[4 * 4 * 4];
+        for (int i = 0; i < 4 * 4; ++i) {
+            px[i * 4 + 0] = 1; px[i * 4 + 1] = 2;
+            px[i * 4 + 2] = 3; px[i * 4 + 3] = 255;
+        }
         glTexImage2D(0x0DE1, 0, 0x8058, 4, 4, 0, 0x1908, 0x1401, px);
     }
     unsigned char mip[2 * 2 * 4];

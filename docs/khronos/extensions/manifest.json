@@ -1,0 +1,1479 @@
+{
+  "source": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions",
+  "extensions": {
+    "GL_AMD_framebuffer_multisample_advanced": {
+      "path": "docs/khronos/extensions/AMD/AMD_framebuffer_multisample_advanced.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/AMD/AMD_framebuffer_multisample_advanced.txt",
+      "bytes": 20022,
+      "sha256": "3198dc488ef35a111ca1673c13e32b7904042d3ebedac1b583d2430dc97957a3"
+    },
+    "GL_AMD_performance_monitor": {
+      "path": "docs/khronos/extensions/AMD/AMD_performance_monitor.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/AMD/AMD_performance_monitor.txt",
+      "bytes": 23842,
+      "sha256": "86895b2c2389e64345198471958bcbf8087f9273915933c04f3127a23732b8b6"
+    },
+    "GL_APPLE_rgb_422": {
+      "path": "docs/khronos/extensions/APPLE/APPLE_rgb_422.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/APPLE/APPLE_rgb_422.txt",
+      "bytes": 11188,
+      "sha256": "f1ec856996b9b6e73e36e5f129527290e2b93468f0a1a9a7db09831054a9013d"
+    },
+    "GL_ARB_ES2_compatibility": {
+      "path": "docs/khronos/extensions/ARB/ARB_ES2_compatibility.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_ES2_compatibility.txt",
+      "bytes": 33296,
+      "sha256": "638cdb0a7647027ffdb44c6c80bf1dc74b0de69e03b8af265c6a98a2d7aafb39"
+    },
+    "GL_ARB_ES3_1_compatibility": {
+      "path": "docs/khronos/extensions/ARB/ARB_ES3_1_compatibility.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_ES3_1_compatibility.txt",
+      "bytes": 25904,
+      "sha256": "461fdccbd57799f9490954d20fe69b80c740becec53ea8f3474e2f2e293206d1"
+    },
+    "GL_ARB_ES3_2_compatibility": {
+      "path": "docs/khronos/extensions/ARB/ARB_ES3_2_compatibility.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_ES3_2_compatibility.txt",
+      "bytes": 13092,
+      "sha256": "2133c8ce3f5da82374733c2b016b44285038f19d03aa1053b076065e3daaa8c3"
+    },
+    "GL_ARB_ES3_compatibility": {
+      "path": "docs/khronos/extensions/ARB/ARB_ES3_compatibility.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_ES3_compatibility.txt",
+      "bytes": 20455,
+      "sha256": "7cc0b3067399c107bf17dee5c59101b815449bdfc58b923a3a90784e542d8c19"
+    },
+    "GL_ARB_arrays_of_arrays": {
+      "path": "docs/khronos/extensions/ARB/ARB_arrays_of_arrays.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_arrays_of_arrays.txt",
+      "bytes": 13943,
+      "sha256": "3e48e28b88c9822312c4ead37249a189c22845f7578f6933e1ac814f9f19788b"
+    },
+    "GL_ARB_base_instance": {
+      "path": "docs/khronos/extensions/ARB/ARB_base_instance.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_base_instance.txt",
+      "bytes": 16555,
+      "sha256": "963f6a5cb299c497a3325183b39233efe25c369ef6800782beaecd6f1c6d5bb6"
+    },
+    "GL_ARB_bindless_texture": {
+      "path": "docs/khronos/extensions/ARB/ARB_bindless_texture.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_bindless_texture.txt",
+      "bytes": 77257,
+      "sha256": "aebe0ea1dc63dfe21eacb17cb6f92f6e3442bc31c0823e7652dc5cb81f4cae51"
+    },
+    "GL_ARB_blend_func_extended": {
+      "path": "docs/khronos/extensions/ARB/ARB_blend_func_extended.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_blend_func_extended.txt",
+      "bytes": 26049,
+      "sha256": "eb9278939312c11a5dd266db215404a716a00235c35f757afc3f41329b884ee7"
+    },
+    "GL_ARB_buffer_storage": {
+      "path": "docs/khronos/extensions/ARB/ARB_buffer_storage.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_buffer_storage.txt",
+      "bytes": 33088,
+      "sha256": "959da5571fe1f73e98957ee6427ca89816facd96c0b9c1154930e2e7330021fd"
+    },
+    "GL_ARB_cl_event": {
+      "path": "docs/khronos/extensions/ARB/ARB_cl_event.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_cl_event.txt",
+      "bytes": 14319,
+      "sha256": "26f4be8fd887fdc8760d5fb3e656ed5805258d2e452681e303708a247924189c"
+    },
+    "GL_ARB_clear_buffer_object": {
+      "path": "docs/khronos/extensions/ARB/ARB_clear_buffer_object.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_clear_buffer_object.txt",
+      "bytes": 13741,
+      "sha256": "cc2c0875f74e49d9d331adbdf583c77bf6d54230a9434d05192c5f48a42c22cc"
+    },
+    "GL_ARB_clear_texture": {
+      "path": "docs/khronos/extensions/ARB/ARB_clear_texture.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_clear_texture.txt",
+      "bytes": 23566,
+      "sha256": "79f243ed83fdb714ec095b80f637cc6224c7362ea618dd5e005088f3dea70719"
+    },
+    "GL_ARB_clip_control": {
+      "path": "docs/khronos/extensions/ARB/ARB_clip_control.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_clip_control.txt",
+      "bytes": 44151,
+      "sha256": "c2d393311ba8552e86e0491a8286f7967ce5200950859b6bce32fde710889dde"
+    },
+    "GL_ARB_compressed_texture_pixel_storage": {
+      "path": "docs/khronos/extensions/ARB/ARB_compressed_texture_pixel_storage.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_compressed_texture_pixel_storage.txt",
+      "bytes": 17338,
+      "sha256": "86cd41c49ef615277a47a991d61acb458bde25c181066f0e66a62962836b171e"
+    },
+    "GL_ARB_compute_shader": {
+      "path": "docs/khronos/extensions/ARB/ARB_compute_shader.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_compute_shader.txt",
+      "bytes": 73928,
+      "sha256": "13ccba75666fef01700d471268e668c9e8e421911a8b646f71c61948fc69a2a2"
+    },
+    "GL_ARB_compute_variable_group_size": {
+      "path": "docs/khronos/extensions/ARB/ARB_compute_variable_group_size.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_compute_variable_group_size.txt",
+      "bytes": 24688,
+      "sha256": "47e25420ad6034018cc8a4f5a529b5b3ca4cede96d79199b3557c2173f9a6629"
+    },
+    "GL_ARB_conditional_render_inverted": {
+      "path": "docs/khronos/extensions/ARB/ARB_conditional_render_inverted.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_conditional_render_inverted.txt",
+      "bytes": 4902,
+      "sha256": "79bb7b46f9c6523cd0c0ef9eb50ed20bb98271e38149e4ae6ec5af92dc2ea863"
+    },
+    "GL_ARB_conservative_depth": {
+      "path": "docs/khronos/extensions/ARB/ARB_conservative_depth.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_conservative_depth.txt",
+      "bytes": 7493,
+      "sha256": "21e67c7987237f208097c16459ec1ab9d44a300adbaededdc883fc3e94bbdf0e"
+    },
+    "GL_ARB_copy_buffer": {
+      "path": "docs/khronos/extensions/ARB/ARB_copy_buffer.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_copy_buffer.txt",
+      "bytes": 9544,
+      "sha256": "df0bf2ffe31a3b660a6eaf350024d5090ac104bbc3702e9dd5acfb0b38b9b21a"
+    },
+    "GL_ARB_copy_image": {
+      "path": "docs/khronos/extensions/ARB/ARB_copy_image.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_copy_image.txt",
+      "bytes": 18287,
+      "sha256": "72251fda43c1d7365222ff93b368511fe08a9d3deb5741a567206285df19314d"
+    },
+    "GL_ARB_cull_distance": {
+      "path": "docs/khronos/extensions/ARB/ARB_cull_distance.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_cull_distance.txt",
+      "bytes": 13956,
+      "sha256": "1de1643657da3e98846865c20c739967b6dc9c20e543d9a4756274ec079264ae"
+    },
+    "GL_ARB_debug_output": {
+      "path": "docs/khronos/extensions/ARB/ARB_debug_output.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_debug_output.txt",
+      "bytes": 45910,
+      "sha256": "cfcd02eab72ee39f0f3deefa7403760e86c3cc0e713c2e0a6dc230ed07f0968e"
+    },
+    "GL_ARB_depth_buffer_float": {
+      "path": "docs/khronos/extensions/ARB/ARB_depth_buffer_float.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_depth_buffer_float.txt",
+      "bytes": 23937,
+      "sha256": "7b4b3964fc46f4c1909fb4dee42f8e4470a4896237d2a0d5acc220f60b3be4f1"
+    },
+    "GL_ARB_depth_clamp": {
+      "path": "docs/khronos/extensions/ARB/ARB_depth_clamp.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_depth_clamp.txt",
+      "bytes": 10225,
+      "sha256": "6e663472a248963ad3f14a0395cf3e8da52c68918c1d5462b616b9eda3da9008"
+    },
+    "GL_ARB_derivative_control": {
+      "path": "docs/khronos/extensions/ARB/ARB_derivative_control.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_derivative_control.txt",
+      "bytes": 8853,
+      "sha256": "10ce6fca3c332c139991b6681d8fdac4a71ee88f6ff5f31b3255c4833cc2ac9a"
+    },
+    "GL_ARB_direct_state_access": {
+      "path": "docs/khronos/extensions/ARB/ARB_direct_state_access.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_direct_state_access.txt",
+      "bytes": 183226,
+      "sha256": "ac0614b0489f5aa823bdc05da36573f87179ce9a03dfa6727bd4d9aba29f1032"
+    },
+    "GL_ARB_draw_buffers_blend": {
+      "path": "docs/khronos/extensions/ARB/ARB_draw_buffers_blend.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_draw_buffers_blend.txt",
+      "bytes": 12380,
+      "sha256": "b57055d3de73718c1df2f9700bb52fa0f2a7b7878936b0079a47d9e957627668"
+    },
+    "GL_ARB_draw_elements_base_vertex": {
+      "path": "docs/khronos/extensions/ARB/ARB_draw_elements_base_vertex.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_draw_elements_base_vertex.txt",
+      "bytes": 19367,
+      "sha256": "6fef9b9a92b29862a71f3fe229c1335ab1ebc8c0f125003ada4758db01b9aac8"
+    },
+    "GL_ARB_draw_indirect": {
+      "path": "docs/khronos/extensions/ARB/ARB_draw_indirect.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_draw_indirect.txt",
+      "bytes": 14683,
+      "sha256": "9ac542f1afe6e1e46f367400cda0c3d2dd309aac5a6d1bfb68238afb097f60bd"
+    },
+    "GL_ARB_draw_instanced": {
+      "path": "docs/khronos/extensions/ARB/ARB_draw_instanced.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_draw_instanced.txt",
+      "bytes": 8477,
+      "sha256": "6a725d9232bfcb8f643179dc424b18a1218353c8648f33f5f7e373b1153b0927"
+    },
+    "GL_ARB_enhanced_layouts": {
+      "path": "docs/khronos/extensions/ARB/ARB_enhanced_layouts.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_enhanced_layouts.txt",
+      "bytes": 92378,
+      "sha256": "e5f5cb506cbb375875c4c554b390e6434ae4fb514262bf8ac5f4be0cff12d914"
+    },
+    "GL_ARB_explicit_attrib_location": {
+      "path": "docs/khronos/extensions/ARB/ARB_explicit_attrib_location.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_explicit_attrib_location.txt",
+      "bytes": 16371,
+      "sha256": "7ee71f570249811b5d75202b2f5f78e255ab4ffb1690dce72bea25211862eaef"
+    },
+    "GL_ARB_explicit_uniform_location": {
+      "path": "docs/khronos/extensions/ARB/ARB_explicit_uniform_location.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_explicit_uniform_location.txt",
+      "bytes": 22718,
+      "sha256": "a41acd1970027af745c76efc5d4e72ec1b64932cb2a05459b6a3b2d6ca437dc6"
+    },
+    "GL_ARB_fragment_coord_conventions": {
+      "path": "docs/khronos/extensions/ARB/ARB_fragment_coord_conventions.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_fragment_coord_conventions.txt",
+      "bytes": 31776,
+      "sha256": "d429a46a6cfaafa517bfb1b8ecd1d4f31731839db035aa45125f3bba6864e1ff"
+    },
+    "GL_ARB_fragment_layer_viewport": {
+      "path": "docs/khronos/extensions/ARB/ARB_fragment_layer_viewport.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_fragment_layer_viewport.txt",
+      "bytes": 8507,
+      "sha256": "9d6cec1e9a43c11167501d12099298882847033446d6c10a33409d26599a9ddd"
+    },
+    "GL_ARB_fragment_shader_interlock": {
+      "path": "docs/khronos/extensions/ARB/ARB_fragment_shader_interlock.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_fragment_shader_interlock.txt",
+      "bytes": 21057,
+      "sha256": "3f482d1faacfc163b60b9328bcd909da82a4da088c259537a34b57229223ef99"
+    },
+    "GL_ARB_framebuffer_no_attachments": {
+      "path": "docs/khronos/extensions/ARB/ARB_framebuffer_no_attachments.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_framebuffer_no_attachments.txt",
+      "bytes": 22995,
+      "sha256": "eceb93f7adf7484f06ed9b4da9169d10d261bdbb724e7394ce8974b985b99436"
+    },
+    "GL_ARB_framebuffer_object": {
+      "path": "docs/khronos/extensions/ARB/ARB_framebuffer_object.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_framebuffer_object.txt",
+      "bytes": 214933,
+      "sha256": "252f19ccd0149e7f2b813cc1de27f2d5a36a041a959b75d42979dc22d24fae51"
+    },
+    "GL_ARB_framebuffer_sRGB": {
+      "path": "docs/khronos/extensions/ARB/ARB_framebuffer_sRGB.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_framebuffer_sRGB.txt",
+      "bytes": 25650,
+      "sha256": "b666f987dfba91f0f72eb59219d2e294e898807a8ec811e6c26b640251c5184e"
+    },
+    "GL_ARB_geometry_shader4": {
+      "path": "docs/khronos/extensions/ARB/ARB_geometry_shader4.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_geometry_shader4.txt",
+      "bytes": 134476,
+      "sha256": "35fc0e1c38e50968b27f6d41d8dfe02d694686abe93012e4555297b44fb2e1f0"
+    },
+    "GL_ARB_get_program_binary": {
+      "path": "docs/khronos/extensions/ARB/ARB_get_program_binary.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_get_program_binary.txt",
+      "bytes": 23554,
+      "sha256": "6ea6ba2d2d0556221450f57c2bd4ec5ed05135a6d9cd49995216df2cda2b2e40"
+    },
+    "GL_ARB_get_texture_sub_image": {
+      "path": "docs/khronos/extensions/ARB/ARB_get_texture_sub_image.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_get_texture_sub_image.txt",
+      "bytes": 13002,
+      "sha256": "9030b291a6155818f77fa232d5dab47262298489736c14e57ed702e0521b6ced"
+    },
+    "GL_ARB_gl_spirv": {
+      "path": "docs/khronos/extensions/ARB/ARB_gl_spirv.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_gl_spirv.txt",
+      "bytes": 102706,
+      "sha256": "45ec29db073ff9a6a6c7065f63d47b6d3c7a822ee8c43efcd30a30b0f8051beb"
+    },
+    "GL_ARB_gpu_shader5": {
+      "path": "docs/khronos/extensions/ARB/ARB_gpu_shader5.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_gpu_shader5.txt",
+      "bytes": 96838,
+      "sha256": "debfa409fb6ba536294657997912af173398e026dd033956441464eb843a510e"
+    },
+    "GL_ARB_gpu_shader_fp64": {
+      "path": "docs/khronos/extensions/ARB/ARB_gpu_shader_fp64.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_gpu_shader_fp64.txt",
+      "bytes": 46113,
+      "sha256": "61d7baf4b9656219e96b63458d948bd73eb2148d8d59ff00c6b745de5f3f5ee0"
+    },
+    "GL_ARB_gpu_shader_int64": {
+      "path": "docs/khronos/extensions/ARB/ARB_gpu_shader_int64.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_gpu_shader_int64.txt",
+      "bytes": 37799,
+      "sha256": "9da5055ddf6d40c1af732320b22924d75b3563ea2ebfc5c54925700b7ba4df7a"
+    },
+    "GL_ARB_half_float_vertex": {
+      "path": "docs/khronos/extensions/ARB/ARB_half_float_vertex.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_half_float_vertex.txt",
+      "bytes": 8399,
+      "sha256": "241a06b6121f05711e5063e788b5b3c2c7d9af75c1f6c734a8a45eb7aa2a8335"
+    },
+    "GL_ARB_indirect_parameters": {
+      "path": "docs/khronos/extensions/ARB/ARB_indirect_parameters.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_indirect_parameters.txt",
+      "bytes": 9755,
+      "sha256": "455e89174c3946e5e40e29fb137e589ea37e0487cd6562665741fd21fbf366a1"
+    },
+    "GL_ARB_instanced_arrays": {
+      "path": "docs/khronos/extensions/ARB/ARB_instanced_arrays.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_instanced_arrays.txt",
+      "bytes": 22923,
+      "sha256": "546d2874ac13ff94e2732d902ea152b340e824a3ec7a4a989ace888974ca462e"
+    },
+    "GL_ARB_internalformat_query": {
+      "path": "docs/khronos/extensions/ARB/ARB_internalformat_query.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_internalformat_query.txt",
+      "bytes": 22143,
+      "sha256": "ac8215fc8e67aa83512344c624a20617eb1c9d809b9773967b9f60c7a5a96a9e"
+    },
+    "GL_ARB_internalformat_query2": {
+      "path": "docs/khronos/extensions/ARB/ARB_internalformat_query2.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_internalformat_query2.txt",
+      "bytes": 72082,
+      "sha256": "7f78387febbe35bb0f22b2183d29a0611a68f46e1a40f82da7befbe1ffbf1c8a"
+    },
+    "GL_ARB_invalidate_subdata": {
+      "path": "docs/khronos/extensions/ARB/ARB_invalidate_subdata.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_invalidate_subdata.txt",
+      "bytes": 17049,
+      "sha256": "817608b3d07612538d93615e5b0f6ede62a08f406f69accbb76e8a33a9dc3c7a"
+    },
+    "GL_ARB_map_buffer_alignment": {
+      "path": "docs/khronos/extensions/ARB/ARB_map_buffer_alignment.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_map_buffer_alignment.txt",
+      "bytes": 5562,
+      "sha256": "defe433fd1c0516ad71eed958fc377b03eca7edfeed2a57887ffca829f6bf03a"
+    },
+    "GL_ARB_map_buffer_range": {
+      "path": "docs/khronos/extensions/ARB/ARB_map_buffer_range.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_map_buffer_range.txt",
+      "bytes": 15164,
+      "sha256": "a5b6d57d52fec638617e563c8dc8c9cb928187f4fd7eccd47e19d49744182bcb"
+    },
+    "GL_ARB_multi_bind": {
+      "path": "docs/khronos/extensions/ARB/ARB_multi_bind.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_multi_bind.txt",
+      "bytes": 40039,
+      "sha256": "4bad8dc489d74e8309fc9beb620904cc0b878194558a8396cb9fdc7a21733733"
+    },
+    "GL_ARB_multi_draw_indirect": {
+      "path": "docs/khronos/extensions/ARB/ARB_multi_draw_indirect.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_multi_draw_indirect.txt",
+      "bytes": 7719,
+      "sha256": "924c2759924a2f8e4e71d105a600888a416a61df8c367bf82d0e8ca2fe58b216"
+    },
+    "GL_ARB_occlusion_query2": {
+      "path": "docs/khronos/extensions/ARB/ARB_occlusion_query2.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_occlusion_query2.txt",
+      "bytes": 18400,
+      "sha256": "9c27c3b7fcc7021f3e6c0f69287b4d8ba8dc72b2fc8d7ddb0930664a2abbbee2"
+    },
+    "GL_ARB_parallel_shader_compile": {
+      "path": "docs/khronos/extensions/ARB/ARB_parallel_shader_compile.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_parallel_shader_compile.txt",
+      "bytes": 6465,
+      "sha256": "e1fa09b728275f3e508a4fc067c6f569fbd4cd55ba2459e7f34f114501c6ab04"
+    },
+    "GL_ARB_pipeline_statistics_query": {
+      "path": "docs/khronos/extensions/ARB/ARB_pipeline_statistics_query.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_pipeline_statistics_query.txt",
+      "bytes": 37087,
+      "sha256": "f419bca9a84e27638d25343d9f52bec22f7a03ba67d63193b2ac9d96c13bc184"
+    },
+    "GL_ARB_pixel_buffer_object": {
+      "path": "docs/khronos/extensions/ARB/ARB_pixel_buffer_object.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_pixel_buffer_object.txt",
+      "bytes": 74373,
+      "sha256": "6b70597600e3000c00ba2af7253645cad0c42c620173cb28c7f86e78ccff9d0d"
+    },
+    "GL_ARB_polygon_offset_clamp": {
+      "path": "docs/khronos/extensions/ARB/ARB_polygon_offset_clamp.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_polygon_offset_clamp.txt",
+      "bytes": 8095,
+      "sha256": "fbf707ee87cc9da2048a9f9251f1aba87cf08282bbfa48595f4d0fe0071324eb"
+    },
+    "GL_ARB_post_depth_coverage": {
+      "path": "docs/khronos/extensions/ARB/ARB_post_depth_coverage.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_post_depth_coverage.txt",
+      "bytes": 7155,
+      "sha256": "460148e796e1ce0701c7da2dfd6e03ef2519839216eaef1a3f8704b6127dfd5b"
+    },
+    "GL_ARB_program_interface_query": {
+      "path": "docs/khronos/extensions/ARB/ARB_program_interface_query.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_program_interface_query.txt",
+      "bytes": 100037,
+      "sha256": "67a3eea83d11a2e521555cfa0eb44d807f67937ea16ee713a428829b8d775be5"
+    },
+    "GL_ARB_provoking_vertex": {
+      "path": "docs/khronos/extensions/ARB/ARB_provoking_vertex.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_provoking_vertex.txt",
+      "bytes": 31883,
+      "sha256": "e2b57a9393d7d72951cdc509f09244d11237ee27a249b9a9af4e1910cd75ca25"
+    },
+    "GL_ARB_query_buffer_object": {
+      "path": "docs/khronos/extensions/ARB/ARB_query_buffer_object.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_query_buffer_object.txt",
+      "bytes": 16531,
+      "sha256": "cc48cf9b5ef003806325e5b63b6805ba12c84fa0d02d02ca6e66d50f8212bb6e"
+    },
+    "GL_ARB_robust_buffer_access_behavior": {
+      "path": "docs/khronos/extensions/ARB/ARB_robust_buffer_access_behavior.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_robust_buffer_access_behavior.txt",
+      "bytes": 9236,
+      "sha256": "94535a57fc6e3bec1ecb5253352bae792cac3c669aaea743c412bf59dc9fe0ac"
+    },
+    "GL_ARB_robustness": {
+      "path": "docs/khronos/extensions/ARB/ARB_robustness.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_robustness.txt",
+      "bytes": 44428,
+      "sha256": "b5426fc91411dc2636fd396695e6f9cead4954debf3dca1db62e7f5c83571211"
+    },
+    "GL_ARB_sample_locations": {
+      "path": "docs/khronos/extensions/ARB/ARB_sample_locations.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_sample_locations.txt",
+      "bytes": 20675,
+      "sha256": "8588695940650ec4fe57c1e00344421ad8d1db5beaea980f43efad93a9a40edf"
+    },
+    "GL_ARB_sample_shading": {
+      "path": "docs/khronos/extensions/ARB/ARB_sample_shading.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_sample_shading.txt",
+      "bytes": 16091,
+      "sha256": "ce3c4272bbb782117ab79826e4a127dafb3c5b6ca2e7cedca5dc6e5bd5b3ae32"
+    },
+    "GL_ARB_sampler_objects": {
+      "path": "docs/khronos/extensions/ARB/ARB_sampler_objects.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_sampler_objects.txt",
+      "bytes": 29014,
+      "sha256": "34c62f1470f5e51e36cbfb15b7cfebea811a84ee4026f4c9f0003cc8dd79c2ab"
+    },
+    "GL_ARB_seamless_cube_map": {
+      "path": "docs/khronos/extensions/ARB/ARB_seamless_cube_map.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_seamless_cube_map.txt",
+      "bytes": 7495,
+      "sha256": "c960fea42152a5d7adfb047f43efed5f073e46cc32b874c3d62690d0b465698a"
+    },
+    "GL_ARB_seamless_cubemap_per_texture": {
+      "path": "docs/khronos/extensions/ARB/ARB_seamless_cubemap_per_texture.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_seamless_cubemap_per_texture.txt",
+      "bytes": 7136,
+      "sha256": "7d888f2b682a076d349c62f5bab45499a99b5ccc94741901150f6e28edc52279"
+    },
+    "GL_ARB_separate_shader_objects": {
+      "path": "docs/khronos/extensions/ARB/ARB_separate_shader_objects.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_separate_shader_objects.txt",
+      "bytes": 134053,
+      "sha256": "e1a506537480ebc90c19cc49fa52078d1456b5a9686c3b4f6d6d6b94f6cb5e22"
+    },
+    "GL_ARB_shader_atomic_counter_ops": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_atomic_counter_ops.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_atomic_counter_ops.txt",
+      "bytes": 13400,
+      "sha256": "0fdc703f38512ae1aa348fde078639d7e0dc09f304cfb70580f6e26887821844"
+    },
+    "GL_ARB_shader_atomic_counters": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_atomic_counters.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_atomic_counters.txt",
+      "bytes": 62923,
+      "sha256": "4de0aece019fe3ede72f7d153fcbaa090595a88607d4d6eaeed6a8dcda4ca259"
+    },
+    "GL_ARB_shader_ballot": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_ballot.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_ballot.txt",
+      "bytes": 8059,
+      "sha256": "0cd372012118b33cd84c774bbd765889b1b67f8e6463ef4d7391d21dcb3d5ede"
+    },
+    "GL_ARB_shader_bit_encoding": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_bit_encoding.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_bit_encoding.txt",
+      "bytes": 3415,
+      "sha256": "c5e75af58efad1be4bc601f27760eebbc6eebfb1c093f2847b3f63203354fb2c"
+    },
+    "GL_ARB_shader_clock": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_clock.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_clock.txt",
+      "bytes": 4633,
+      "sha256": "4c0083707b4c717bb1228b590144cb709dcfc7eb332ea8125080567791c298e6"
+    },
+    "GL_ARB_shader_draw_parameters": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_draw_parameters.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_draw_parameters.txt",
+      "bytes": 10799,
+      "sha256": "cc6dd1cc4180a0195b32e7a5833da0e75692dcdc4440d33463a5b6e9c75d9b59"
+    },
+    "GL_ARB_shader_group_vote": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_group_vote.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_group_vote.txt",
+      "bytes": 17660,
+      "sha256": "f915cf2fe510aa10e7a896fc342a82bfe4d8ef82c2b144c8fe6ff031e0a0acb0"
+    },
+    "GL_ARB_shader_image_load_store": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_image_load_store.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_image_load_store.txt",
+      "bytes": 126043,
+      "sha256": "2d5372264be4bab5d7f2c49f67c364dff82d09011b7f171ceb70309e3f56c803"
+    },
+    "GL_ARB_shader_image_size": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_image_size.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_image_size.txt",
+      "bytes": 6961,
+      "sha256": "44b2ef3637c16825f5e424ea463ede254e928b9cd4b5a39396bf0042825c2068"
+    },
+    "GL_ARB_shader_precision": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_precision.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_precision.txt",
+      "bytes": 7050,
+      "sha256": "ecf890406953be37e870f2cb68243b511abae4613624058cbba8744e8cd17d25"
+    },
+    "GL_ARB_shader_stencil_export": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_stencil_export.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_stencil_export.txt",
+      "bytes": 7672,
+      "sha256": "0f36717519b652fde53e1bc99bff9d12dc86619be68a58c12d8e93d26d99c2e9"
+    },
+    "GL_ARB_shader_storage_buffer_object": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_storage_buffer_object.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_storage_buffer_object.txt",
+      "bytes": 86073,
+      "sha256": "9e61e06c475184a5d5c63b0769be9fd118376570c71d3dc48b040f0271887fb1"
+    },
+    "GL_ARB_shader_subroutine": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_subroutine.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_subroutine.txt",
+      "bytes": 47718,
+      "sha256": "41c06fbefdb298bf0f55b24fb7fae8ca424a32b14005299cc63b8cffe0f503ab"
+    },
+    "GL_ARB_shader_texture_image_samples": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_texture_image_samples.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_texture_image_samples.txt",
+      "bytes": 10395,
+      "sha256": "bc7d0b5045fd0cf841b02c4697b75ef01373709fc85848180bb1ce356a1bc2eb"
+    },
+    "GL_ARB_shader_viewport_layer_array": {
+      "path": "docs/khronos/extensions/ARB/ARB_shader_viewport_layer_array.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shader_viewport_layer_array.txt",
+      "bytes": 12880,
+      "sha256": "f5b47b14be72b488fc0b7430cbb0b5b6f944b46daeb1a59e95468e8a814b5ac0"
+    },
+    "GL_ARB_shading_language_420pack": {
+      "path": "docs/khronos/extensions/ARB/ARB_shading_language_420pack.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shading_language_420pack.txt",
+      "bytes": 45056,
+      "sha256": "55382a5b6ffa98621ba2f5a3e478e2326864e990da5024f791cbecc625260d93"
+    },
+    "GL_ARB_shading_language_include": {
+      "path": "docs/khronos/extensions/ARB/ARB_shading_language_include.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shading_language_include.txt",
+      "bytes": 37733,
+      "sha256": "35e585da722b3b403625b81f952f19b4822c78360650fbf713b4032dcbfc3800"
+    },
+    "GL_ARB_shading_language_packing": {
+      "path": "docs/khronos/extensions/ARB/ARB_shading_language_packing.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_shading_language_packing.txt",
+      "bytes": 10680,
+      "sha256": "67e51fff7f8652717b62ae0e072e778f1f3e9c28ec3ed2e5df2ff41bec1bf015"
+    },
+    "GL_ARB_sparse_buffer": {
+      "path": "docs/khronos/extensions/ARB/ARB_sparse_buffer.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_sparse_buffer.txt",
+      "bytes": 9910,
+      "sha256": "3a39a78a489a6ad01e4332eaad3a5fb888290ea9c620efe62453f87ab180d8db"
+    },
+    "GL_ARB_sparse_texture": {
+      "path": "docs/khronos/extensions/ARB/ARB_sparse_texture.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_sparse_texture.txt",
+      "bytes": 40358,
+      "sha256": "91c37d10e77240578b5667b9f961244f52eb498d64a0e927e98f344ec4f8da03"
+    },
+    "GL_ARB_sparse_texture2": {
+      "path": "docs/khronos/extensions/ARB/ARB_sparse_texture2.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_sparse_texture2.txt",
+      "bytes": 51793,
+      "sha256": "e38fe533526f1e77fe4f1ff4fea7fa05565ce6550a1d07d25c966cbf46d33813"
+    },
+    "GL_ARB_sparse_texture_clamp": {
+      "path": "docs/khronos/extensions/ARB/ARB_sparse_texture_clamp.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_sparse_texture_clamp.txt",
+      "bytes": 29001,
+      "sha256": "adf39d239588060c7edbf5a2c77e284c6c9edf6072dc3926eb3a8cb96ed28e4e"
+    },
+    "GL_ARB_spirv_extensions": {
+      "path": "docs/khronos/extensions/ARB/ARB_spirv_extensions.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_spirv_extensions.txt",
+      "bytes": 20836,
+      "sha256": "3990d043365829b9063e58a208028ba96c24886b1f43524ccd74f3d02aa99f88"
+    },
+    "GL_ARB_stencil_texturing": {
+      "path": "docs/khronos/extensions/ARB/ARB_stencil_texturing.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_stencil_texturing.txt",
+      "bytes": 8114,
+      "sha256": "f474a1ab6767430a86b184c3e316e6034d50e4cc90df8a307cf65096094ddb29"
+    },
+    "GL_ARB_sync": {
+      "path": "docs/khronos/extensions/ARB/ARB_sync.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_sync.txt",
+      "bytes": 64661,
+      "sha256": "fd23d39bfdd774b8ca243d5f79be720f3876668ac424b8696e2d47243f09fa99"
+    },
+    "GL_ARB_tessellation_shader": {
+      "path": "docs/khronos/extensions/ARB/ARB_tessellation_shader.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_tessellation_shader.txt",
+      "bytes": 194277,
+      "sha256": "9dfef9d67b041f4d7a38e70bd6646a267827a81f72b6723eaf551233953a3d12"
+    },
+    "GL_ARB_texture_barrier": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_barrier.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_barrier.txt",
+      "bytes": 5192,
+      "sha256": "f0acf63106c85164a0936262dfac9d773822020b1f3cd90bfbe74dffc9e19b1c"
+    },
+    "GL_ARB_texture_border_clamp": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_border_clamp.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_border_clamp.txt",
+      "bytes": 5637,
+      "sha256": "d7c35cfafa5ba264016bb5854f0320fde5ac019655af630807869f202198684c"
+    },
+    "GL_ARB_texture_buffer_object": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_buffer_object.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_buffer_object.txt",
+      "bytes": 38077,
+      "sha256": "1f0d5715058c993311d45ed14e59858e7debb6f492ce6fd0a2299caf547b4148"
+    },
+    "GL_ARB_texture_buffer_object_rgb32": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_buffer_object_rgb32.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_buffer_object_rgb32.txt",
+      "bytes": 3112,
+      "sha256": "f391f295685060dc95ef335381ad17db2d54c4bc0afde7a87757aa0f97581b79"
+    },
+    "GL_ARB_texture_buffer_range": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_buffer_range.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_buffer_range.txt",
+      "bytes": 10894,
+      "sha256": "dedc990cd1df010f6489ff1a8248fb91c23f0375bf8ed9e9e6699e2a8ff2d157"
+    },
+    "GL_ARB_texture_compression_bptc": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_compression_bptc.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_compression_bptc.txt",
+      "bytes": 36402,
+      "sha256": "ab85a0e9b885a0fa1d23e18606b4bad1ab1eacc2bc18011806ea43d9c51bf666"
+    },
+    "GL_ARB_texture_compression_rgtc": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_compression_rgtc.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_compression_rgtc.txt",
+      "bytes": 35390,
+      "sha256": "50c88794181bf2f6f589de7ce135f42efbfc442fd44149a0684b9f26c9314922"
+    },
+    "GL_ARB_texture_cube_map_array": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_cube_map_array.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_cube_map_array.txt",
+      "bytes": 39018,
+      "sha256": "ce397c5cc46823bd2ccc6e75cc93ae8543886e233ac13f4c2477b146beb913e8"
+    },
+    "GL_ARB_texture_filter_anisotropic": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_filter_anisotropic.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_filter_anisotropic.txt",
+      "bytes": 12677,
+      "sha256": "40496df116fa02343c0a4ddfa1fa32b4c94f30ccd1ac95962adab4873287bfdc"
+    },
+    "GL_ARB_texture_filter_minmax": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_filter_minmax.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_filter_minmax.txt",
+      "bytes": 16837,
+      "sha256": "9fdeb30110945e39e9c4b2e4f3e9a56e4bb2e17b7ee83a884de37be02666e7c0"
+    },
+    "GL_ARB_texture_gather": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_gather.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_gather.txt",
+      "bytes": 14274,
+      "sha256": "2706be186743494516be24ce231024bf8450dd11468a2547a990099b7e4a0009"
+    },
+    "GL_ARB_texture_mirror_clamp_to_edge": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_mirror_clamp_to_edge.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_mirror_clamp_to_edge.txt",
+      "bytes": 6909,
+      "sha256": "3ca938d89045ac4fddae10abb80f0112ae454e3ce601e13da19ef0b08c21f551"
+    },
+    "GL_ARB_texture_mirrored_repeat": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_mirrored_repeat.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_mirrored_repeat.txt",
+      "bytes": 5729,
+      "sha256": "3b95d354c65057628f8e9e29084f3c48f86fd0dad5c6068340adce5cbc449724"
+    },
+    "GL_ARB_texture_multisample": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_multisample.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_multisample.txt",
+      "bytes": 30316,
+      "sha256": "71119ba9c72373dbc071af23739a0eb9713784cae1159156bedfbeb9634c1a7c"
+    },
+    "GL_ARB_texture_non_power_of_two": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_non_power_of_two.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_non_power_of_two.txt",
+      "bytes": 25361,
+      "sha256": "84af109be27cc5fa886d34b3304236710d752ec3088711ef2715cc578d2ba11f"
+    },
+    "GL_ARB_texture_query_levels": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_query_levels.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_query_levels.txt",
+      "bytes": 16743,
+      "sha256": "41695c9c7f742eacb7430dda52fc48881e14bf330fc3a6a09df93fac87518257"
+    },
+    "GL_ARB_texture_query_lod": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_query_lod.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_query_lod.txt",
+      "bytes": 9045,
+      "sha256": "3552d14ce34a1cc5adabbb7af623be4c2180a523dae568dac9f77256182c897f"
+    },
+    "GL_ARB_texture_rg": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_rg.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_rg.txt",
+      "bytes": 15233,
+      "sha256": "ece404c50a29b5171068bcce6b521f3178c60fac8f5850900d1b3a26794dbbdb"
+    },
+    "GL_ARB_texture_rgb10_a2ui": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_rgb10_a2ui.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_rgb10_a2ui.txt",
+      "bytes": 7652,
+      "sha256": "2af8e84787448aaa9bb8d81a3ff08c270ea332b170ab375f99e03e97441ffe7b"
+    },
+    "GL_ARB_texture_stencil8": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_stencil8.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_stencil8.txt",
+      "bytes": 9730,
+      "sha256": "41312d74b8803986c12d58f932f372eb7f0b81216457af520a9228639169eb85"
+    },
+    "GL_ARB_texture_storage": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_storage.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_storage.txt",
+      "bytes": 41105,
+      "sha256": "6879474e53c56cf8506934f8c985c819affde580abb323df6df9db9eadabee44"
+    },
+    "GL_ARB_texture_storage_multisample": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_storage_multisample.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_storage_multisample.txt",
+      "bytes": 13039,
+      "sha256": "a5944209a61f913dd8bef3d6c0ea5955e3a01acb148b13d6e2c9a107962cc9b0"
+    },
+    "GL_ARB_texture_swizzle": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_swizzle.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_swizzle.txt",
+      "bytes": 10777,
+      "sha256": "9d33a17cd93f09c6e8893d0e80eacd858abdd5023558c5fc10930f3f941e3b81"
+    },
+    "GL_ARB_texture_view": {
+      "path": "docs/khronos/extensions/ARB/ARB_texture_view.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_texture_view.txt",
+      "bytes": 28361,
+      "sha256": "40e276886ffa92c6525124ce6a30d9686e1d622879b55a1bb11e053df9417768"
+    },
+    "GL_ARB_timer_query": {
+      "path": "docs/khronos/extensions/ARB/ARB_timer_query.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_timer_query.txt",
+      "bytes": 26378,
+      "sha256": "23be0e151fb6d67bff8b3dcf40699aecb638147e4f3c0ed72324d96fc5a71db4"
+    },
+    "GL_ARB_transform_feedback2": {
+      "path": "docs/khronos/extensions/ARB/ARB_transform_feedback2.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_transform_feedback2.txt",
+      "bytes": 42069,
+      "sha256": "a726c1f56155c7ec5c2db64cd7a20bda399592ec7ada50ed81cd622964b3ba62"
+    },
+    "GL_ARB_transform_feedback3": {
+      "path": "docs/khronos/extensions/ARB/ARB_transform_feedback3.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_transform_feedback3.txt",
+      "bytes": 73941,
+      "sha256": "729cf7408c89bfeab2e2794765e1b84f5a5cbb1744cd3fb0b8511f7959e1c5c7"
+    },
+    "GL_ARB_transform_feedback_instanced": {
+      "path": "docs/khronos/extensions/ARB/ARB_transform_feedback_instanced.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_transform_feedback_instanced.txt",
+      "bytes": 6746,
+      "sha256": "a63922ab8afbebe91750205c6a4a7db74ef6e98da34e175f6fc7e344f7392e50"
+    },
+    "GL_ARB_transform_feedback_overflow_query": {
+      "path": "docs/khronos/extensions/ARB/ARB_transform_feedback_overflow_query.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_transform_feedback_overflow_query.txt",
+      "bytes": 11131,
+      "sha256": "ddc962a5e300691372e2a0cb085d278fe06147123bf8beaf57c0f5ab4dd90c2a"
+    },
+    "GL_ARB_uniform_buffer_object": {
+      "path": "docs/khronos/extensions/ARB/ARB_uniform_buffer_object.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_uniform_buffer_object.txt",
+      "bytes": 179454,
+      "sha256": "08e705825444ba78b455deab368af61045abb567f5e91ccc61f1688347d8f790"
+    },
+    "GL_ARB_vertex_array_bgra": {
+      "path": "docs/khronos/extensions/ARB/ARB_vertex_array_bgra.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_vertex_array_bgra.txt",
+      "bytes": 14434,
+      "sha256": "cf5267e221fb5c9d372cdd371a8ba18ca73b01c5c3d68adc9d4b42d14646e567"
+    },
+    "GL_ARB_vertex_array_object": {
+      "path": "docs/khronos/extensions/ARB/ARB_vertex_array_object.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_vertex_array_object.txt",
+      "bytes": 18614,
+      "sha256": "8bdf24b1169efcfcaf547b52820f14b8d4b031655e5662b322e1ddbad8d1ab5d"
+    },
+    "GL_ARB_vertex_attrib_64bit": {
+      "path": "docs/khronos/extensions/ARB/ARB_vertex_attrib_64bit.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_vertex_attrib_64bit.txt",
+      "bytes": 32100,
+      "sha256": "54d1fd94d3d2fbc56945df02d0c222039bdb84e0c7a7ed3f386dd7872b173d62"
+    },
+    "GL_ARB_vertex_attrib_binding": {
+      "path": "docs/khronos/extensions/ARB/ARB_vertex_attrib_binding.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_vertex_attrib_binding.txt",
+      "bytes": 31088,
+      "sha256": "093a39e92ec1b7a70d6e6a2f3786ed3c21428bf179ebbf02a6b8ad98c5f3ff0d"
+    },
+    "GL_ARB_vertex_type_10f_11f_11f_rev": {
+      "path": "docs/khronos/extensions/ARB/ARB_vertex_type_10f_11f_11f_rev.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_vertex_type_10f_11f_11f_rev.txt",
+      "bytes": 10455,
+      "sha256": "fe87f6736db0624ca7f64ff988fa1d7427734b5072898d301d9bba61bc0be1fe"
+    },
+    "GL_ARB_vertex_type_2_10_10_10_rev": {
+      "path": "docs/khronos/extensions/ARB/ARB_vertex_type_2_10_10_10_rev.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_vertex_type_2_10_10_10_rev.txt",
+      "bytes": 25236,
+      "sha256": "1eb152782bd978e31d86b368bac5dac43ede875115225b7c8bde4c9418eab5c8"
+    },
+    "GL_ARB_viewport_array": {
+      "path": "docs/khronos/extensions/ARB/ARB_viewport_array.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_viewport_array.txt",
+      "bytes": 39967,
+      "sha256": "8eb200b3577ef6a42d2b1c780bf7ffb824d46e9db2bd4f718a8b513f25931bc4"
+    },
+    "GL_EXT_EGL_image_storage": {
+      "path": "docs/khronos/extensions/EXT/EXT_EGL_image_storage.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_EGL_image_storage.txt",
+      "bytes": 9146,
+      "sha256": "5c2a61d95b7554f6e4ca187ff5d2dda1c2393f5288d419bc0a850145ae7c461a"
+    },
+    "GL_EXT_EGL_sync": {
+      "path": "docs/khronos/extensions/EXT/EXT_EGL_sync.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_EGL_sync.txt",
+      "bytes": 1609,
+      "sha256": "7c9ad79a4ecc692bdb1a6bddd4a705e745fda54bb220a5bbc2821ff646fae79c"
+    },
+    "GL_EXT_debug_label": {
+      "path": "docs/khronos/extensions/EXT/EXT_debug_label.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_debug_label.txt",
+      "bytes": 13151,
+      "sha256": "615f705fec185bb98b9bd87beafc1ecb59b3bdb479979ed30b4f73588217a26f"
+    },
+    "GL_EXT_debug_marker": {
+      "path": "docs/khronos/extensions/EXT/EXT_debug_marker.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_debug_marker.txt",
+      "bytes": 5567,
+      "sha256": "908b0e346173de118bba430b12ad4d0afbd329fbef7c020354d6bdcbd9328d8a"
+    },
+    "GL_EXT_direct_state_access": {
+      "path": "docs/khronos/extensions/EXT/EXT_direct_state_access.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_direct_state_access.txt",
+      "bytes": 211576,
+      "sha256": "3b3f443d82bc8a4ce188b754fc270e330be8ede9081697a1c3653bd8082999e7"
+    },
+    "GL_EXT_draw_instanced": {
+      "path": "docs/khronos/extensions/EXT/EXT_draw_instanced.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_draw_instanced.txt",
+      "bytes": 7656,
+      "sha256": "c59d7a692082122b5411d326b77bfb7e56386251485ce71ccfb192b207306173"
+    },
+    "GL_EXT_fragment_shading_rate": {
+      "path": "docs/khronos/extensions/EXT/EXT_fragment_shading_rate.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_fragment_shading_rate.txt",
+      "bytes": 47826,
+      "sha256": "d5f0f36ad70c19c0a2d90802d178cdddde45d8bb00538fd164d12d946055b06c"
+    },
+    "GL_EXT_mesh_shader": {
+      "path": "docs/khronos/extensions/EXT/EXT_mesh_shader.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_mesh_shader.txt",
+      "bytes": 62559,
+      "sha256": "b3813daafa27ff5ae769cd835bb976a15708ef61cfb78b766c4c434958f1ad2b"
+    },
+    "GL_EXT_multiview_tessellation_geometry_shader": {
+      "path": "docs/khronos/extensions/EXT/EXT_multiview_tessellation_geometry_shader.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_multiview_tessellation_geometry_shader.txt",
+      "bytes": 9409,
+      "sha256": "15a0715ecf96e2757e85e2467c230d9d1e1c597bb95054a65e9de740da5aa930"
+    },
+    "GL_EXT_multiview_texture_multisample": {
+      "path": "docs/khronos/extensions/EXT/EXT_multiview_texture_multisample.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_multiview_texture_multisample.txt",
+      "bytes": 6666,
+      "sha256": "c6f0f7120f21b59d9728cbf08b2709a0401b58cf9895338852671b806e88cbb2"
+    },
+    "GL_EXT_multiview_timer_query": {
+      "path": "docs/khronos/extensions/EXT/EXT_multiview_timer_query.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_multiview_timer_query.txt",
+      "bytes": 2638,
+      "sha256": "c4ebc666fe57da82bdb970598350a057701585d8aeb496ba49aa75d792828b88"
+    },
+    "GL_EXT_polygon_offset_clamp": {
+      "path": "docs/khronos/extensions/EXT/EXT_polygon_offset_clamp.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_polygon_offset_clamp.txt",
+      "bytes": 8157,
+      "sha256": "3b2cb8c9c1348cd180557b1b7b958d750ed387953a67db9b38f0d9fa80de5c44"
+    },
+    "GL_EXT_post_depth_coverage": {
+      "path": "docs/khronos/extensions/EXT/EXT_post_depth_coverage.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_post_depth_coverage.txt",
+      "bytes": 6773,
+      "sha256": "0e5511269d16f1f1b877c25cb88f3fd51f09336dc12bdbcb648be693d9ad1424"
+    },
+    "GL_EXT_raster_multisample": {
+      "path": "docs/khronos/extensions/EXT/EXT_raster_multisample.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_raster_multisample.txt",
+      "bytes": 19026,
+      "sha256": "6f3d74fda716acf021b90e24b22c3a49c3fe3ec16ce19631d3676094900fb159"
+    },
+    "GL_EXT_shader_framebuffer_fetch": {
+      "path": "docs/khronos/extensions/EXT/EXT_shader_framebuffer_fetch.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_shader_framebuffer_fetch.txt",
+      "bytes": 35349,
+      "sha256": "42e43ce1fbd5533c760244bd0b117e19cf4aa2735800da7746480ca94069f729"
+    },
+    "GL_EXT_shader_integer_mix": {
+      "path": "docs/khronos/extensions/EXT/EXT_shader_integer_mix.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_shader_integer_mix.txt",
+      "bytes": 3534,
+      "sha256": "b11cba19d4f582373ef0d587a82c7840f197acf2f1438fa67cde574141bb7dae"
+    },
+    "GL_EXT_texture_compression_s3tc": {
+      "path": "docs/khronos/extensions/EXT/EXT_texture_compression_s3tc.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_texture_compression_s3tc.txt",
+      "bytes": 41723,
+      "sha256": "4b8064e3032ebef0f2afdef6c38f2d758d1911f759eeeceac904b0d81f301c4c"
+    },
+    "GL_EXT_texture_filter_minmax": {
+      "path": "docs/khronos/extensions/EXT/EXT_texture_filter_minmax.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_texture_filter_minmax.txt",
+      "bytes": 15269,
+      "sha256": "256f4b8cf4b6944cbe0320f8da08e9da967552cb540520db586e34de2b7d5319"
+    },
+    "GL_EXT_texture_sRGB": {
+      "path": "docs/khronos/extensions/EXT/EXT_texture_sRGB.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_texture_sRGB.txt",
+      "bytes": 36157,
+      "sha256": "75c32a102e5bacba8e1a5a8acd3fa6c0a4f470db24d33b904d9d8cc533f3d0bc"
+    },
+    "GL_EXT_texture_sRGB_R8": {
+      "path": "docs/khronos/extensions/EXT/EXT_texture_sRGB_R8.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_texture_sRGB_R8.txt",
+      "bytes": 4142,
+      "sha256": "e20237a52a5467ccd3c49aa1f0e51efd0dbd1ac535f71be1062899bb4c1bae71"
+    },
+    "GL_EXT_texture_sRGB_RG8": {
+      "path": "docs/khronos/extensions/EXT/EXT_texture_sRGB_RG8.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_texture_sRGB_RG8.txt",
+      "bytes": 4957,
+      "sha256": "d38af1323ccad7e8e05caae9de8ec029492b1deb792dc18f97a0d0b8dfcdd401"
+    },
+    "GL_EXT_texture_sRGB_decode": {
+      "path": "docs/khronos/extensions/EXT/EXT_texture_sRGB_decode.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_texture_sRGB_decode.txt",
+      "bytes": 31272,
+      "sha256": "f1e4ab56f283dd86ac03e23124e2e4d5487cee16b997c831756c84556c1684bc"
+    },
+    "GL_EXT_texture_shadow_lod": {
+      "path": "docs/khronos/extensions/EXT/EXT_texture_shadow_lod.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_texture_shadow_lod.txt",
+      "bytes": 5988,
+      "sha256": "2d4c784380deb097fa20f19123b4dfe514c0ae8bb0e50ed0975016f855de3adf"
+    },
+    "GL_EXT_texture_storage": {
+      "path": "docs/khronos/extensions/EXT/EXT_texture_storage.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_texture_storage.txt",
+      "bytes": 45197,
+      "sha256": "e8efad067224a78efe3007e3b42a60f6b421b0fd37bb6ed994e13089c4585b10"
+    },
+    "GL_EXT_window_rectangles": {
+      "path": "docs/khronos/extensions/EXT/EXT_window_rectangles.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_window_rectangles.txt",
+      "bytes": 32885,
+      "sha256": "1f94816f702d8cc9f95000c562c301503a75fdaf7593eec10fb8d6ef8b13b374"
+    },
+    "GL_INTEL_blackhole_render": {
+      "path": "docs/khronos/extensions/INTEL/INTEL_blackhole_render.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/INTEL/INTEL_blackhole_render.txt",
+      "bytes": 2858,
+      "sha256": "e3326e9c783d9630cf5c3713764b95c28eab8c5cd49649eba2007bfdf6aa5365"
+    },
+    "GL_INTEL_conservative_rasterization": {
+      "path": "docs/khronos/extensions/INTEL/INTEL_conservative_rasterization.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/INTEL/INTEL_conservative_rasterization.txt",
+      "bytes": 22142,
+      "sha256": "b67cae0181d2ea178c8d72c004d07b1f43504e8835c18b4bf25d15754fa64ff5"
+    },
+    "GL_INTEL_framebuffer_CMAA": {
+      "path": "docs/khronos/extensions/INTEL/INTEL_framebuffer_CMAA.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/INTEL/INTEL_framebuffer_CMAA.txt",
+      "bytes": 3927,
+      "sha256": "839c459a12322e074879f127b4745933ceb4896d5d72dca357523b8339c6caf1"
+    },
+    "GL_INTEL_performance_query": {
+      "path": "docs/khronos/extensions/INTEL/INTEL_performance_query.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/INTEL/INTEL_performance_query.txt",
+      "bytes": 30348,
+      "sha256": "3f6d8e21ceaeb9c17d2432a59f45789ff9369e6edf0dbff9cc0cce4e54566f69"
+    },
+    "GL_KHR_blend_equation_advanced": {
+      "path": "docs/khronos/extensions/KHR/KHR_blend_equation_advanced.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_blend_equation_advanced.txt",
+      "bytes": 50843,
+      "sha256": "4438f41009c3d275005e63d9fb99ed34363d1697a24017368bf4d7e68b319f5b"
+    },
+    "GL_KHR_context_flush_control": {
+      "path": "docs/khronos/extensions/KHR/KHR_context_flush_control.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_context_flush_control.txt",
+      "bytes": 16910,
+      "sha256": "084578e08cde8e97ef03103ca57586a6bd6cc3896efd73f1b8a9fa52894336c4"
+    },
+    "GL_KHR_debug": {
+      "path": "docs/khronos/extensions/KHR/KHR_debug.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_debug.txt",
+      "bytes": 76355,
+      "sha256": "cbf267a4d88fd18b71b9adcd94ba4a92101a73d28579a85ee78d2940ead70383"
+    },
+    "GL_KHR_no_error": {
+      "path": "docs/khronos/extensions/KHR/KHR_no_error.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_no_error.txt",
+      "bytes": 6660,
+      "sha256": "f29fbeb4919c942f8d39a05850efc10360b3f06b06e08e98b43f0e9760c5e034"
+    },
+    "GL_KHR_parallel_shader_compile": {
+      "path": "docs/khronos/extensions/KHR/KHR_parallel_shader_compile.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_parallel_shader_compile.txt",
+      "bytes": 6303,
+      "sha256": "aa6f271d99f94ba2637d85cd9bd21a8b93f44175eedc02136d33588e64372844"
+    },
+    "GL_KHR_robust_buffer_access_behavior": {
+      "path": "docs/khronos/extensions/KHR/KHR_robust_buffer_access_behavior.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_robust_buffer_access_behavior.txt",
+      "bytes": 12751,
+      "sha256": "db2ff11dead5f471cf1791330a9f64ec5d1add307dea80c8bf5feeebf8fed7ba"
+    },
+    "GL_KHR_robustness": {
+      "path": "docs/khronos/extensions/KHR/KHR_robustness.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_robustness.txt",
+      "bytes": 27721,
+      "sha256": "83bd64e6ca1fc3daafbfb9b1cddfd3b65d25f7e446f603ed3eee49fd6dff7ded"
+    },
+    "GL_KHR_shader_subgroup": {
+      "path": "docs/khronos/extensions/KHR/KHR_shader_subgroup.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_shader_subgroup.txt",
+      "bytes": 27743,
+      "sha256": "d36f32ce49a79575d0e57c3158c9800c62db7c0c4acefd2254e515357927280c"
+    },
+    "GL_KHR_texture_compression_astc_hdr": {
+      "path": "docs/khronos/extensions/KHR/KHR_texture_compression_astc_hdr.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_texture_compression_astc_hdr.txt",
+      "bytes": 92599,
+      "sha256": "ef1d6ac631bb149e336c9478746b16c1b1a3ed25b9d9567233861d46e0764406"
+    },
+    "GL_KHR_texture_compression_astc_sliced_3d": {
+      "path": "docs/khronos/extensions/KHR/KHR_texture_compression_astc_sliced_3d.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_texture_compression_astc_sliced_3d.txt",
+      "bytes": 3208,
+      "sha256": "4d55da2876df0ff40c02cc00dd5c5ecf161978706e7253c79f4b0d8e108e386c"
+    },
+    "GL_MESA_framebuffer_flip_x": {
+      "path": "docs/khronos/extensions/MESA/MESA_framebuffer_flip_x.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/MESA/MESA_framebuffer_flip_x.txt",
+      "bytes": 1944,
+      "sha256": "e2339a9a171fa07b109aa6e02504439dfdd2e4bac88f4ad372a92f44671b0824"
+    },
+    "GL_MESA_framebuffer_flip_y": {
+      "path": "docs/khronos/extensions/MESA/MESA_framebuffer_flip_y.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/MESA/MESA_framebuffer_flip_y.txt",
+      "bytes": 2621,
+      "sha256": "cbb1780f1bde3802f8c2a17b880d896ffc68f4a1033d06b47b794720e10ce677"
+    },
+    "GL_MESA_framebuffer_swap_xy": {
+      "path": "docs/khronos/extensions/MESA/MESA_framebuffer_swap_xy.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/MESA/MESA_framebuffer_swap_xy.txt",
+      "bytes": 2216,
+      "sha256": "9f9af3ae5494c38deb96ce0af91baf397f1f971f3edb984f1e03be2a9dad5e0b"
+    },
+    "GL_NV_bindless_multi_draw_indirect": {
+      "path": "docs/khronos/extensions/NV/NV_bindless_multi_draw_indirect.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_bindless_multi_draw_indirect.txt",
+      "bytes": 12446,
+      "sha256": "5b3d3b5f0689b8648562d7c5a8bcbb0c51ff73d0259e341a7eacb6c92e373c7f"
+    },
+    "GL_NV_bindless_multi_draw_indirect_count": {
+      "path": "docs/khronos/extensions/NV/NV_bindless_multi_draw_indirect_count.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_bindless_multi_draw_indirect_count.txt",
+      "bytes": 5855,
+      "sha256": "3a73a4d9b5efa2358c84f705973e092ca2892c69ce1157f4763a7122a9516346"
+    },
+    "GL_NV_bindless_texture": {
+      "path": "docs/khronos/extensions/NV/NV_bindless_texture.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_bindless_texture.txt",
+      "bytes": 74485,
+      "sha256": "1f8f2a7ef455df699a96cb68e83f0a9465928bd884c452edc00c607ac8f29bb3"
+    },
+    "GL_NV_blend_equation_advanced": {
+      "path": "docs/khronos/extensions/NV/NV_blend_equation_advanced.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_blend_equation_advanced.txt",
+      "bytes": 86582,
+      "sha256": "c7cfbcbcde43ac0e3b1b916eebb0f902c48d46b73172348f043cfe3157d567c7"
+    },
+    "GL_NV_blend_minmax_factor": {
+      "path": "docs/khronos/extensions/NV/NV_blend_minmax_factor.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_blend_minmax_factor.txt",
+      "bytes": 12364,
+      "sha256": "d8697d509f37007315d848093617ecb4ac5ca9fad2226e7b430584de36e6cf74"
+    },
+    "GL_NV_clip_space_w_scaling": {
+      "path": "docs/khronos/extensions/NV/NV_clip_space_w_scaling.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_clip_space_w_scaling.txt",
+      "bytes": 9895,
+      "sha256": "9ca58408a9d3beb35a30fcab0fbecd5150b85e191187b61c9f758b6eb2e60f44"
+    },
+    "GL_NV_command_list": {
+      "path": "docs/khronos/extensions/NV/NV_command_list.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_command_list.txt",
+      "bytes": 46685,
+      "sha256": "0de7699818d54e151f767557ce671573ad9f8d4d1f36c83be3fe6cc7396a846a"
+    },
+    "GL_NV_compute_shader_derivatives": {
+      "path": "docs/khronos/extensions/NV/NV_compute_shader_derivatives.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_compute_shader_derivatives.txt",
+      "bytes": 4673,
+      "sha256": "2d51bb0d8387580d26fca4b2ca47c261a0658f6b1765599bcd08984ace9a7f12"
+    },
+    "GL_NV_conditional_render": {
+      "path": "docs/khronos/extensions/NV/NV_conditional_render.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_conditional_render.txt",
+      "bytes": 19820,
+      "sha256": "23206fbf0b9c024a19309e19bedd63af980ed098df09c875cd41cfe5dd5afef8"
+    },
+    "GL_NV_conservative_raster": {
+      "path": "docs/khronos/extensions/NV/NV_conservative_raster.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_conservative_raster.txt",
+      "bytes": 9884,
+      "sha256": "2474ea436c1e1942a78bddb089577e7729ac255b434667b42fe2f8b9a55ff19f"
+    },
+    "GL_NV_conservative_raster_dilate": {
+      "path": "docs/khronos/extensions/NV/NV_conservative_raster_dilate.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_conservative_raster_dilate.txt",
+      "bytes": 5689,
+      "sha256": "07ed97625fa2fe9caa90da413a95b48ed7d6bc42caa23c543e495b6682a20924"
+    },
+    "GL_NV_conservative_raster_pre_snap": {
+      "path": "docs/khronos/extensions/NV/NV_conservative_raster_pre_snap.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_conservative_raster_pre_snap.txt",
+      "bytes": 5939,
+      "sha256": "6a71f9564c4d16e279f498a0cf55faa0a6d8e09e6c555ff329bbe929edd0500e"
+    },
+    "GL_NV_conservative_raster_pre_snap_triangles": {
+      "path": "docs/khronos/extensions/NV/NV_conservative_raster_pre_snap_triangles.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_conservative_raster_pre_snap_triangles.txt",
+      "bytes": 6554,
+      "sha256": "68056f6cc4f593c454389c54a386d974b6142f6bdce43d55bfd7b564942fca54"
+    },
+    "GL_NV_conservative_raster_underestimation": {
+      "path": "docs/khronos/extensions/NV/NV_conservative_raster_underestimation.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_conservative_raster_underestimation.txt",
+      "bytes": 6055,
+      "sha256": "cf1f1a7ab2f4928189870431d9306f6b2984a8cea1f00178d01e8bb70e8a7dd6"
+    },
+    "GL_NV_depth_buffer_float": {
+      "path": "docs/khronos/extensions/NV/NV_depth_buffer_float.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_depth_buffer_float.txt",
+      "bytes": 24825,
+      "sha256": "b778fc4045c63b3b1e9b3353e8f947cd8d9bccf36fd5e66c9b19c1995157401c"
+    },
+    "GL_NV_draw_vulkan_image": {
+      "path": "docs/khronos/extensions/NV/NV_draw_vulkan_image.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_draw_vulkan_image.txt",
+      "bytes": 11533,
+      "sha256": "aaee4ad3df0b1f96dbdecfafad5c6d9c5af092a027b6b75d45ef7c516a045037"
+    },
+    "GL_NV_fill_rectangle": {
+      "path": "docs/khronos/extensions/NV/NV_fill_rectangle.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_fill_rectangle.txt",
+      "bytes": 7655,
+      "sha256": "906466bc3251cb035ca92fccd09131c61be3cc2b9d527cff9788fea341293d8b"
+    },
+    "GL_NV_fragment_coverage_to_color": {
+      "path": "docs/khronos/extensions/NV/NV_fragment_coverage_to_color.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_fragment_coverage_to_color.txt",
+      "bytes": 7833,
+      "sha256": "b6316afbb5d8f70eb22e1fee4a2d41f9c93dd8ec4cbbaadb5279e6b3ef7f2854"
+    },
+    "GL_NV_fragment_shader_barycentric": {
+      "path": "docs/khronos/extensions/NV/NV_fragment_shader_barycentric.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_fragment_shader_barycentric.txt",
+      "bytes": 11100,
+      "sha256": "7f87766b8bd0e9acc7800a151854171ec483cf666e03d503fec3bcdeb2390d95"
+    },
+    "GL_NV_fragment_shader_interlock": {
+      "path": "docs/khronos/extensions/NV/NV_fragment_shader_interlock.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_fragment_shader_interlock.txt",
+      "bytes": 25638,
+      "sha256": "f0d2c9f2d69adc08e149f98b10d78fd24fe12403464cb60072582a051cfbb9e9"
+    },
+    "GL_NV_framebuffer_mixed_samples": {
+      "path": "docs/khronos/extensions/NV/NV_framebuffer_mixed_samples.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_framebuffer_mixed_samples.txt",
+      "bytes": 40196,
+      "sha256": "52ff2ba034f042afa0529a005bc88b03e27301e1df847033eaa1f0872bafdb80"
+    },
+    "GL_NV_framebuffer_multisample_coverage": {
+      "path": "docs/khronos/extensions/NV/NV_framebuffer_multisample_coverage.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_framebuffer_multisample_coverage.txt",
+      "bytes": 15729,
+      "sha256": "8bbd591dab766f9080c08dcab8f80299eab452877d206198425d1534e89e99c9"
+    },
+    "GL_NV_geometry_shader_passthrough": {
+      "path": "docs/khronos/extensions/NV/NV_geometry_shader_passthrough.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_geometry_shader_passthrough.txt",
+      "bytes": 37495,
+      "sha256": "010abfe8d0c5d04901cd7b3c030e5fbd68c4ea9d2c41926e85301cad5586a6a4"
+    },
+    "GL_NV_gpu_shader5": {
+      "path": "docs/khronos/extensions/NV/NV_gpu_shader5.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_gpu_shader5.txt",
+      "bytes": 83600,
+      "sha256": "c7eb14e12ae20251a97af801dbc79f015e9344c155d929a851746877f027a1f3"
+    },
+    "GL_NV_internalformat_sample_query": {
+      "path": "docs/khronos/extensions/NV/NV_internalformat_sample_query.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_internalformat_sample_query.txt",
+      "bytes": 9488,
+      "sha256": "be545e2e1f8c4b3b8a992428d3011782e6ce0abb56c8623153aa82ea50bb4792"
+    },
+    "GL_NV_memory_attachment": {
+      "path": "docs/khronos/extensions/NV/NV_memory_attachment.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_memory_attachment.txt",
+      "bytes": 16472,
+      "sha256": "69cf605b875262241d2f3581653c319916479906850b93efdfe6aad610535f52"
+    },
+    "GL_NV_memory_object_sparse": {
+      "path": "docs/khronos/extensions/NV/NV_memory_object_sparse.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_memory_object_sparse.txt",
+      "bytes": 6735,
+      "sha256": "907605be2adcb8eaaa44a74f9fc97ae1fec815634d1a1251f1f202593390222f"
+    },
+    "GL_NV_mesh_shader": {
+      "path": "docs/khronos/extensions/NV/NV_mesh_shader.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_mesh_shader.txt",
+      "bytes": 57722,
+      "sha256": "030fcdee403e1a3d384cff7e3d8b6e5386390ab110906498082d374ebe64f6ff"
+    },
+    "GL_NV_path_rendering": {
+      "path": "docs/khronos/extensions/NV/NV_path_rendering.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_path_rendering.txt",
+      "bytes": 453648,
+      "sha256": "1d0ccff2d0fd002c59b0bd3cb0488c5f6542e223da30900c7bf7342f5f4e4ce8"
+    },
+    "GL_NV_path_rendering_shared_edge": {
+      "path": "docs/khronos/extensions/NV/NV_path_rendering_shared_edge.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_path_rendering_shared_edge.txt",
+      "bytes": 7757,
+      "sha256": "08c94e87c7433b9e7bcda07cf22eff8644006b128cc3863e38281c0e3944767e"
+    },
+    "GL_NV_primitive_shading_rate": {
+      "path": "docs/khronos/extensions/NV/NV_primitive_shading_rate.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_primitive_shading_rate.txt",
+      "bytes": 10944,
+      "sha256": "e5989014abb004976d52df54248111d38e1bd73dd67354e07be469ecb5d3a163"
+    },
+    "GL_NV_representative_fragment_test": {
+      "path": "docs/khronos/extensions/NV/NV_representative_fragment_test.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_representative_fragment_test.txt",
+      "bytes": 7081,
+      "sha256": "624784e2954cffc2edd075e8b88a990acd835b84a14b5d4b9ed13153f9715384"
+    },
+    "GL_NV_sample_locations": {
+      "path": "docs/khronos/extensions/NV/NV_sample_locations.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_sample_locations.txt",
+      "bytes": 18704,
+      "sha256": "ddf4b67ee7163a1f38e4729f1807ce3cb719234cb9e02cc571418391959b2ffa"
+    },
+    "GL_NV_sample_mask_override_coverage": {
+      "path": "docs/khronos/extensions/NV/NV_sample_mask_override_coverage.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_sample_mask_override_coverage.txt",
+      "bytes": 9241,
+      "sha256": "76bbc1c4842f4f024c925f16838e16bc1829fce4269a68af57fe4856f7cfe998"
+    },
+    "GL_NV_scissor_exclusive": {
+      "path": "docs/khronos/extensions/NV/NV_scissor_exclusive.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_scissor_exclusive.txt",
+      "bytes": 10457,
+      "sha256": "c309c27a7fe68fb793fe261bbeb4bee2d28041242f80e3ddf6f20aa313b0d98e"
+    },
+    "GL_NV_shader_atomic_counters": {
+      "path": "docs/khronos/extensions/NV/NV_shader_atomic_counters.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_atomic_counters.txt",
+      "bytes": 10907,
+      "sha256": "2dd04f2e391721d8c1f3b17375f3fb0e5a2510738bac45953efa168583968e7e"
+    },
+    "GL_NV_shader_atomic_float": {
+      "path": "docs/khronos/extensions/NV/NV_shader_atomic_float.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_atomic_float.txt",
+      "bytes": 7571,
+      "sha256": "2878abc6b662f8299ffdcc963ed6f31eaad4d8a7cf20f980a73a834b1573b35b"
+    },
+    "GL_NV_shader_atomic_float64": {
+      "path": "docs/khronos/extensions/NV/NV_shader_atomic_float64.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_atomic_float64.txt",
+      "bytes": 5917,
+      "sha256": "af914e3eb368308eb3568a2a538097e3f4ee52aea970eb42f7b8612fa45fbcb8"
+    },
+    "GL_NV_shader_atomic_fp16_vector": {
+      "path": "docs/khronos/extensions/NV/NV_shader_atomic_fp16_vector.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_atomic_fp16_vector.txt",
+      "bytes": 11587,
+      "sha256": "fb94537744824be161789c0433459e4fdd8f8e22de4c0f14ce1770ab7dcb0973"
+    },
+    "GL_NV_shader_atomic_int64": {
+      "path": "docs/khronos/extensions/NV/NV_shader_atomic_int64.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_atomic_int64.txt",
+      "bytes": 6088,
+      "sha256": "ae822db35ee5982fa6b16316233e42098b55859d04aab7f19ff4c02e2c070a80"
+    },
+    "GL_NV_shader_buffer_load": {
+      "path": "docs/khronos/extensions/NV/NV_shader_buffer_load.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_buffer_load.txt",
+      "bytes": 63283,
+      "sha256": "fda28bd2665e712f990381d5a90f0e2ebd611487730940f80321c4385b18ab67"
+    },
+    "GL_NV_shader_buffer_store": {
+      "path": "docs/khronos/extensions/NV/NV_shader_buffer_store.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_buffer_store.txt",
+      "bytes": 24117,
+      "sha256": "525d3ec5cb278d2b63ff1a445e98c4f1a9727c95148688953bbd6b823906cf28"
+    },
+    "GL_NV_shader_subgroup_partitioned": {
+      "path": "docs/khronos/extensions/NV/NV_shader_subgroup_partitioned.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_subgroup_partitioned.txt",
+      "bytes": 4589,
+      "sha256": "839fc1bcb338607128f27d585d2d586c0f90584069ff2c7645a64f8c73104130"
+    },
+    "GL_NV_shader_texture_footprint": {
+      "path": "docs/khronos/extensions/NV/NV_shader_texture_footprint.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_texture_footprint.txt",
+      "bytes": 15445,
+      "sha256": "f228c71cebebda7bc76b40c187df1e8bfeeee98ed24fbede63ed2424cfef58c4"
+    },
+    "GL_NV_shader_thread_group": {
+      "path": "docs/khronos/extensions/NV/NV_shader_thread_group.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_thread_group.txt",
+      "bytes": 46602,
+      "sha256": "f5989f4b9dec9e8058ae9c4ce80f3f5d7cce3181a3519f7658651a54249e0c3f"
+    },
+    "GL_NV_shader_thread_shuffle": {
+      "path": "docs/khronos/extensions/NV/NV_shader_thread_shuffle.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shader_thread_shuffle.txt",
+      "bytes": 27386,
+      "sha256": "573e6c0c77ea3844652ed7993d4d56b8557452e9bbaf85b0be9239f19d608a1a"
+    },
+    "GL_NV_shading_rate_image": {
+      "path": "docs/khronos/extensions/NV/NV_shading_rate_image.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_shading_rate_image.txt",
+      "bytes": 51570,
+      "sha256": "c138dfc403a938f04872a1fcc318e444d8b099ff66e1099a714039881c8a0fbc"
+    },
+    "GL_NV_stereo_view_rendering": {
+      "path": "docs/khronos/extensions/NV/NV_stereo_view_rendering.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_stereo_view_rendering.txt",
+      "bytes": 16803,
+      "sha256": "8511cc2e2cebcfeaa2d214715a3e77f44ba21a5c90179dc2dc7974bd1833f01f"
+    },
+    "GL_NV_texture_barrier": {
+      "path": "docs/khronos/extensions/NV/NV_texture_barrier.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_texture_barrier.txt",
+      "bytes": 6871,
+      "sha256": "f1a6e8fe118571ee1ebcca16291d6f86b8ea02b20597e0121c36c31dcac31c3b"
+    },
+    "GL_NV_texture_rectangle_compressed": {
+      "path": "docs/khronos/extensions/NV/NV_texture_rectangle_compressed.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_texture_rectangle_compressed.txt",
+      "bytes": 2581,
+      "sha256": "5e1e0b4b343e5a378f4dcc3126a7da48d494921783f5a536528d91e1322b02d0"
+    },
+    "GL_NV_uniform_buffer_std430_layout": {
+      "path": "docs/khronos/extensions/NV/NV_uniform_buffer_std430_layout.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_uniform_buffer_std430_layout.txt",
+      "bytes": 6779,
+      "sha256": "04bb03adc13b6fe6f515f60581668cadd313813d302ee38709b63072144f53f5"
+    },
+    "GL_NV_uniform_buffer_unified_memory": {
+      "path": "docs/khronos/extensions/NV/NV_uniform_buffer_unified_memory.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_uniform_buffer_unified_memory.txt",
+      "bytes": 6486,
+      "sha256": "3b7b49bb940332a45fa8313c80b523a6cb6d19638e4c169fc8007271792d6223"
+    },
+    "GL_NV_vertex_attrib_integer_64bit": {
+      "path": "docs/khronos/extensions/NV/NV_vertex_attrib_integer_64bit.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_vertex_attrib_integer_64bit.txt",
+      "bytes": 14548,
+      "sha256": "7f0b9e91d87f6ba43ff38f26bdcce8589fbab94dd3c9c4a757cfc0d05ae75904"
+    },
+    "GL_NV_vertex_buffer_unified_memory": {
+      "path": "docs/khronos/extensions/NV/NV_vertex_buffer_unified_memory.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_vertex_buffer_unified_memory.txt",
+      "bytes": 18647,
+      "sha256": "5a89cb367d5ff127610980613a3c0d0fd74014fa3f053f26d44c8db34a87c161"
+    },
+    "GL_NV_viewport_array2": {
+      "path": "docs/khronos/extensions/NV/NV_viewport_array2.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_viewport_array2.txt",
+      "bytes": 24550,
+      "sha256": "d98186b5c12e6167a804cf4c084276ca6005d80db9749a0c2f404195678b9d1d"
+    },
+    "GL_NV_viewport_swizzle": {
+      "path": "docs/khronos/extensions/NV/NV_viewport_swizzle.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_viewport_swizzle.txt",
+      "bytes": 14330,
+      "sha256": "2ada4f7e1a00b3b3f031d3eacd7cef08b2c477a3ee5cab380aff3b9e4d2aec50"
+    },
+    "GL_OVR_multiview": {
+      "path": "docs/khronos/extensions/OVR/OVR_multiview.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/OVR/OVR_multiview.txt",
+      "bytes": 36022,
+      "sha256": "06555ba9aa7c91ad500083924b0d699c0246a2a118df1ddded47165d0078e4f9"
+    },
+    "GL_OVR_multiview2": {
+      "path": "docs/khronos/extensions/OVR/OVR_multiview2.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/OVR/OVR_multiview2.txt",
+      "bytes": 2504,
+      "sha256": "10b143ec720411180eb77cd1eb52c89cc9d0a6a9aa4452e38f14f01a94f7e9c9"
+    },
+    "GL_EXT_separate_shader_objects": {
+      "path": "docs/khronos/extensions/EXT/EXT_separate_shader_objects.gl.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_separate_shader_objects.gl.txt",
+      "bytes": 39700,
+      "sha256": "4db2252bf8c186458ff9c4caf04cd024c98808446aa21a665219ea1616f623b9"
+    }
+  },
+  "missing": [
+    {
+      "name": "GL_ARB_imaging",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_imaging.txt"
+    },
+    {
+      "name": "GL_ARB_robustness_isolation",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/ARB/ARB_robustness_isolation.txt"
+    },
+    {
+      "name": "GL_EXT_shader_framebuffer_fetch_non_coherent",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/EXT/EXT_shader_framebuffer_fetch_non_coherent.txt",
+      "covered_by": "docs/khronos/extensions/EXT/EXT_shader_framebuffer_fetch.txt",
+      "note": "No standalone registry file; the listed spec contains the relevant language."
+    },
+    {
+      "name": "GL_KHR_blend_equation_advanced_coherent",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_blend_equation_advanced_coherent.txt",
+      "covered_by": "docs/khronos/extensions/KHR/KHR_blend_equation_advanced.txt",
+      "note": "No standalone registry file; the listed spec contains the relevant language."
+    },
+    {
+      "name": "GL_KHR_texture_compression_astc_ldr",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/KHR/KHR_texture_compression_astc_ldr.txt",
+      "covered_by": "docs/khronos/extensions/KHR/KHR_texture_compression_astc_hdr.txt",
+      "note": "No standalone registry file; the listed spec contains the relevant language."
+    },
+    {
+      "name": "GL_NV_blend_equation_advanced_coherent",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/extensions/NV/NV_blend_equation_advanced_coherent.txt",
+      "covered_by": "docs/khronos/extensions/NV/NV_blend_equation_advanced.txt",
+      "note": "No standalone registry file; the listed spec contains the relevant language."
+    }
+  ]
+}

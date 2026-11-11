@@ -8,6 +8,7 @@
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include "tglmt/GLConvert.h"
+#include "tglmt/uniform_pack.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -240,6 +241,27 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
         auto it = p.find(0x813B); // GL_TEXTURE_MAX_LOD
         return (it != p.end()) ? (float)it->second : def;
     };
+    // GL_ARB_texture_border_clamp: GL_TEXTURE_BORDER_COLOR (0x1004) là float[4].
+    // fparams giữ 1 float/pname → 4 thành phần nằm ở 0x1004..0x1007.
+    // Metal chỉ dùng màu này khi address mode = clamp-to-border; bỏ qua thì
+    // viền lấy mặc định (0,0,0,0) ≠ màu app đặt trong GL.
+    float border[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    auto readBorder = [&](const std::unordered_map<GLenum, GLfloat>& p) {
+        auto r = p.find(0x1004);
+        if (r == p.end()) return false;
+        border[0] = r->second;
+        bool full = true;
+        for (int i = 1; i < 4; ++i) {
+            auto it = p.find(0x1004 + i);
+            if (it == p.end()) { full = false; break; }
+            border[i] = it->second;
+        }
+        // Set path (glTexParameterfv) chỉ giữ component đầu → nhân bản cho
+        // G/B/A để border đen/trắng (case phổ biến) ra đúng màu.
+        if (!full) border[1] = border[2] = border[3] = border[0];
+        return true;
+    };
+    readBorder(tex.fparams);
     uint64_t key = 0;
     auto sit = c.samplers.find(sid);
     if (sid && sit != c.samplers.end()) {
@@ -247,6 +269,8 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
         auto ff = sit->second.fparams.find(0x84FE); // TEXTURE_MAX_ANISOTROPY
         if (ff != sit->second.fparams.end()) aniso = ff->second;
         lodMax = lodFrom(sit->second.iparams, 1000.0f);
+        // Sampler object ghi đè texture param (cùng quy tắc với filter/wrap).
+        readBorder(sit->second.fparams);
         // Key PHẢI chứa toàn bộ params (min/mag/wrap/aniso/lod): game đổi filter
         // runtime (video settings Filtering/anisotropy, resource reload) qua
         // glSamplerParameteri trên CÙNG sampler id. Key sid-only trả sampler
@@ -261,6 +285,11 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
             mix(ab);
         }
         { uint32_t lb; memcpy(&lb, &lodMax, 4); mix(lb); }
+        // Border color cũng phải trong key: app đổi màu viền giữa runtime thì
+        // cache trả sampler cũ → Metal vẫn dùng viền cũ.
+        for (int i = 0; i < 4; ++i) {
+            uint32_t bb; memcpy(&bb, &border[i], 4); mix(bb);
+        }
         mix(shadowSampler ? 1u : 0u); mix(cmpOn ? 1u : 0u); mix(cmpFunc);
         key = h ^ ((uint64_t)sid * 0x9E3779B97F4A7C15ull); // sid + params
     } else {
@@ -270,11 +299,30 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
         auto xl = tex.params.find(0x813D); // GL_TEXTURE_MAX_LEVEL
         if (bl != tex.params.end()) lodMin = (float)bl->second;
         if (xl != tex.params.end()) lodMax = (float)xl->second;
+        // GL_ARB_texture_filter_anisotropic: TEXTURE_MAX_ANISOTROPY là
+        // TEXTURE param (glTexParameterf trên texture target) — đây là cách
+        // dùng chuẩn. Trước đây draw path chỉ đọc sampler object nên
+        // anisotropy set trên texture KHÔNG BAO GIỜ có tác dụng.
+        auto af = tex.fparams.find(0x84FE); // TEXTURE_MAX_ANISOTROPY
+        if (af != tex.fparams.end()) aniso = af->second;
         key = ((uint64_t)tex.id << 32) | 0x54455800u; // 'TEX\0'
         key ^= ((uint64_t)minF << 48) ^ ((uint64_t)magF << 52);
         key ^= ((uint64_t)(sW & 0xF) << 56) ^ ((uint64_t)(tW & 0xF) << 60);
         { uint32_t a1, a2; memcpy(&a1, &lodMin, 4); memcpy(&a2, &lodMax, 4);
           key ^= ((uint64_t)a1 << 8) ^ ((uint64_t)a2 << 20); }
+        { uint32_t ab; memcpy(&ab, &aniso, 4); key ^= (uint64_t)ab << 40; }
+        // Border color (16 bit hash) vào các bit trống của key (0..7, 16..19,
+        // 28..31) — không đụng bit của tex.id/lod/wrap để tránh bù trừ nhau.
+        {
+            uint64_t bh = 1469598103934665603ull; // FNV-1a 64
+            for (int i = 0; i < 4; ++i) {
+                uint32_t bb; memcpy(&bb, &border[i], 4);
+                bh ^= bb; bh *= 1099511628211ull;
+            }
+            key ^= ((uint64_t)(bh & 0xFFu))
+                 ^ (((uint64_t)((bh >> 8) & 0xFu)) << 16)
+                 ^ (((uint64_t)((bh >> 12) & 0xFu)) << 28);
+        }
         if (shadowSampler) key ^= 0x5EED000000000000ull;
         if (cmpOn) key ^= 0xC0FFEE0000000000ull ^ ((uint64_t)cmpFunc << 33);
     }
@@ -308,6 +356,9 @@ static std::shared_ptr<metal::ISamplerState> SamplerForUnit(Context& c, GLuint u
     d.noMip = noMip;
     d.lodMin = lodMin; d.lodMax = lodMax;
     d.compareFunc = cmpOn ? cmpFunc : 0;
+    // GL_ARB_texture_border_clamp: màu viền cho CLAMP_TO_BORDER (Metal chỉ đọc
+    // borderColor khi address mode = clamp-to-border).
+    for (int i = 0; i < 4; ++i) d.borderColor[i] = border[i];
     auto s = c.device->makeSampler(d);
     if (s) {
         cache[key] = s;
@@ -508,7 +559,9 @@ static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
     metal::ScissorRect sc{};
     const metal::ScissorRect* scp = nullptr;
     if (c.state.IsEnabled(0x0C11) && slotOnly <= 0 && target->colorCount() == 1) {
-        auto s = c.state.GetScissor();
+        // Clear luôn dùng scissor box của viewport 0 (spec §14.9.2: "For buffer
+        // clears, the scissor rectangle numbered zero is used").
+        auto s = c.state.GetScissor(0);
         bool upper = c.state.ClipOrigin() == 0x8CA2;
         sc = GLScissorToMetal(s.x, s.y, s.w, s.h, (int)target->height(), upper);
         if (sc.x >= target->width() || sc.y >= target->height()) { ConsumeDeferredClear(c); return true; }
@@ -798,9 +851,23 @@ static bool AppleDrawTess(Context& c, ProgramObject& pr, metal::IRenderTarget* t
             auto lit = pr.uniformLoc.find(e.name);
             if (lit == pr.uniformLoc.end()) continue;
             auto uit = pr.uniforms.find(lit->second);
-            if (uit == pr.uniforms.end() || uit->second.empty()) continue;
-            size_t n = e.size < uit->second.size() ? e.size : uit->second.size();
-            if (e.offset + n <= data.size()) memcpy(data.data() + e.offset, uit->second.data(), n);
+            if (uit == pr.uniforms.end() || uit->second.bytes.empty()) continue;
+            // Ma trận: GL column-major chặt → MSL cột stride 16 (xem draw path).
+            int mcols = 0, mrows = 0;
+            if (!e.glslType.empty() && GlslMatrixDims(e.glslType, mcols, mrows)) {
+                const size_t tight = (size_t)mcols * (size_t)mrows * sizeof(float);
+                const size_t mslMat = MslMatrixSize(e.glslType);
+                const size_t count = (e.arraySize > 0) ? (size_t)e.arraySize : 1;
+                if (e.offset + mslMat * count > data.size()) continue;
+                if (uit->second.bytes.size() < tight * count) continue;
+                for (size_t i = 0; i < count; ++i)
+                    PackGlslMatrixToMsl(e.glslType,
+                                        uit->second.bytes.data() + i * tight, tight,
+                                        data.data() + e.offset + i * mslMat, mslMat);
+                continue;
+            }
+            size_t n = e.size < uit->second.bytes.size() ? e.size : uit->second.bytes.size();
+            if (e.offset + n <= data.size()) memcpy(data.data() + e.offset, uit->second.bytes.data(), n);
         }
         auto b = c.device->newBufferWithBytes(data.data(), data.size(),
                                               metal::StorageMode::Shared);
@@ -1377,8 +1444,8 @@ static bool AppleCaptureXFB(Context& c, ProgramObject& pr, XfbObject& xfb, GLenu
         if (uit == pr.uniforms.end()) continue;
         size_t base = e.isVS ? 0 : ((pr.vsUBSize + 15) & ~((size_t)15));
         size_t local = (e.offset >= base) ? e.offset - base : e.offset;
-        size_t n = std::min(e.size, uit->second.size());
-        if (local + n <= vsBytes.size()) memcpy(vsBytes.data() + local, uit->second.data(), n);
+        size_t n = std::min(e.size, uit->second.bytes.size());
+        if (local + n <= vsBytes.size()) memcpy(vsBytes.data() + local, uit->second.bytes.data(), n);
     }
     auto vsUBSp = c.device->newBufferWithBytes(vsBytes.data(), vsBytes.size(),
                                                metal::StorageMode::Shared);
@@ -1720,7 +1787,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     GLuint prog = c.state.BoundProgram();
     ProgramObject* prp = nullptr;
     GLuint pipeBound = 0;
-    c.state.GetShadow(0x8254 /*PROGRAM_PIPELINE_BINDING*/, &pipeBound, 4);
+    c.state.GetShadow(0x825A /*PROGRAM_PIPELINE_BINDING*/, &pipeBound, 4);
     if (pipeBound) {
         if (!BuildPipelineProgram(c, pipeBound, pipelineProg, prog)) {
             c.appleStats.noProgram++;
@@ -2210,7 +2277,14 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // (glEnablei/glBlendFunci) + colorWriteMask (glColorMaski); slot rỗng → Invalid.
     metal::PipelineOpts opts;
     opts.samples = target->sampleCount();
-    opts.depth = c.state.IsEnabled(0x0B71) && (c.state.BoundDrawFBO() == 0 ? false : hasDepthTex);
+    // Depth test bật khi GL_DEPTH_TEST bật VÀ target thật sự có depth buffer.
+    // Trước đây nhánh default framebuffer (FBO 0) bị ép `false` → GL_DEPTH_TEST
+    // trên default FB im lặng không có tác dụng, dù Renderer đã cấp depth
+    // buffer cho default target (makeRenderTargetWithDepth). Đúng theo GL 4.6
+    // §17.3.6: default framebuffer CÓ depth (16/24 bit) và depth test phải
+    // hoạt động trên đó.
+    opts.depth = c.state.IsEnabled(0x0B71) &&
+                 (c.state.BoundDrawFBO() == 0 ? target->hasDepth() : hasDepthTex);
     // Stencil: pipeline/pass chỉ khai báo stencil attachment khi target THẬT có
     // stencil (Depth24Stencil8). Test bật/tắt nằm trong stencilDesc.
     opts.stencil = target->hasStencil();
@@ -2243,7 +2317,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         opts.colorFmts[s] = colPtrs[s] ? slotFmts[s] : metal::PixelFormat::Invalid;
         const BlendState& b = c.state.Blend()[s];
         metal::AttachmentBlend& ab = opts.blends[s];
-        ab.enabled = c.state.IsEnabled(0x0BE2, s) && (defaultFB ? s == 0 : colPtrs[s] != nullptr);
+        // GL 4.6: COLOR_LOGIC_OP on ⇒ blend stage bypassed (logic op thay blend).
+        ab.enabled = c.state.IsEnabled(0x0BE2, s) && !c.state.IsEnabled(0x0BF2) &&
+                     (defaultFB ? s == 0 : colPtrs[s] != nullptr);
         ab.srcRGB = b.srcRGB; ab.dstRGB = b.dstRGB;
         ab.srcAlpha = b.srcAlpha; ab.dstAlpha = b.dstAlpha;
         ab.rgbOp = b.rgbEq; ab.alphaOp = b.alphaEq;
@@ -2279,8 +2355,9 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     {
         Context::DiagPhase _dp(c.appleStats, &Context::AppleStats::nsPipe, dgPhase);
         Context::PipelineKey want;
-        want.vsLib = pr.appleVS.get();
-        want.fsLib = pr.appleFS.get();
+        want.vsLib = pr.appleVS ? pr.appleVS->identity() : 0ull;
+        want.fsLib = pr.appleFS ? pr.appleFS->identity() : 0ull;
+        want.programGen = pr.linkGen;
         want.fmt = pipeFmt;
         want.stride = casN ? cas[0].stride : 0;
         want.depth = passHasDepth;
@@ -2512,9 +2589,37 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         }
         enc->setFragmentBytes(&smask, sizeof(smask), 30);
     }
+    // GL_ARB_sample_shading / GL_OES_sample_shading: MIN_SAMPLE_SHADING_VALUE
+    // (0x8C37) + enable SAMPLE_SHADING (0x8C36) đã track + query đúng (xem
+    // gl_raster.cpp / gl_get.cpp). Phần rasterization Metal KHÔNG có API tương
+    // đương: MSL không có per-sample shading rate (Metal chỉ có
+    // rasterizationRateMap = pixel coarsening, không phải per-sample shading),
+    // và Metal MSAA resolve luôn trộn theo coverage → không thể tạo N bộ
+    // fragment input riêng cho N sample như spec §14.3.1.1 yêu cầu.
+    // Vì vậy SAMPLE_SHADING bị bỏ qua khi rasterize; đây là GIỚI HẠN THẬT của
+    // Metal, không phải state bị bỏ sót. Ghi log 1 lần khi app dùng để
+    // không tưởng im lặng là đã hỗ trợ.
+    if (target->sampleCount() > 1 && c.state.IsEnabled(0x8C36 /*SAMPLE_SHADING*/)) {
+        float mss = 0.0f;
+        c.state.GetShadow(0x8C37 /*MIN_SAMPLE_SHADING_VALUE*/, &mss, sizeof(mss));
+        if (mss > 0.0f && c.DiagOn()) {
+            static int nSS = 0;
+            if (++nSS <= 4)
+                fprintf(stderr,
+                        "[TGLMT] sample_shading: SAMPLE_SHADING on, MIN_SAMPLE_SHADING_VALUE=%.3f"
+                        " — Metal không hỗ trợ per-sample shading rate, bỏ qua (giới hạn Metal)\n",
+                        (double)mss);
+        }
+    }
     // Viewport/scissor (GL→Metal convert) — IR dirty-check: chỉ encode khi đổi.
     {
-        ViewportState vp0 = c.state.GetViewport(0);
+        // Viewport index của draw: GL chọn viewport theo gl_ViewportIndex của
+        // geometry shader và dùng scissor box ứng với index đó (spec §14.9.2).
+        // Metal không render nhiều viewport trong 1 pass → chỉ viewport hiện tại
+        // (TGLMT: index luôn 0 vì GS emulate bằng compute-prepass, xem
+        // StateTracker::CurrentViewportIndex).
+        const int vpIdx = (int)c.state.CurrentViewportIndex();
+        ViewportState vp0 = c.state.GetViewport(vpIdx);
         float th = (float)target->height();
         bool upper = c.state.ClipOrigin() == 0x8CA2; // UPPER_LEFT (đã đối chiếu gl.xml)
         bool z10 = c.state.ClipDepth() == 0x935F;    // ZERO_TO_ONE (đã đối chiếu gl.xml)
@@ -2541,7 +2646,7 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         }
         bool scissorOn = c.state.IsEnabled(0x0C11);
         if (scissorOn) { // SCISSOR_TEST
-            auto sc = c.state.GetScissor();
+            auto sc = c.state.GetScissor(vpIdx);
             metal::ScissorRect mr = GLScissorToMetal(sc.x, sc.y, sc.w, sc.h, (int)target->height(),
                                                    upper);
             // kẹp vào target (Metal_scissor vượt biên → lỗi validation)
@@ -2733,8 +2838,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                 static float lastTintVal[4] = {0, 0, 0, 0};
                 auto tu = (e.loc < 0) ? pr.uniforms.end() : pr.uniforms.find(e.loc);
                 float f[4] = {0, 0, 0, 0};
-                bool have = tu != pr.uniforms.end() && tu->second.size() >= 16;
-                if (have) memcpy(f, tu->second.data(), 16);
+                bool have = tu != pr.uniforms.end() && tu->second.bytes.size() >= 16;
+                if (have) memcpy(f, tu->second.bytes.data(), 16);
                 bool same = have && prog == lastTintProg &&
                             memcmp(f, lastTintVal, 16) == 0;
                 if (!same && ++nTintDraw <= 2000) {
@@ -2761,9 +2866,26 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
             size_t base = e.isVS ? 0 : ((pr.vsUBSize + 15) & ~((size_t)15));
             size_t local = (e.offset >= base) ? e.offset - base : e.offset;
             std::vector<uint8_t>* dst = e.isVS ? &vsb : &fsb;
-            size_t n = std::min(e.size, uit->second.size());
-            if (local + n <= dst->size()) memcpy(dst->data() + local, uit->second.data(), n);
-        }
+            // Ma trận: GL gửi column-major CHẶT (mat3 = 36B) còn MSL float3x3
+            // trong struct có 3 cột float3 stride 16 (= 48B) → phải nới cột,
+            // nếu không copy thẳng thì cột 1/2 lệch 4/8 byte ⇒ ma trận rác.
+            int mcols = 0, mrows = 0;
+            if (!e.glslType.empty() && GlslMatrixDims(e.glslType, mcols, mrows)) {
+                const size_t tight = (size_t)mcols * (size_t)mrows * sizeof(float);
+                const size_t mslMat = MslMatrixSize(e.glslType);
+                const size_t count = (e.arraySize > 0) ? (size_t)e.arraySize : 1;
+                if (local + mslMat * count > dst->size()) continue;
+                if (uit->second.bytes.size() < tight * count) continue;
+                for (size_t i = 0; i < count; ++i)
+                    PackGlslMatrixToMsl(e.glslType,
+                                        uit->second.bytes.data() + i * tight,
+                                        tight,
+                                        dst->data() + local + i * mslMat,
+                                        mslMat);
+                continue;
+            }
+            size_t n = std::min(e.size, uit->second.bytes.size());
+            if (local + n <= dst->size()) memcpy(dst->data() + local, uit->second.bytes.data(), n);        }
         auto& uc = c.uniformCache;
         bool sameProg = uc.valid && uc.prog == prog;
         bool sameVS = sameProg && uc.vsBytes.size()==vsb.size() &&

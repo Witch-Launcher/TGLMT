@@ -80,9 +80,9 @@ int main() {
         // Per-process paths: ctest -j runs several metal compiles at once. Fixed
         // /tmp names made this test fail sporadically under parallel load.
         const std::string base = "/tmp/tglmt-overload-" + std::to_string((long)getpid());
-        const std::string probeMsl = base + "-probe.msl";
+        const std::string probeMsl = base + "-probe.metal";
         const std::string probeAir = base + "-probe.air";
-        const std::string pow2Msl = base + "-pow2.msl";
+        const std::string pow2Msl = base + "-pow2.metal";
         const std::string pow2Air = base + "-pow2.air";
         { FILE* f = fopen(probeMsl.c_str(), "w");
           if (f) { fputs("#include <metal_stdlib>\nusing namespace metal;\nkernel void probe(){}\n", f); fclose(f); } }

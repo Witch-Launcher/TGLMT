@@ -48,7 +48,8 @@ int main() {
     Check(t.mipData.count(2) && t.mipData[2].w == 1 && t.mipData[2].h == 1 &&
           t.mipData[2].d == 1, "3D mip2 dims 1x1x1");
 
-    std::vector<unsigned char> px3(8, 9);
+    // 2x2x2 RGBA8 = 32 byte (trước đây 8 byte ⇒ đọc tràn heap).
+    std::vector<unsigned char> px3(2 * 2 * 2 * 4, 9);
     glTexSubImage3D(0x806F, 1, 0, 0, 0, 2, 2, 2, 0x1908, 0x1401, px3.data());
     Check(glGetError() == 0, "glTexSubImage3D 3D level1");
     Check(t.mipData[1].pixels.size() == (size_t)2 * 2 * 2 * 4,

@@ -542,7 +542,9 @@ int main() {
             GLuint ct = 0;
             glGenTextures(1, &ct);
             glBindTexture(0x0DE1, ct);
-            unsigned char init[4] = {10, 20, 30, 40};
+            // 2x2 RGBA8 = 16 byte (trước đây init chỉ 4 byte ⇒ đọc tràn
+            // stack — ASan bắt được).
+            unsigned char init[2 * 2 * 4] = {10, 20, 30, 40};
             glTexImage2D(0x0DE1, 0, 0x8058 /*RGBA8*/, 2, 2, 0, 0x1908, 0x1401, init);
             unsigned char clr[4] = {200, 150, 100, 255};
             glClearTexImage(ct, 0, 0x1908 /*RGBA*/, 0x1401 /*UNSIGNED_BYTE*/, clr);

@@ -4,6 +4,7 @@
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -18,6 +19,29 @@ static BufferObject* BoundBuf(GLenum target, bool create = false) {
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return nullptr; }
     (void)create;
     return &it->second;
+}
+
+// GL_ARB_buffer_storage: flags hợp lệ của glBufferStorage chỉ gồm
+// MAP_READ_BIT | MAP_WRITE_BIT | MAP_PERSISTENT_BIT | MAP_COHERENT_BIT.
+// Spec §6.2 (GL 4.6 core): bit lạ → INVALID_VALUE; MAP_PERSISTENT mà thiếu
+// READ/WRITE → INVALID_VALUE; MAP_COHERENT mà thiếu MAP_PERSISTENT →
+// INVALID_VALUE. Trước đây TGLMT nhận mọi flags → app sai vẫn "chạy" được
+// và query BUFFER_STORAGE_FLAGS trả về giá trị không hợp lệ.
+static bool ValidStorageFlags(GLbitfield f) {
+    // GL 4.6 §6.2 + ARB_buffer_storage: flags hợp lệ gồm 6 bit —
+    //   MAP_READ_BIT 0x01, MAP_WRITE_BIT 0x02, MAP_PERSISTENT_BIT 0x40,
+    //   MAP_COHERENT_BIT 0x80, DYNAMIC_STORAGE_BIT 0x100, CLIENT_STORAGE_BIT 0x200.
+    // THIẾU 0x100/0x200 là Minecraft 26.2 crash ngay lúc boot: MC dùng
+    // GlConst.bufferUsageToGlFlag() để map usage → flags, trong đó
+    // USAGE_COPY_DST → 0x100 (DYNAMIC_STORAGE_BIT) và USAGE_HINT_CLIENT_STORAGE
+    // → 0x200 (CLIENT_STORAGE_BIT); cả hai đều hợp lệ theo spec.
+    const GLbitfield kKnown = 0x0001 /*MAP_READ_BIT*/ | 0x0002 /*MAP_WRITE_BIT*/ |
+                              0x0040 /*MAP_PERSISTENT_BIT*/ | 0x0080 /*MAP_COHERENT_BIT*/ |
+                              0x0100 /*DYNAMIC_STORAGE_BIT*/ | 0x0200 /*CLIENT_STORAGE_BIT*/;
+    if (f & ~kKnown) return false;                       // bit lạ
+    if ((f & 0x0040) && !(f & 0x0003)) return false;     // PERSISTENT cần READ|WRITE
+    if ((f & 0x0080) && !(f & 0x0040)) return false;     // COHERENT cần PERSISTENT
+    return true;
 }
 
 namespace tglmt {
@@ -275,6 +299,32 @@ void Context::FlushAllBufferStaging() {
 } // namespace tglmt
 
 namespace tglmt::gl {
+// Buffer target hợp lệ (GL 4.6 §6.1, table 6.1). Dùng để validate target cho
+// các lệnh buffer (INVALID_ENUM nếu target không nằm trong bảng).
+static bool IsBufferTarget(GLenum t) {
+    switch (t) {
+        case 0x8892:  // GL_ARRAY_BUFFER
+        case 0x8893:  // GL_ELEMENT_ARRAY_BUFFER
+        case 0x88EB:  // GL_PIXEL_PACK_BUFFER
+        case 0x88EC:  // GL_PIXEL_UNPACK_BUFFER
+        case 0x8A11:  // GL_UNIFORM_BUFFER
+        case 0x8C8E:  // GL_TRANSFORM_FEEDBACK_BUFFER
+        case 0x8C2A:  // GL_TEXTURE_BUFFER
+        case 0x8F36:  // GL_COPY_READ_BUFFER
+        case 0x8F37:  // GL_COPY_WRITE_BUFFER
+        case 0x8F3F:  // GL_DRAW_INDIRECT_BUFFER
+        case 0x80EE:  // GL_PARAMETER_BUFFER
+        case 0x90EF:  // GL_DISPATCH_INDIRECT_BUFFER
+        case 0x90D2:  // GL_SHADER_STORAGE_BUFFER
+        case 0x91F2:  // GL_QUERY_BUFFER
+        case 0x92C0:  // GL_ATOMIC_COUNTER_BUFFER
+            return true;
+        default:
+            return false;
+    }
+}
+
+
 void glGenBuffers(GLsizei n, GLuint* buffers) {
     Context& c = Context::Current();
     if (n < 0) { c.errors.Record(0x0501); return; }
@@ -297,8 +347,24 @@ void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     if (n < 0) { c.errors.Record(0x0501); return; }
     c.registry.Delete(ObjectKind::Buffer, n, buffers);
     for (GLsizei i = 0; i < n; ++i) {
-        c.buffers.erase(buffers[i]);
-        c.pendingBufRanges.erase(buffers[i]);
+        GLuint b = buffers[i];
+        c.buffers.erase(b);
+        c.pendingBufRanges.erase(b);
+        // GL 4.6 §6.1: "If a buffer object that is currently bound is deleted,
+        // the binding reverts to 0 (the default buffer object)."  Trước đây
+        // binding vẫn trỏ tới name đã xoá → glGetIntegerv(BUFFER_BINDING) trả
+        // name chết, và lệnh sau đó sinh INVALID_OPERATION oan.
+        c.state.UnbindBufferEverywhere(b);
+        // Binding point lập chỉ mục (UBO/SSBO/atomic) cũng phải về 0.
+        for (auto& kv : c.uniformBindPoints)
+            if (kv.second.buffer == b) kv.second.buffer = 0;
+        for (auto& kv : c.storageBindPoints)
+            if (kv.second.buffer == b) kv.second.buffer = 0;
+        for (auto& kv : c.atomicBindPoints)
+            if (kv.second.buffer == b) kv.second.buffer = 0;
+        // Element array buffer của VAO đang bind.
+        for (auto& kv : c.vaos)
+            if (kv.second.elementBuffer == b) kv.second.elementBuffer = 0;
     }
 }
 GLboolean glIsBuffer(GLuint b) {
@@ -361,7 +427,31 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
 void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr o, GLsizeiptr s) {
     Context& c = Context::Current();
     if (buffer && !c.buffers.count(buffer)) { c.errors.Record(0x0502); return; }
-    if (o < 0 || s < 0) { c.errors.Record(0x0501); return; }
+    // GL 4.6 §6.1: "An INVALID_VALUE error is generated if offset is less than
+    // zero or size is less than or equal to zero." (size==0 chỉ hợp lệ khi
+    // buffer==0 — dạng reset, offset/size bị bỏ qua theo spec).
+    if (buffer) {
+        if (o < 0 || s <= 0) { c.errors.Record(0x0501); return; }
+        auto bit = c.buffers.find(buffer);
+        const size_t blen = BufferLen(bit->second);
+        if (blen && (size_t)o + (size_t)s > blen) {
+            // §6.7.1: offset+size phải <= kích thước buffer.
+            c.errors.Record(0x0501);
+            return;
+        }
+    } else if (o < 0) {
+        c.errors.Record(0x0501);
+        return;
+    }
+    // §6.7.1: index vượt số binding point của target → INVALID_OPERATION.
+    {
+        GLint limit = -1;
+        if (target == 0x8A11 /*UNIFORM_BUFFER*/) limit = 36;
+        else if (target == 0x90D2 /*SHADER_STORAGE_BUFFER*/) limit = 8;
+        else if (target == 0x92C0 /*ATOMIC_COUNTER_BUFFER*/) limit = 4;
+        else if (target == 0x8C8E /*TRANSFORM_FEEDBACK_BUFFER*/) limit = 4;
+        if (limit >= 0 && (GLint)index >= limit) { c.errors.Record(0x0502); return; }
+    }
     if (target == 0x8A11) {
         c.uniformBindPoints[index] = BufferRange{buffer, o, s};
         if (c.DiagOn() && buffer && UboBindLogNew(index, buffer, (long)o, (long)s)) {
@@ -390,10 +480,24 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr o, G
     glBindBuffer(target, buffer);
 }
 void glBindBuffersBase(GLenum t, GLuint f, GLsizei n, const GLuint* b) {
+    Context& c = Context::Current();
+    // GL 4.6 §6.1: INVALID_VALUE nếu count âm.
+    if (n < 0) { c.errors.Record(0x0501); return; }
     for (GLsizei i = 0; i < n; ++i) glBindBufferBase(t, f + i, b ? b[i] : 0);
 }
 void glBindBuffersRange(GLenum t, GLuint f, GLsizei n, const GLuint* b, const GLintptr* o, const GLsizeiptr* s) {
-    for (GLsizei i = 0; i < n; ++i) glBindBufferRange(t, f + i, b ? b[i] : 0, o ? o[i] : 0, s ? s[i] : 0);
+    Context& c = Context::Current();
+    // GL 4.6 §6.1: INVALID_VALUE nếu count âm.
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    for (GLsizei i = 0; i < n; ++i) {
+        if (!b) {
+            // buffers == NULL → reset về trạng thái unbound, offset/size về
+            // giá trị MẶC ĐỊNH (bỏ qua mảng offsets/sizes theo spec).
+            glBindBufferRange(t, f + i, 0, 0, 0);
+        } else {
+            glBindBufferRange(t, f + i, b[i], o ? o[i] : 0, s ? s[i] : 0);
+        }
+    }
 }
 void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
     Context& c = Context::Current();
@@ -402,6 +506,17 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     BufferObject* bo = BoundBuf(target);
     if (!bo) return;
     if (bo->immutable) { c.errors.Record(0x0502); return; } // Storage rồi → INVALID_OPERATION
+    // GL 4.4 §6.1 (persistent mapping): "If the buffer object is mapped, then
+    // BufferData generates INVALID_OPERATION."  Trước đây lệnh này thay thế
+    // bo->gpu ⇒ con trỏ mà app đang giữ (persistent map) trỏ vào vùng nhớ đã
+    // giải phóng ⇒ USE-AFTER-FREE.
+    if (bo->mapped) { c.errors.Record(0x0502); return; }
+    // GL 4.6 §6.2, table 6.3: sau BufferData, BUFFER_STORAGE_FLAGS =
+    // MAP_READ_BIT | MAP_WRITE_BIT | DYNAMIC_STORAGE_BIT. Thiếu điều này thì
+    // MapBufferRange với MAP_READ/MAP_WRITE bị từ chối oan (spec §6.3 yêu cầu
+    // bit tương ứng phải có trong storage flags).
+    bo->storageFlags = 0x0001u /*MAP_READ_BIT*/ | 0x0002u /*MAP_WRITE_BIT*/ |
+                       0x0100u /*DYNAMIC_STORAGE_BIT*/;
     bo->size = (size_t)size;
     bo->usage = usage;
     c.MaybeTrimForAllocation((size_t)size);
@@ -426,6 +541,7 @@ void glNamedBufferData(GLuint b, GLsizeiptr size, const void* data, GLenum usage
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     if (it->second.immutable) { c.errors.Record(0x0502); return; }
+    if (it->second.mapped) { c.errors.Record(0x0502); return; } // xem glBufferData
     GLuint saved = c.state.BoundBuffer(it->second.target ? it->second.target : 0x8892);
     c.state.BindBuffer(0x8892, b); // ARRAY_BUFFER scratch
     // trực tiếp không qua target
@@ -450,6 +566,11 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     BufferObject* bo = BoundBuf(target);
     if (!bo) return;
     if (bo->immutable) { c.errors.Record(0x0502); return; } // đã Storage → INVALID_OPERATION
+    if (bo->mapped) { c.errors.Record(0x0502); return; } // GL 4.4 §6.1 (xem glBufferData)
+    // Spec §6.2: size <= 0 và flags sai → INVALID_VALUE (trước đây size âm
+    // biến thành size_t khổng lồ → cấp phát vô hạn).
+    if (size <= 0) { c.errors.Record(0x0501); return; }
+    if (!ValidStorageFlags(flags)) { c.errors.Record(0x0501); return; }
     bo->size = (size_t)size;
     bo->storageFlags = flags;
     bo->immutable = true;
@@ -470,6 +591,10 @@ void glNamedBufferStorage(GLuint b, GLsizeiptr size, const void* data, GLbitfiel
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
     if (it->second.immutable) { c.errors.Record(0x0502); return; }
+    if (it->second.mapped) { c.errors.Record(0x0502); return; } // GL 4.4 §6.1
+    // Spec §6.2: size <= 0 và flags sai → INVALID_VALUE (xem glBufferStorage).
+    if (size <= 0) { c.errors.Record(0x0501); return; }
+    if (!ValidStorageFlags(flags)) { c.errors.Record(0x0501); return; }
     it->second.size = (size_t)size;
     it->second.storageFlags = flags;
     it->second.immutable = true;
@@ -573,12 +698,47 @@ void glCopyNamedBufferSubData(GLuint r, GLuint w, GLintptr ro, GLintptr wo, GLsi
         StageBufRange(c, w, (size_t)wo, (size_t)size, tmp.data());
     }
 }
+// GL 4.6 §6.3 — validate `access` của MapBufferRange/MapNamedBufferRange.
+//   INVALID_VALUE     : access có bit ngoài tập hợp cho phép
+//   INVALID_OPERATION : length==0; buffer đang map; không có READ cũng không có
+//                       WRITE; READ + (INVALIDATE_RANGE|INVALIDATE_BUFFER|
+//                       UNSYNCHRONIZED); FLUSH_EXPLICIT mà không WRITE;
+//                       READ/WRITE/PERSISTENT/COHERENT mà storage flags không có
+static bool MapAccessOk(Context& c, const BufferObject& bo, GLsizeiptr len, GLbitfield acc) {
+    const GLbitfield kKnown = 0x0001 /*MAP_READ_BIT*/ | 0x0002 /*MAP_WRITE_BIT*/ |
+                              0x0004 /*MAP_INVALIDATE_RANGE_BIT*/ |
+                              0x0008 /*MAP_INVALIDATE_BUFFER_BIT*/ |
+                              0x0010 /*MAP_FLUSH_EXPLICIT_BIT*/ |
+                              0x0020 /*MAP_UNSYNCHRONIZED_BIT*/ |
+                              0x0040 /*MAP_PERSISTENT_BIT*/ | 0x0080 /*MAP_COHERENT_BIT*/;
+    if (acc & ~kKnown) { c.errors.Record(0x0501); return false; }
+    if (len == 0) { c.errors.Record(0x0502); return false; }
+    if (bo.mapped) { c.errors.Record(0x0502); return false; }
+    const bool rd = (acc & 0x0001) != 0, wr = (acc & 0x0002) != 0;
+    if (!rd && !wr) { c.errors.Record(0x0502); return false; }
+    if (rd && (acc & (0x0004 | 0x0008 | 0x0020))) { c.errors.Record(0x0502); return false; }
+    if ((acc & 0x0010) && !wr) { c.errors.Record(0x0502); return false; }
+    const GLbitfield need = (acc & (0x0001 | 0x0002 | 0x0040 | 0x0080));
+    if (need && ((need & bo.storageFlags) != need)) { c.errors.Record(0x0502); return false; }
+    return true;
+}
+
 void* glMapBuffer(GLenum target, GLenum access) {
     Context& c = Context::Current();
+    if (access != GL_READ_ONLY && access != GL_WRITE_ONLY && access != GL_READ_WRITE) {
+        c.errors.Record(0x0500);
+        return nullptr;
+    }
+    if (!IsBufferTarget(target)) { c.errors.Record(0x0500); return nullptr; }
+    if (!c.state.BoundBuffer(target)) { c.errors.Record(0x0502); return nullptr; }
     GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return nullptr;
-    (void)access;
+    // §6.3: MapBuffer tương đương MapBufferRange(target, 0, BUFFER_SIZE, flags)
+    // với flags = MAP_READ_BIT | (MAP_WRITE_BIT nếu access cho phép ghi).
+    const GLbitfield flags =
+        (access == GL_READ_ONLY) ? 0x0001u : (access == GL_WRITE_ONLY) ? 0x0002u : 0x0003u;
+    if (!MapAccessOk(c, *bo, (GLsizeiptr)BufferLen(*bo), flags)) return nullptr;
     // IR: flush staging trước để GPU có dữ liệu mới nhất trước khi app ghi trực tiếp.
     c.FlushBufferStaging(bid);
     bo->mapped = true; bo->mapOffset = 0; bo->mapLength = BufferLen(*bo);
@@ -587,21 +747,42 @@ void* glMapBuffer(GLenum target, GLenum access) {
 }
 void* glMapBufferRange(GLenum target, GLintptr off, GLsizeiptr len, GLbitfield access) {
     Context& c = Context::Current();
+    if (!IsBufferTarget(target)) { c.errors.Record(0x0500); return nullptr; }
+    if (!c.state.BoundBuffer(target)) { c.errors.Record(0x0502); return nullptr; }
     GLuint bid = c.state.BoundBuffer(target);
     BufferObject* bo = BoundBuf(target);
     if (!bo) return nullptr;
     if (off < 0 || len < 0 || (size_t)(off + len) > BufferLen(*bo)) { c.errors.Record(0x0501); return nullptr; }
+    if (!MapAccessOk(c, *bo, len, access)) return nullptr;
     c.SyncComputeWritesTo(bid); // P1: compute đang ghi → chờ trước khi trả con trỏ
     c.FlushBufferStaging(bid);
     bo->mapped = true; bo->mapOffset = (size_t)off; bo->mapLength = (size_t)len; bo->mapAccess = access;
-    if (bo->gpu) return (uint8_t*)bo->gpu->contents() + off;
-    return bo->data.data() + off;
+    // GL_ARB_map_buffer_alignment: con trỏ trả về phải "phản ánh allocation căn
+    // theo MIN_MAP_BUFFER_ALIGNMENT" và (con trỏ - offset) phải là bội số của
+    // alignment (spec §6.3). Offset KHÔNG bắt buộc là bội số — ARB issue 2 nêu
+    // rõ offset 24 với alignment 64 vẫn hợp lệ → KHÔNG báo INVALID_VALUE, nếu
+    // không sẽ phá app map sub-range ở offset lẻ (rất phổ biến). Thay vào đó ta
+    // kiểm tra BASE thật có căn không: Metal contents() page-aligned, shadow CPU
+    // malloc 16-aligned (= MIN_MAP_BUFFER_ALIGNMENT mà TGLMT trả).
+    const size_t kAlign = 16; // GL_MIN_MAP_BUFFER_ALIGNMENT (glGetIntegerv 0x90BC)
+    uint8_t* base = bo->gpu ? (uint8_t*)bo->gpu->contents() : bo->data.data();
+    if (!base) return nullptr;
+    if ((reinterpret_cast<uintptr_t>(base) % kAlign) != 0 && c.DiagOn())
+        c.LogDebug(0, 0, 0, 0, "MapBufferRange: base lệch MIN_MAP_BUFFER_ALIGNMENT");
+    return base + off;
 }
 void* glMapNamedBuffer(GLuint b, GLenum access) {
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return nullptr; }
-    (void)access;
+    // GL 4.6 §6.3: access phải là READ_ONLY / WRITE_ONLY / READ_WRITE.
+    if (access != GL_READ_ONLY && access != GL_WRITE_ONLY && access != GL_READ_WRITE) {
+        c.errors.Record(0x0500);
+        return nullptr;
+    }
+    const GLbitfield flags =
+        (access == GL_READ_ONLY) ? 0x0001u : (access == GL_WRITE_ONLY) ? 0x0002u : 0x0003u;
+    if (!MapAccessOk(c, it->second, (GLsizeiptr)BufferLen(it->second), flags)) return nullptr;
     c.SyncComputeWritesTo(b); // P1
     c.FlushBufferStaging(b);
     it->second.mapped = true;
@@ -616,16 +797,23 @@ void* glMapNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len, GLbitfield a
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return nullptr; }
-    (void)access;
     if (off < 0 || len < 0 || (size_t)(off + len) > BufferLen(it->second)) { c.errors.Record(0x0501); return nullptr; }
+    if (!MapAccessOk(c, it->second, len, access)) return nullptr;
     c.SyncComputeWritesTo(b); // P1
     c.FlushBufferStaging(b);
     it->second.mapped = true;
     it->second.mapOffset = (size_t)off;
     it->second.mapLength = (size_t)len;
     it->second.mapAccess = access;
-    if (it->second.gpu) return (uint8_t*)it->second.gpu->contents() + off;
-    return it->second.data.data() + off;
+    // Xem glMapBufferRange: offset lẻ vẫn hợp lệ (ARB issue 2), chỉ BASE
+    // phải căn MIN_MAP_BUFFER_ALIGNMENT.
+    const size_t kAlign = 16; // GL_MIN_MAP_BUFFER_ALIGNMENT
+    uint8_t* base = it->second.gpu ? (uint8_t*)it->second.gpu->contents()
+                                   : it->second.data.data();
+    if (!base) return nullptr;
+    if ((reinterpret_cast<uintptr_t>(base) % kAlign) != 0 && c.DiagOn())
+        c.LogDebug(0, 0, 0, 0, "MapNamedBufferRange: base lệch MIN_MAP_BUFFER_ALIGNMENT");
+    return base + off;
 }
 GLboolean glUnmapBuffer(GLenum target) {
     Context& c = Context::Current();
@@ -669,17 +857,36 @@ GLboolean glUnmapNamedBuffer(GLuint b) {
     }
     return 1;
 }
+// GL 4.6 §6.3 — FlushMapped*BufferRange:
+//   INVALID_ENUM      : target không hợp lệ (bản bound)
+//   INVALID_OPERATION : zero bound to target; buffer không tồn tại; buffer KHÔNG
+//                       đang map, hoặc map mà không có MAP_FLUSH_EXPLICIT_BIT
+//   INVALID_VALUE     : offset/length âm, hoặc offset+length > kích thước mapping
+static void FlushMappedRangeImpl(Context& c, BufferObject* bo, GLintptr off, GLsizeiptr len) {
+    if (!bo) return;
+    if (!bo->mapped) { c.errors.Record(0x0502); return; }
+    // MAP_FLUSH_EXPLICIT_BIT là bit của MAP ACCESS (không phải storage flags).
+    if (!(bo->mapAccess & 0x00000010u /*GL_MAP_FLUSH_EXPLICIT_BIT*/)) {
+        c.errors.Record(0x0502);
+        return;
+    }
+    if (off < 0 || len < 0) { c.errors.Record(0x0501); return; }
+    if ((size_t)off + (size_t)len > bo->mapLength) { c.errors.Record(0x0501); return; }
+    if (bo->gpu) bo->gpu->didModifyRange(bo->mapOffset + (size_t)off, (size_t)len);
+}
 void glFlushMappedBufferRange(GLenum target, GLintptr off, GLsizeiptr len) {
     Context& c = Context::Current();
+    // target phải là buffer target hợp lệ (table 6.1).
+    if (!IsBufferTarget(target)) { c.errors.Record(0x0500); return; }
+    if (!c.state.BoundBuffer(target)) { c.errors.Record(0x0502); return; }
     BufferObject* bo = BoundBuf(target);
-    if (!bo) return;
-    if (bo->gpu) bo->gpu->didModifyRange((size_t)off, (size_t)len);
+    FlushMappedRangeImpl(c, bo, off, len);
 }
 void glFlushMappedNamedBufferRange(GLuint b, GLintptr off, GLsizeiptr len) {
     Context& c = Context::Current();
     auto it = c.buffers.find(b);
     if (it == c.buffers.end()) { c.errors.Record(0x0502); return; }
-    if (it->second.gpu) it->second.gpu->didModifyRange((size_t)off, (size_t)len);
+    FlushMappedRangeImpl(c, &it->second, off, len);
 }
 // glClearBuffer*: `data` là GIÁ TRỊ theo internalformat, không phải byte.
 // Voxy dùng glClearNamedBufferSubData(GL_R32UI, ..., &id) để ghi node id;
@@ -793,12 +1000,31 @@ void glClearNamedBufferSubData(GLuint b, GLenum inf, GLintptr off, GLsizeiptr si
     }
     StageBufRange(c, b, (size_t)off, (size_t)size, carry);
 }
+// GL 4.6 §6.5 — InvalidateBufferData/SubData:
+//   INVALID_VALUE     : buffer bằng 0 hoặc không tồn tại; offset/length âm;
+//                       offset+length > BUFFER_SIZE
+//   INVALID_OPERATION : buffer đang map (không phải persistent)
+static bool InvalidateBufferCheck(Context& c, GLuint b, GLintptr o, GLsizeiptr s) {
+    if (b == 0 || !c.buffers.count(b)) { c.errors.Record(0x0501); return false; }
+    if (o < 0 || s < 0) { c.errors.Record(0x0501); return false; }
+    auto it = c.buffers.find(b);
+    const size_t blen = BufferLen(it->second);
+    if ((size_t)o + (size_t)s > blen) { c.errors.Record(0x0501); return false; }
+    if (it->second.mapped && !(it->second.storageFlags & 0x00000040u /*MAP_PERSISTENT_BIT*/)) {
+        c.errors.Record(0x0502);
+        return false;
+    }
+    return true;
+}
 void glInvalidateBufferData(GLuint b) {
     Context& c = Context::Current();
-    if (!c.buffers.count(b)) { c.errors.Record(0x0502); return; }
+    if (!InvalidateBufferCheck(c, b, 0, 0)) return;
+    auto it = c.buffers.find(b);
     // Metal storeAction=DontCare — không cần làm gì, giữ shadow
+    (void)it;
 }
 void glInvalidateBufferSubData(GLuint b, GLintptr o, GLsizeiptr s) {
-    (void)o; (void)s; glInvalidateBufferData(b);
+    Context& c = Context::Current();
+    if (!InvalidateBufferCheck(c, b, o, s)) return;
 }
 } // namespace tglmt::gl

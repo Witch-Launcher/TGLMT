@@ -4,6 +4,11 @@
 // + compute. Căn cứ Iris 26.1: supportsSSBO() = OpenGL44 true (TGLMT báo 4.6) →
 // pack có `buffers` sẽ thật sự bind SSBO base; nếu converter fail là shaderpack chết.
 #include "tglmt/gl46.h"
+// Access flags của MapBufferRange: 0x0008|0x0010 là
+// INVALIDATE_BUFFER|FLUSH_EXPLICIT, nhưng GL 4.6 §6.3 yêu cầu
+// FLUSH_EXPLICIT phải kèm MAP_WRITE_BIT (thiếu → INVALID_OPERATION).
+// Dùng WRITE|INVALIDATE_BUFFER|UNSYNCHRONIZED — đúng ý định map để
+// đọc kết quả compute.
 #include "tglmt/Context.h"
 
 #include <cstdio>
@@ -270,13 +275,13 @@ int main() {
         glDispatchCompute(1, 1, 1);
         glMemoryBarrier(0x0020 | 0x0040);
         glBindBuffer(0x90D2, b4);
-        const float* r = (const float*)glMapBufferRange(0x90D2, 0, z4.size() * 4, 0x0008 | 0x0010);
+        const float* r = (const float*)glMapBufferRange(0x90D2, 0, z4.size() * 4, 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
         int bad4 = 0;
         if (!r) { printf("test_ssbo_graphics_apple FAIL: compute map\n"); return 1; }
         for (float f : std::vector<float>(r, r + 8)) if (f != 77.0f) ++bad4;
         glUnmapBuffer(0x90D2);
         glBindBuffer(0x90D2, b0);
-        const float* r0 = (const float*)glMapBufferRange(0x90D2, 0, z0.size() * 4, 0x0008 | 0x0010);
+        const float* r0 = (const float*)glMapBufferRange(0x90D2, 0, z0.size() * 4, 0x0002 /*WRITE*/ | 0x0008 /*INVALIDATE_BUFFER*/ | 0x0020 /*UNSYNCHRONIZED*/);
         int bad0 = 0;
         if (r0) {
             for (int i = 0; i < 8; ++i) if (r0[i] != 0.0f) ++bad0;

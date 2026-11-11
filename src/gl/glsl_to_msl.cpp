@@ -1,6 +1,7 @@
 // GLSLConverter.cpp — xem GLSLConverter.h về subset được hỗ trợ.
 // Mọi thứ ngoài subset → ok=false + log rõ ràng (không đoán mò sinh code sai).
 #include "tglmt/GLSLConverter.h"
+#include "tglmt/uniform_pack.h"
 #include <algorithm>
 #include <cctype>
 #include <functional>
@@ -89,6 +90,17 @@ static std::string ImageElem(const std::string& t) {
 static std::string MSLType(const std::string& t, bool& ok) {
     ok = true;
     if (t == "float") return "float";
+    // Metal không có double (ANGLE cũng vậy) → GLSL double/dvec/dmat được
+    // biên dịch thành float tương ứng. Độ chính xác bị giảm (documented
+    // limitation, xem docs/METAL_A11_LIMITATIONS.md) nhưng API GL vẫn đúng:
+    // glUniform*d nạp giá trị double, upload path hạ xuống float.
+    if (t == "double") return "float";
+    if (t == "dvec2") return "float2";
+    if (t == "dvec3") return "float3";
+    if (t == "dvec4") return "float4";
+    if (t == "dmat2") return "float2x2";
+    if (t == "dmat3") return "float3x3";
+    if (t == "dmat4") return "float4x4";
     if (t == "vec2") return "float2";
     if (t == "vec3") return "float3";
     if (t == "vec4") return "float4";
@@ -113,6 +125,9 @@ static std::string MSLType(const std::string& t, bool& ok) {
     if (t == "uvec3") return "uint3";
     if (t == "uvec4") return "uint4";
     if (t == "bool") return "bool";
+    if (t == "bvec2") return "bool2";
+    if (t == "bvec3") return "bool3";
+    if (t == "bvec4") return "bool4";
     ok = false;
     return t;
 }
@@ -129,10 +144,28 @@ static std::string MSLZero(const std::string& t) {
 // Layout `constant` buffer theo quy tắc MSL tự nhiên (không phải std140,
 // không phải 16-hết): scalar 4, vec2 8, vec3/vec4 16, mat cột-nào-align-nấy
 // (float3x3 = 3 cột float3 stride 16 = 48). Test pixel-proof kiểm chứng thực tế.
+// "floatCxR" (ma trận MSL) → (cols, rows). Trả về false nếu không phải.
+static bool MslTypeMatrixDims(const std::string& m, int& cols, int& rows) {
+    if (m.size() != 8) return false;
+    if (m.compare(0, 5, "float") != 0) return false;
+    if (m[6] != 'x') return false;
+    int c = m[5] - '0', r = m[7] - '0';
+    if (c < 2 || c > 4 || r < 2 || r > 4) return false;
+    cols = c;
+    rows = r;
+    return true;
+}
 static size_t MSLAlign(const std::string& m) {
     if (m == "float" || m == "int" || m == "uint" || m == "bool") return 4;
     if (m == "float2" || m == "int2" || m == "uint2") return 8;
-    if (m == "float2x2") return 8;
+    // bool2/3/4: MSL bool là 1 byte; trong struct, vector bool được pad theo
+    // quy ước project (align 4) cho khớp layout đã dùng cho `bool`.
+    if (m == "bool2" || m == "bool3" || m == "bool4") return 4;
+    // Ma trận floatCxR: align = align của 1 cột (vector R phần tử).
+    {
+        int mc = 0, mr = 0;
+        if (MslTypeMatrixDims(m, mc, mr)) return MslMatrixColumnStrideForRows(mr);
+    }
     // Metal float3/int3/uint3 align 16 (dù size 12): scalar sau vec3 ở +12
     // là đọc vào padding (Sodium u_RegionOffset → CurrentTime/RegionID lệch
     // 4B → fade đóng băng từng chunk). Luôn align 16 cho vector 3 phần tử.
@@ -145,9 +178,12 @@ static size_t MSLSize(const std::string& m) {
     // nên 12B từ glUniform3f vẫn đủ, 4B pad giữ 0).
     if (m == "float3" || m == "int3" || m == "uint3") return 16;
     if (m == "float4" || m == "int4" || m == "uint4") return 16;
-    if (m == "float2x2") return 16;
-    if (m == "float3x3") return 48;
-    if (m == "float4x4") return 64;
+    if (m == "bool2" || m == "bool3" || m == "bool4") return 4;
+    // Ma trận floatCxR: mỗi cột là vector R phần tử (float2 → 8B, float3/4 → 16B).
+    {
+        int mc = 0, mr = 0;
+        if (MslTypeMatrixDims(m, mc, mr)) return MslMatrixSizeFor(mc, mr);
+    }
     return 0;
 }
 static bool IsVec3MslType(const std::string& m) {
@@ -160,6 +196,19 @@ static bool MatrixDims(const std::string& m, int& cols, int& rows) {
         cols = c; rows = r; return true;
     }
     return false;
+}
+// GLSL 4.60 §4.3.4 interpolation qualifier → MSL stage-in/out attribute.
+//   flat          → [[flat]]                (MSL: provoking vertex, không nội suy)
+//   noperspective → [[center_no_perspective]] (nội suy tuyến tính trong screen space)
+//   centroid      → [[center]]              (lấy mẫu tại tâm primitive)
+//   smooth        → (mặc định MSL center_perspective — không cần attribute)
+// MSL mặc định là center_perspective, nên thiếu attribute ở đây = GLSL "flat"
+// bị nội suy mượt (sai spec) — đó là lý do hàm này tồn tại.
+static std::string InterpAttr(const GLSLVar& v) {
+    if (v.interpolation == "flat") return " [[flat]]";
+    if (v.interpolation == "noperspective") return " [[center_no_perspective]]";
+    if (v.interpolation == "centroid") return " [[center]]";
+    return "";
 }
 // std140/std430 vec3: size 12, align 16. MSL float3 size 16 → member scalar
 // ngay sau vec3 bị đẩy +16 (Voxy SceneUniform frameId/cameraSubPos lệch 4/16B).
@@ -306,13 +355,25 @@ static bool ParseDecls(const std::string& stmt, bool isVertex,
     s = Trim(s);
     isUniform = false;
     vars.clear();
-    // Qualifier nội suy đứng đầu (`flat out ...`): bỏ qua khi parse, Metal
-    // suy flat từ kiểu (int/uint tự flat; float giữ smooth — đúng GL mặc định).
+    // Qualifier nội suy (GLSL 4.60 §4.3.4): `flat`, `smooth`, `noperspective`,
+    // `centroid`, `sample`. Trước đây bị strip mà KHÔNG emit attribute MSL
+    // tương ứng → mọi varying thành center_perspective (mặc định MSL),
+    // tức GLSL `flat` lại nội suy mượt (sai spec).
+    // `sample`/`invariant`/`precise` không có đối chiếu MSL → bỏ.
+    std::string interpolation;
     for (const char* q : {"flat ", "smooth ", "noperspective ", "centroid ",
                           "sample ", "invariant ", "precise "}) {
-        if (s.rfind(q, 0) == 0) { s = Trim(s.substr(strlen(q))); break; }
+        if (s.rfind(q, 0) == 0) {
+            std::string qual = std::string(q, strlen(q) - 1);
+            if (qual == "flat" || qual == "smooth" || qual == "noperspective" ||
+                qual == "centroid")
+                interpolation = qual;
+            s = Trim(s.substr(strlen(q)));
+            break;
+        }
     }
     int loc = -1;
+    int dualIdx = 0; // layout(..., index=I): dual-source (chỉ 0/1, I≠0 ⇒ loc=0)
     if (s.rfind("layout", 0) == 0) {
         size_t lp = s.find('('), rp = s.find(')');
         if (lp == std::string::npos || rp == std::string::npos) return false;
@@ -322,6 +383,15 @@ static bool ParseDecls(const std::string& stmt, bool isVertex,
             size_t num = inside.find_first_of("0123456789", eq);
             if (num == std::string::npos) return false;
             loc = atoi(inside.c_str() + num);
+        }
+        // Dual-source (GL 3.3): layout(location=N, index=I). I∈{0,1}; I≠0 ⇒ N=0.
+        size_t iq = inside.find("index");
+        if (iq != std::string::npos) {
+            size_t num = inside.find_first_of("0123456789", iq);
+            if (num == std::string::npos) return false;
+            dualIdx = atoi(inside.c_str() + num);
+            if (dualIdx != 0 && dualIdx != 1) return false;
+            if (dualIdx != 0 && loc != 0) return false;
         }
         // layout không phải location (binding cho sampler, std140 cho block đã
         // xử lý riêng): MSL không có qualifier tương đương → bỏ qualifier, giữ decl.
@@ -357,7 +427,14 @@ static bool ParseDecls(const std::string& stmt, bool isVertex,
     } else if (w[0] == "in" || w[0] == "out") {
         dir = w[0];
         size_t k = 1;
-        while (k < w.size() && isQual(w[k])) ++k;
+        while (k < w.size() && isQual(w[k])) {
+            // `out flat vec4 c;` — qualifier nội suy đứng sau storage qualifier.
+            if (interpolation.empty() &&
+                (w[k] == "flat" || w[k] == "smooth" || w[k] == "noperspective" ||
+                 w[k] == "centroid"))
+                interpolation = w[k];
+            ++k;
+        }
         if (k >= w.size()) return false;
         type = w[k];
         restDecls.clear();
@@ -388,6 +465,9 @@ static bool ParseDecls(const std::string& stmt, bool isVertex,
         v.glslType = type;
         v.name = nm;
         v.location = loc;
+        v.hasExplicitLocation = (loc >= 0);
+        v.index = dualIdx;
+        v.interpolation = interpolation;
         v.arraySize = arr;
         vars.push_back(v);
     }
@@ -454,10 +534,15 @@ static std::string RewriteTypeNames(std::string s) {
              {"vec2", "float2"}, {"vec3", "float3"}, {"vec4", "float4"},
              {"ivec2", "int2"}, {"ivec3", "int3"}, {"ivec4", "int4"},
              {"uvec2", "uint2"}, {"uvec3", "uint3"}, {"uvec4", "uint4"},
+             {"bvec2", "bool2"}, {"bvec3", "bool3"}, {"bvec4", "bool4"},
              {"mat2x2", "float2x2"}, {"mat2x3", "float2x3"}, {"mat2x4", "float2x4"},
              {"mat3x2", "float3x2"}, {"mat3x3", "float3x3"}, {"mat3x4", "float3x4"},
              {"mat4x2", "float4x2"}, {"mat4x3", "float4x3"}, {"mat4x4", "float4x4"},
-             {"mat2", "float2x2"}, {"mat3", "float3x3"}, {"mat4", "float4x4"}}) {
+             {"mat2", "float2x2"}, {"mat3", "float3x3"}, {"mat4", "float4x4"},
+             // double → float (Metal không có double)
+             {"dvec2", "float2"}, {"dvec3", "float3"}, {"dvec4", "float4"},
+             {"dmat2", "float2x2"}, {"dmat3", "float3x3"}, {"dmat4", "float4x4"},
+             {"double", "float"}}) {
         size_t pp = 0;
         while ((pp = s.find(rp.first, pp)) != std::string::npos) {
             bool l = pp > 0 && IsIdentChar(s[pp - 1], false);
@@ -5489,7 +5574,15 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
                 return false;
             }
             std::string rep;
-            std::string bias = args.size() == 3 ? ", float(" + args[2] + ")" : "";
+            // GLSL 4.60 §8.9.3: bias là LOD bias, KHÔNG phải texture offset.
+            // MSL có overload:
+            //   sample(sampler, float2, int2 offset = ...)
+            //   sample(sampler, float2, bias options, int2 offset = ...)
+            //   sample(sampler, float2, level options, ...)
+            // Một `float` trần convert được cho CẢ int2 (standard conversion)
+            // lẫn `bias` (user-defined) → overload resolution chọn int2 ⇒ bias
+            // bị biến thành offset và LOD bias bị MẤT. Phải ép kiểu `bias(...)`.
+            std::string bias = args.size() == 3 ? ", bias(float(" + args[2] + "))" : "";
             if (sv.kind == 'C') {
                 rep = sname + "_tex.sample(" + sname + "_smp, float3(" + args[1] + ")" + bias + ")";
             } else if (sv.kind == 'A') {
@@ -5649,7 +5742,15 @@ static bool RewriteSamplingCalls(std::string& io, const SampTable& tab, std::str
             if (!findSamp(sname, sv)) { err = "textureProj sampler không khai báo: " + sname; return false; }
             if (sv.kind != '2' && sv.kind != 'S') { err = "textureProj chỉ hỗ trợ sampler2D/Shadow"; return false; }
             std::string coord = Trim(args[1]);
-            std::string bias = args.size() == 3 ? ", float(" + args[2] + ")" : "";
+            // GLSL 4.60 §8.9.3: bias là LOD bias, KHÔNG phải texture offset.
+            // MSL có overload:
+            //   sample(sampler, float2, int2 offset = ...)
+            //   sample(sampler, float2, bias options, int2 offset = ...)
+            //   sample(sampler, float2, level options, ...)
+            // Một `float` trần convert được cho CẢ int2 (standard conversion)
+            // lẫn `bias` (user-defined) → overload resolution chọn int2 ⇒ bias
+            // bị biến thành offset và LOD bias bị MẤT. Phải ép kiểu `bias(...)`.
+            std::string bias = args.size() == 3 ? ", bias(float(" + args[2] + "))" : "";
             // vec4 → xy/w (GL spec; vanilla end_portal chỉ dùng vec4, w luôn != 0
             // vì là clip w nên chia trực tiếp, không guard để giữ đúng GL).
             // vec3 → chia /z, vec4 → /w (GLSL textureProj). Phát hiện qua literal
@@ -6433,6 +6534,46 @@ static void RewriteTextureQueryLevels(std::string& text) {
         out += text.substr(i, p - i);
         bool already = arg.size() >= 4 && arg.compare(arg.size() - 4, 4, "_tex") == 0;
         out += arg + (already ? "" : "_tex") + ".get_num_mip_levels()";
+        i = m + 1;
+    }
+    text.swap(out);
+}
+// GLSL 4.60 §8.9: textureQueryLod(sampler, P [, bias]) → vec2 (u, v).
+// Metal: texture::calculate_unclamped_lod(sampler, coord) → float2.
+// Trước đây hàm này KHÔNG được rewrite → MSL tham chiếu tên sampler GLSL
+// (chưa khai báo trong MSL) → Metal compile fail "use of undeclared identifier".
+static void RewriteTextureQueryLod(std::string& text) {
+    static const char* kName = "textureQueryLod";
+    size_t nl = strlen(kName);
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t p = text.find(kName, i);
+        if (p == std::string::npos) { out += text.substr(i); break; }
+        bool l = p > 0 && IsIdentChar(text[p - 1], false);
+        if (l) { out += text.substr(i, p - i + 1); i = p + 1; continue; }
+        size_t lp = p + nl;
+        while (lp < text.size() && isspace((unsigned char)text[lp])) ++lp;
+        if (lp >= text.size() || text[lp] != '(') {
+            out += text.substr(i, p - i + 1); i = p + 1; continue;
+        }
+        int d = 0;
+        size_t m = lp;
+        for (; m < text.size(); ++m) {
+            if (text[m] == '(') ++d;
+            else if (text[m] == ')') { if (--d == 0) break; }
+            if (d == 0 && m > lp) break;
+        }
+        if (m >= text.size()) { out += text.substr(i); break; }
+        std::vector<std::string> args = SplitCallArgs(text.substr(lp + 1, m - lp - 1));
+        if (args.size() < 2) { out += text.substr(i, m + 1 - i); i = m + 1; continue; }
+        std::string sname = Trim(args[0]);
+        std::string coord = Trim(args[1]);
+        bool already = sname.size() >= 4 && sname.compare(sname.size() - 4, 4, "_tex") == 0;
+        std::string tex = sname + (already ? "" : "_tex");
+        std::string smp = sname + "_smp";
+        out += text.substr(i, p - i);
+        out += tex + ".calculate_unclamped_lod(" + smp + ", " + coord + ")";
         i = m + 1;
     }
     text.swap(out);
@@ -9509,6 +9650,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
         for (auto& a : ins)
             if (a.location < 0) a.location = tmp++;
     }
+    // Fragment OUTPUT giữ "số tạm" 900+ nếu không có layout(location=) —
+    // linker (glLinkProgram) gán location cuối cùng rồi viết lại [[color(N)]]
+    // trong MSL.  KHÔNG gán location thật ở đây: GL 4.6 §7.3.2 quy định
+    // layout tường minh THẮNG glBindFragDataLocation, còn output không có
+    // layout thì glBindFragDataLocation mới quyết định — nếu converter gán
+    // location thật sớm thì glBindFragDataLocation bị bỏ qua.
     // Fragment: 1..8 out vec4 (MRT cho vanilla deferred/Iris; location = attachment).
     // Legacy gl_FragColor / gl_FragData[0] (end_portal compat): map về out duy nhất.
     bool legacyFrag = false;
@@ -9555,10 +9702,12 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
             for (auto* t : kFragOk) if (o.mslType == t) { okT = true; break; }
             if (!okT) return fail("fragment out kiểu không hỗ trợ (" + o.name + ": " + o.mslType + ")");
         }
-        // location trùng → link lỗi (đúng GL)
+        // location trùng → link lỗi (đúng GL), TRỪ dual-source: cùng location,
+        // index khác (0/1) là hợp lệ (GL 3.3 dual-source blend).
         for (size_t i = 0; i < outs.size(); ++i)
             for (size_t j = i + 1; j < outs.size(); ++j)
-                if (outs[i].location >= 0 && outs[i].location == outs[j].location)
+                if (outs[i].location >= 0 && outs[i].location == outs[j].location &&
+                    outs[i].index == outs[j].index)
                     return fail("fragment out location trùng: " + std::to_string(outs[i].location));
     }
     // Uniform layout: natural alignment MSL (xem MSLAlign/MSLSize).
@@ -10205,9 +10354,21 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
     // Chèn ` _out.position.z = _out.position.z*0.5 + _out.position.w*0.5;`
     // trước mọi return vertex (kể cả return sớm). ZERO_TO_ONE cần recompile (log ở link).
     const std::string kZConv = " _out.tglmt_position.z = _out.tglmt_position.z * 0.5 + _out.tglmt_position.w * 0.5;";
+    // MRT = fragment output phải ghi vào draw buffer XÁC ĐỊNH (khác color(0)).
+    // Điều kiện: nhiều output (>1) HOẶC có output nào khai layout tường minh
+    // ở location/index khác 0 (single output ở location=1 vẫn phải vào
+    // attachment 1 — đường single-out trả float4 trần thì Metal gán color(0)).
+    // CHỈ xét location TƯỜNG MINH: output chưa có location được linker gán sau
+    // (số tạm 900+), xử lý ở glLinkProgram.
     bool isMRT = !R.isVertex && outs.size() > 1;
-    for (auto& o : outs)
+    for (auto& o : outs) {
         if (o.arraySize > 0) isMRT = true;
+        if (o.hasExplicitLocation && (o.location != 0 || o.index != 0)) isMRT = true;
+    }
+    // Linker cần biết converter phát fragment output dạng STRUCT (có
+    // [[color(N)]]) hay dạng trả float4 trần (Metal tự gán color(0)) để biết
+    // index [[color]] nào cần viết lại theo location/index GL cuối cùng.
+    R.fragStructOutputs = isMRT;
     // P6d: gl_* builtin cần param stage riêng (đã kiểm chứng metal thật).
     // Local (không thêm vào public struct) — detect trước, emit param ở assembly.
     bool useStencilRef = false, useSampleID = false, useSamplePos = false;
@@ -10455,8 +10616,11 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
             mpVary.emplace_back("gl_HelperInvocation", "simd_is_helper_thread()");
         if (isMRT) {
             for (auto& o : outs)
-                if (o.arraySize <= 0)  // array out dùng local array + copy ở return
-                    mpVary.emplace_back(o.name, "_out.mrt" + std::to_string(o.location));
+                if (o.arraySize <= 0) { // array out dùng local array + copy ở return
+                    // Dual-source: index=1 → color(location+1) = color(1) khi loc=0.
+                    int cidx = o.location + o.index;
+                    mpVary.emplace_back(o.name, "_out.mrt" + std::to_string(cidx));
+                }
         } else if (legacyFrag) {
             // end_portal compat: gl_FragColor / gl_FragData[0] → out duy nhất
             mpVary.emplace_back("gl_FragColor", "tglmt_fragColor");
@@ -10594,6 +10758,19 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
     mpShared.emplace_back("ivec3", "int3");
     mpShared.emplace_back("ivec4", "int4");
     mpShared.emplace_back("uvec2", "uint2");
+    // bool vector + double: Metal có `boolN` nhưng không có `double` →
+    // double/dvec/dmat hạ xuống float (emulation kiểu ANGLE trên Metal).
+    mpShared.emplace_back("bvec2", "bool2");
+    mpShared.emplace_back("bvec3", "bool3");
+    mpShared.emplace_back("bvec4", "bool4");
+    mpShared.emplace_back("dvec2", "float2");
+    mpShared.emplace_back("dvec3", "float3");
+    mpShared.emplace_back("dvec4", "float4");
+    mpShared.emplace_back("dmat2", "float2x2");
+    mpShared.emplace_back("dmat3", "float3x3");
+    mpShared.emplace_back("dmat4", "float4x4");
+    // Từ khóa kiểu `double` → `float` (Metal không có double).
+    mpShared.emplace_back("double", "float");
     mpShared.emplace_back("uvec3", "uint3");
     mpShared.emplace_back("uvec4", "uint4");
     // P-Sodium: bvecN → boolN (MSL không có bvec; `mix(f,f,boolN)` + `boolN(uintN)` hợp lệ).
@@ -10621,19 +10798,28 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
     mpShared.emplace_back("samplerBuffer", "texture2d<float>");
     mpShared.emplace_back("isamplerBuffer", "texture2d<int>");
     mpShared.emplace_back("usamplerBuffer", "texture2d<uint>");
-    for (const char* bad : {"double", "dvec2", "dvec3", "dvec4", "dmat2", "dmat3", "dmat4"}) {
-        auto hasWord = [&](const std::string& src) {
-            size_t p = 0;
-            while ((p = src.find(bad, p)) != std::string::npos) {
-                bool l = p > 0 && IsIdentChar(src[p - 1], false);
-                size_t e = p + strlen(bad);
-                bool r = e < src.size() && IsIdentChar(src[e], false);
-                if (!l && !r) return true;
-                p = e;
+    // double/dvec/dmat: Metal không có → đã map sang float ở MSLType/
+    // RewriteTypeNames (emulation kiểu ANGLE). Literal hậu tố "lf" (GLSL
+    // double literal) phải hạ xuống "f" cho MSL.
+    // Literal double của GLSL (hậu tố "lf"/"LF") → hậu tố "f" của MSL.
+    {
+        std::string out2;
+        out2.reserve(body.size());
+        for (size_t i = 0; i < body.size(); ++i) {
+            if ((body[i] == 'l' || body[i] == 'L') && i + 1 < body.size() &&
+                (body[i + 1] == 'f' || body[i + 1] == 'F')) {
+                const bool digitBefore = i > 0 && (isdigit((unsigned char)body[i - 1]) ||
+                                                   body[i - 1] == '.');
+                const bool expBefore = i >= 2 && (body[i - 2] == 'e' || body[i - 2] == 'E');
+                if (digitBefore || expBefore) {
+                    out2 += 'f';
+                    i += 1;  // bỏ 'l', giữ 'f'
+                    continue;
+                }
             }
-            return false;
-        };
-        if (hasWord(body)) return fail("double/dvec ngoài subset (MSL không có double)");
+            out2 += body[i];
+        }
+        body.swap(out2);
     }
     // `discard;` → `discard_fragment();` (giữ ngoặc! bản thiếu ngoặc thành no-op câm).
     // Shared để helper cũng discard được.
@@ -11125,6 +11311,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
             PromoteIntVecArith(body, iv, uniforms, blocks);
             PromoteUintBuiltinCompare(body);
             RewriteTextureQueryLevels(body);
+            RewriteTextureQueryLod(body);
             PromoteIntVecCastsInFloatArith(body, uniforms, iv);
             FloatifyNumericLiteralArgsInCall(body, "smoothstep");
             // Gán int-family → float-family (1.21.11 `texCoord2 = UV2;`).
@@ -11301,6 +11488,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
             PromoteIntVecArith(helpersMSL, iv, uniforms, blocks);
             PromoteUintBuiltinCompare(helpersMSL);
             RewriteTextureQueryLevels(helpersMSL);
+            RewriteTextureQueryLod(helpersMSL);
             PromoteIntVecCastsInFloatArith(helpersMSL, uniforms, iv);
             FloatifyNumericLiteralArgsInCall(helpersMSL, "smoothstep");
             SizeArrayDeclarators(helpersMSL);
@@ -11635,7 +11823,8 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
             // Capture path dùng TGLMT_VOutCap thay struct stage-out; array/matrix
             // không phải kiểu stage-out hợp lệ của Metal.
             if (v.arraySize > 0 || MatrixDims(v.mslType, mc, mr)) continue;
-            msl_out << "  " << v.mslType << " " << v.name << " [[user(locn" << v.location << ")]];\n";
+            msl_out << "  " << v.mslType << " " << v.name << " [[user(locn" << v.location << ")]]"
+                    << InterpAttr(v) << ";\n";
         }
         msl_out << "};\n";
     } else if (R.isCompute) {
@@ -11645,7 +11834,9 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
     } else {
         msl_out << "struct TGLMT_FIn {\n";
         if (R.usesClipDistanceIn) msl_out << "  float tglmt_clipDist [[clip_distance]];\n";
-        for (auto& v : ins) msl_out << "  " << v.mslType << " " << v.name << " [[user(locn" << v.location << ")]];\n";
+        for (auto& v : ins)
+            msl_out << "  " << v.mslType << " " << v.name << " [[user(locn" << v.location << ")]]"
+                    << InterpAttr(v) << ";\n";
         msl_out << "};\n";
     }
     if (!uniforms.empty() || true) {
@@ -12362,17 +12553,24 @@ inline uint4 tglmt_ldu(TGLMTAttrDesc d, uint vid, uint iid,
         msl_out << "struct TGLMT_FOut {\n";
         if (isMRT) {
             for (auto& o : outs) {
+                // MSL color index = location + dual-source index (index=1 → color(1)).
+                int cidx = o.location + o.index;
                 if (o.arraySize > 0) {
                     int locv = (o.location >= 0 && o.location < 900) ? o.location : 900;
                     for (int i = 0; i < o.arraySize; ++i)
                         msl_out << "  " << o.mslType << " mrt" << (locv + i)
                                 << " [[color(" << (locv + i) << ")]];\n";
                 } else {
-                    msl_out << "  " << o.mslType << " mrt" << o.location << " [[color(" << o.location << ")]];\n";
+                    msl_out << "  " << o.mslType << " mrt" << cidx << " [[color(" << cidx << ")]];\n";
                 }
             }
         } else if (!outs.empty()) {
-            msl_out << "  " << fragT << " c [[color(0)]];\n";
+            // Single output trong struct (có gl_FragDepth / sample mask).
+            // Nếu output có layout(location=) tường minh thì phải ghi đúng
+            // draw buffer; nếu không có thì để linker gán (color 0 mặc định).
+            int cidx = outs[0].hasExplicitLocation ? (outs[0].location + outs[0].index) : 0;
+            if (cidx < 0) cidx = 0;
+            msl_out << "  " << fragT << " c [[color(" << cidx << ")]];\n";
         }
         if (useFragDepth) msl_out << "  float depth [[depth(" << fragDepthQualifier << ")]];\n";
         if (useSampleMask) msl_out << "  uint smask [[sample_mask]];\n";

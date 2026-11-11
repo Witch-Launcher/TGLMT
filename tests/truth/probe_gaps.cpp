@@ -76,8 +76,9 @@ int main() {
         glDeleteProgram(prog);
     }
 
-    // 3. Compressed formats: either a supported format round-trips, or the
-    // implementation honestly rejects the call (INVALID_ENUM).
+    // 3. Compressed formats: dùng MỘT format cụ thể đã hỗ trợ (DXT1 0x83F0,
+    // block 4x4 × 8 byte → ảnh 4x4 = 8 byte). Format generic (GL_COMPRESSED_RGBA)
+    // không bao giờ hợp lệ → luôn INVALID_ENUM (spec §8.7).
     {
         ClearErrors();
         GLint n = 0;
@@ -86,7 +87,8 @@ int main() {
         glGenTextures(1, &tex);
         glBindTexture(0x0DE1, tex);
         unsigned char data[64] = {};
-        glCompressedTexImage2D(0x0DE1, 0, 0x84EE /*COMPRESSED_RGBA*/, 4, 4, 0, 64, data);
+        glCompressedTexImage2D(0x0DE1, 0, 0x83F0 /*COMPRESSED_RGB_S3TC_DXT1_EXT*/,
+                              4, 4, 0, 8, data);
         GLenum err = glGetError();
         GLint w = 0;
         glGetTexLevelParameteriv(0x0DE1, 0, 0x1000 /*WIDTH*/, &w);
@@ -94,7 +96,7 @@ int main() {
         snprintf(d, sizeof(d), "formats=%d err=0x%x width=%d", n, err, w);
         bool ok = (n == 0) ? (err == 0x0500 /*INVALID_ENUM*/) : (err == 0 && w == 4);
         Probe("compressed texture contract", ok, d);
-        glDeleteTextures(1, &tex);
+        glDeleteTextures(1, tex ? &tex : nullptr);
     }
 
     // 4. MSAA storage through the GL API.

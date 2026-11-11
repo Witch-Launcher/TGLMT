@@ -2,31 +2,32 @@
 // Quy ước: memory render target = GL-order (hàng 0 = đáy GL) → viewport lower-left
 // = negative height (NDC y=-1 → hàng memory y); scissor = identity.
 #include "tglmt/GLConvert.h"
+#include "test_util.h"
 #include <cassert>
 #include <cstdio>
 int main() {
     // glViewport(10,20,100,50) trên target cao 200, glDepthRange mặc định (0,1).
     // n/f = GL depth-range ∈ [0,1]; VS đã kZConv z → viewport passthrough.
     auto vp = tglmt::GLViewportToMetal(10, 20, 100, 50, 0.0, 1.0, 200.0f);
-    assert(vp.x == 10 && vp.w == 100);
-    assert(vp.y == 20 + 50); // GL-correct: NDC y=-1 → hàng 20 (đáy viewport GL)
-    assert(vp.h == -50);     // negative height = lật y sang GL-order memory
-    assert(vp.n == 0.0 && vp.f == 1.0); // depth-range passthrough
+    TGLMT_CHECK((vp.x == 10 && vp.w == 100), "vp.x == 10 && vp.w == 100");
+    TGLMT_CHECK((vp.y == 20 + 50), "vp.y == 20 + 50"); // GL-correct: NDC y=-1 → hàng 20 (đáy viewport GL)
+    TGLMT_CHECK((vp.h == -50), "vp.h == -50");     // negative height = lật y sang GL-order memory
+    TGLMT_CHECK((vp.n == 0.0 && vp.f == 1.0), "vp.n == 0.0 && vp.f == 1.0"); // depth-range passthrough
     // glDepthRange(0.25, 0.75) → passthrough đúng giá trị
     auto vpR = tglmt::GLViewportToMetal(0, 0, 64, 64, 0.25, 0.75, 64.0f);
-    assert(vpR.n == 0.25 && vpR.f == 0.75);
+    TGLMT_CHECK((vpR.n == 0.25 && vpR.f == 0.75), "vpR.n == 0.25 && vpR.f == 0.75");
     // ZERO_TO_ONE: giữ nguyên dấu
     auto vp2 = tglmt::GLViewportToMetal(0, 0, 64, 64, 0.0, 1.0, 64.0f, false, true);
-    assert(vp2.y == 64 && vp2.h == -64);
-    assert(vp2.n == 0.0 && vp2.f == 1.0);
+    TGLMT_CHECK((vp2.y == 64 && vp2.h == -64), "vp2.y == 64 && vp2.h == -64");
+    TGLMT_CHECK((vp2.n == 0.0 && vp2.f == 1.0), "vp2.n == 0.0 && vp2.f == 1.0");
     // UPPER_LEFT: không lật (window y-up ↔ fb row-topdown trùng)
     auto vp3 = tglmt::GLViewportToMetal(10, 20, 100, 50, 0.0, 1.0, 200.0f, true, true);
-    assert(vp3.y == 20 && vp3.h == 50);
+    TGLMT_CHECK((vp3.y == 20 && vp3.h == 50), "vp3.y == 20 && vp3.h == 50");
     // scissor: memory = GL-order → identity (chỉ clamp âm)
     auto sc = tglmt::GLScissorToMetal(10, 20, 100, 50, 200);
-    assert(sc.x == 10 && sc.y == 20 && sc.w == 100 && sc.h == 50);
+    TGLMT_CHECK((sc.x == 10 && sc.y == 20 && sc.w == 100 && sc.h == 50), "sc.x == 10 && sc.y == 20 && sc.w == 100 && sc.h == 50");
     auto scNeg = tglmt::GLScissorToMetal(-5, -3, 10, 10, 200);
-    assert(scNeg.x == 0 && scNeg.y == 0);
+    TGLMT_CHECK((scNeg.x == 0 && scNeg.y == 0), "scNeg.x == 0 && scNeg.y == 0");
     printf("test_glconvert PASS\n");
-    return 0;
+    return TGLMT_RESULT;
 }

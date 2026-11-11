@@ -67,7 +67,7 @@ static ProgramObject* Prog(GLuint p) {
 }
 static void PutU64(ProgramObject* p, GLint loc, const GLuint64* v, GLsizei n) {
     if(!p||!v||n<0)return;
-    p->uniforms[loc].assign((const uint8_t*)v,(const uint8_t*)v+(size_t)n*8);
+    p->uniforms[loc].bytes.assign((const uint8_t*)v,(const uint8_t*)v+(size_t)n*8);
 }
 } // namespace
 

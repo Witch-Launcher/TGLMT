@@ -33,6 +33,21 @@ struct GLSLVar {
     std::string glslType;   // "vec3", "mat4", "sampler2D", ...
     std::string name;
     int location = -1;      // explicit layout, hoặc >=kTempLocBase (linker gán sau)
+    // Dual-source (GL 3.3): layout(location=N, index=I). index=1 → MSL color(N+1)
+    // khi N=0 (chỉ attachment 0 hợp lệ). Default 0 = MRT thường.
+    int index = 0;
+    // GLSL 4.60 §4.3.4 interpolation qualifier.
+    //   ""             -> smooth (MSL default center_perspective)
+    //   "flat"         -> [[flat]]        (MSL: no interpolation, provoking vertex)
+    //   "noperspective"-> [[center_no_perspective]]
+    //   "centroid"     -> [[center]]
+    // Trước đây qualifier bị strip mà KHÔNG emit attribute tương ứng -> MSL
+    // default center_perspective, tức GLSL "flat" lại nội suy mượt (sai spec).
+    std::string interpolation;
+    // Output fragment có layout(location=) TƯỜNG MINH hay không. Cần để phân
+    // biệt "location thật" với "số tạm 900+" mà linker gán sau — nếu lẫn,
+    // glBindFragDataLocation sẽ bị bỏ qua (GL: layout tường minh thắng).
+    bool hasExplicitLocation = false;
     std::string mslType;    // "float3", "float4x4", ...
     size_t uniformOffset = 0; // chỉ cho uniforms
     size_t uniformSize = 0;
@@ -105,6 +120,10 @@ struct GLSLConvertResult {
     bool usesVertexID = false;
     bool usesInstanceID = false;
     bool isVertex = true;
+    // Converter phát fragment output dạng STRUCT (có [[color(N)]]) thay vì
+    // trả float4 trần. Linker dùng cờ này để biết index color nào trong MSL
+    // cần viết lại theo location/index GL cuối cùng.
+    bool fragStructOutputs = false;
     // P6f: compute shader (stage 0x91B9). localSize = workgroup size đọc từ
     // `layout(local_size_x/y/z) in;` — backend cần để dispatch threadsPerThreadgroup.
     bool isCompute = false;

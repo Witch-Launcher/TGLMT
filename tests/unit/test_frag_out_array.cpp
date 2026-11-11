@@ -70,9 +70,9 @@ void main() { outS = ins_0[0]; }
 
     // 4) toolchain: biên dịch thật nếu có metal -c
     if (Run("xcrun --sdk macosx --find metal >/dev/null 2>&1")) {
-        { FILE* f = fopen("/tmp/tglmt-fragoutarr-probe.msl", "w");
+        { FILE* f = fopen("/tmp/tglmt-fragoutarr-probe.metal", "w");
           if (f) { fputs("#include <metal_stdlib>\nusing namespace metal;\nkernel void probe(){}\n", f); fclose(f); } }
-        if (Run("xcrun -sdk macosx metal -c /tmp/tglmt-fragoutarr-probe.msl -o /tmp/tglmt-fragoutarr-probe.air >/dev/null 2>&1")) {
+        if (Run("xcrun -sdk macosx metal -c /tmp/tglmt-fragoutarr-probe.metal -o /tmp/tglmt-fragoutarr-probe.air >/dev/null 2>&1")) {
             const char* s = R"(#version 150 core
 layout(location = 0) out vec4 _frag_output_00[2];
 void main() {
@@ -82,9 +82,9 @@ void main() {
 )";
             GLSLConvertResult r = ConvertGLSLtoMSL(s, 0x8B30);
             if (r.ok) {
-                FILE* f = fopen("/tmp/tglmt-fragoutarr.msl", "w");
+                FILE* f = fopen("/tmp/tglmt-fragoutarr.metal", "w");
                 if (f) { fputs(r.msl.c_str(), f); fclose(f); }
-                CHECK(Run("xcrun -sdk macosx metal -c /tmp/tglmt-fragoutarr.msl -o /tmp/tglmt-fragoutarr.air >/dev/null 2>&1"),
+                CHECK(Run("xcrun -sdk macosx metal -c /tmp/tglmt-fragoutarr.metal -o /tmp/tglmt-fragoutarr.air >/dev/null 2>&1"),
                       "MSL fragment out array biên dịch được (metal -c)");
             }
         }

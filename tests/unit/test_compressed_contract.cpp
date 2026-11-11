@@ -1,7 +1,8 @@
-// test_compressed_contract.cpp — TGLMT supports no compressed texture format
-// (GL_NUM_COMPRESSED_TEXTURE_FORMATS == 0). The API must reject compressed
-// uploads with INVALID_ENUM and compressed reads with INVALID_OPERATION instead
-// of silently accepting them and leaving an empty texture.
+// test_compressed_contract.cpp — contract cho các lệnh compressed texture.
+// TGLMT ĐÃ hỗ trợ format nén (xem test_compressed_texture.cpp), nên contract ở
+// đây là: internalformat/format GENERIC (GL_COMPRESSED_RGBA...) vẫn phải bị
+// từ chối (INVALID_ENUM) và đọc ảnh nén trên texture không nén phải là
+// INVALID_OPERATION — không được im lặng nhận rồi để texture rỗng.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 
@@ -26,8 +27,8 @@ int main() {
 
     GLint n = -1;
     glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &n);
-    if (n != 0) {
-        printf("test_compressed_contract FAIL: formats=%d expected=0\n", n);
+    if (n <= 0) {
+        printf("test_compressed_contract FAIL: formats=%d expected>0\n", n);
         ++gFails;
     }
 

@@ -26,10 +26,22 @@ void glGetAttachedObjectsARB(GLuint container, GLsizei maxCount, GLsizei* count,
     glGetAttachedShaders(container, maxCount, count, obj);
 }
 GLuint glGetHandleARB(GLenum pname) {
-    // Chỉ hỗ trợ PROGRAM_OBJECT_ARB → trả program đang bound (đúng spec ARB).
+    // ARB_shader_objects: PROGRAM_OBJECT_ARB (0x8B40) → program đang bound;
+    // SHADER_OBJECT_ARB (0x8B48) → shader đang bound (extension có cả hai).
+    Context& c = Context::Current();
     if (pname == 0x8B40 /*PROGRAM_OBJECT_ARB*/)
-        return Context::Current().state.BoundProgram();
-    Context::Current().errors.Record(0x0500); // INVALID_ENUM
+        return c.state.BoundProgram();
+    if (pname == 0x8B48 /*SHADER_OBJECT_ARB*/) {
+        // Shader đang dùng cho stage hiện tại: lấy từ program bound.
+        GLuint p = c.state.BoundProgram();
+        auto it = c.programs.find(p);
+        if (it == c.programs.end()) return 0;
+        // ARB không có "current shader" như GL core; trả shader đầu tiên
+        // gắn vào program (khớp hành vi driver cũ khi 1 stage hoạt động).
+        for (GLuint s : it->second.shaders) return s;
+        return 0;
+    }
+    c.errors.Record(0x0500); // INVALID_ENUM
     return 0;
 }
 void glGetInfoLogARB(GLuint obj, GLsizei maxLength, GLsizei* length, GLchar* infoLog) {
@@ -37,21 +49,35 @@ void glGetInfoLogARB(GLuint obj, GLsizei maxLength, GLsizei* length, GLchar* inf
     else if (IsShader(obj)) glGetShaderInfoLog(obj, maxLength, length, infoLog);
     else Context::Current().errors.Record(0x0502);
 }
+// ARB_shader_objects dùng pname RIÊNG, KHÁC core:
+//   GL_OBJECT_TYPE_ARB        = 0x8B4E  (core tương ứng: GL_SHADER_TYPE  = 0x8B4F)
+//   GL_OBJECT_SUBTYPE_ARB     = 0x8B4F  (core: GL_SHADER_TYPE  = 0x8B4F)
+//   GL_OBJECT_DELETE_STATUS_ARB= 0x8B80  (core: GL_DELETE_STATUS = 0x8B80)
+// Forward thẳng pname ARB sang core ⇒ trả sai (vd OBJECT_TYPE_ARB 0x8B4E bị
+// đọc như SHADER_TYPE của program → 0 thay vì GL_VERTEX_SHADER).
+static GLenum ArbPnameToCore(GLenum pname) {
+    switch (pname) {
+        case 0x8B4E: return 0x8B4F; // OBJECT_TYPE_ARB    → SHADER_TYPE
+        case 0x8B4F: return 0x8B4F; // OBJECT_SUBTYPE_ARB → SHADER_TYPE
+        case 0x8B80: return 0x8B80; // OBJECT_DELETE_STATUS_ARB → DELETE_STATUS
+        default: return pname;       // phần còn lại trùng core
+    }
+}
 void glGetObjectParameterfvARB(GLuint obj, GLenum pname, GLfloat* params) {
     // Forward sang Program/Shader version theo loại (float version).
     if (IsProgram(obj)) {
         GLint t = 0;
-        glGetProgramiv(obj, pname, &t);
+        glGetProgramiv(obj, ArbPnameToCore(pname), &t);
         if (params) *params = (GLfloat)t;
     } else if (IsShader(obj)) {
         GLint t = 0;
-        glGetShaderiv(obj, pname, &t);
+        glGetShaderiv(obj, ArbPnameToCore(pname), &t);
         if (params) *params = (GLfloat)t;
     } else Context::Current().errors.Record(0x0502);
 }
 void glGetObjectParameterivARB(GLuint obj, GLenum pname, GLint* params) {
-    if (IsProgram(obj)) glGetProgramiv(obj, pname, params);
-    else if (IsShader(obj)) glGetShaderiv(obj, pname, params);
+    if (IsProgram(obj)) glGetProgramiv(obj, ArbPnameToCore(pname), params);
+    else if (IsShader(obj)) glGetShaderiv(obj, ArbPnameToCore(pname), params);
     else Context::Current().errors.Record(0x0502);
 }
 void glUseProgramObjectARB(GLuint program) { glUseProgram(program); }

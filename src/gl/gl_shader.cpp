@@ -16,8 +16,22 @@ GLuint glCreateShader(GLenum type) {
 }
 void glDeleteShader(GLuint s) {
     Context& c = Context::Current();
-    GLuint a[1]={s}; c.registry.Delete(ObjectKind::Shader, 1, a);
-    c.shaders.erase(s);
+    // GL 4.6 §7.3: "If a shader object to be deleted is attached to a program
+    // object, it will not actually be deleted until it is no longer attached
+    // to any program object.  The error INVALID_OPERATION is generated if
+    // glDeleteShader is called for a shader object that has been attached to a
+    // program object and is still attached."  (tức là: đánh dấu để xoá, xoá
+    // thật khi không còn program nào dùng nó.)
+    // Trước đây erase ngay → program đang dùng shader mất stage → link lại
+    // báo "missing shader" và shader object biến mất trong khi vẫn phải tồn tại.
+    bool attached = false;
+    for (const auto& kv : c.programs) {
+        for (GLuint sh : kv.second.shaders)
+            if (sh == s) { attached = true; break; }
+        if (attached) break;
+    }
+    c.registry.Delete(ObjectKind::Shader, 1, &s);
+    if (!attached) c.shaders.erase(s);
 }
 GLboolean glIsShader(GLuint s) {
     return Context::Current().registry.Is(ObjectKind::Shader, s) ? 1 : 0;
@@ -26,8 +40,14 @@ void glShaderSource(GLuint s, GLsizei n, const GLchar* const* str, const GLint* 
     Context& c = Context::Current();
     auto it = c.shaders.find(s);
     if (it == c.shaders.end()) { c.errors.Record(0x0502); return; }
+    // GL 4.6 §7.3: count < 0 → INVALID_VALUE; count > 0 mà string là NULL →
+    // INVALID_VALUE. Trước đây `src.append(str[i])` với str[i]==nullptr là
+    // undefined behaviour (strlen/memcpy trên con trỏ null) ⇒ CRASH.
+    if (n < 0) { c.errors.Record(0x0501); return; }
+    if (n > 0 && !str) { c.errors.Record(0x0501); return; }
     std::string src;
     for (GLsizei i = 0; i < n; ++i) {
+        if (!str[i]) { c.errors.Record(0x0501); return; }
         if (len && len[i] >= 0) src.append(str[i], (size_t)len[i]);
         else src.append(str[i]);
     }

@@ -467,6 +467,10 @@ static bool SyncRegionToGPU(Context& c, TextureObject& tx, GLint xoff, GLint yof
 }
 
 namespace tglmt::gl {
+// Compressed texture (định nghĩa ở cuối file): internalformat có phải format
+// nén TGLMT hỗ trợ không. Cần trước glTexImage2D/3D + glTexSubImage2D vì
+// format nén không dùng được với lệnh texel thường.
+bool IsCompressedInternalFormat(GLenum ifmt);
 void glGenTextures(GLsizei n, GLuint* t) {
     Context& c = Context::Current();
     c.registry.Gen(ObjectKind::Texture, n, t);
@@ -513,8 +517,35 @@ void glDeleteTextures(GLsizei n, const GLuint* t) {
 GLboolean glIsTexture(GLuint t) {
     return Context::Current().registry.Is(ObjectKind::Texture, t) ? 1 : 0;
 }
+// GL 4.6 §8.1: target hợp lệ của glBindTexture.
+static bool IsValidTextureTarget(GLenum tgt) {
+    switch (tgt) {
+        case 0x0DE0: // GL_TEXTURE_1D
+        case 0x0DE1: // GL_TEXTURE_2D
+        case 0x806F: // GL_TEXTURE_3D
+        case 0x8C18: // GL_TEXTURE_1D_ARRAY
+        case 0x8C1A: // GL_TEXTURE_2D_ARRAY
+        case 0x84F5: // GL_TEXTURE_RECTANGLE
+        case 0x8513: // GL_TEXTURE_CUBE_MAP
+        case 0x8C2A: // GL_TEXTURE_BUFFER
+        case 0x8514: case 0x8515: case 0x8516: // CUBE_MAP_POSITIVE_X..Z
+        case 0x8517: case 0x8518: case 0x8519: // CUBE_MAP_NEGATIVE_X..Z
+        case 0x8C60: // GL_TEXTURE_CUBE_MAP_POSITIVE_X (ARB_direct_state_access)
+        case 0x8C61: case 0x8C62: case 0x8C63:
+        case 0x8C64: case 0x8C65: case 0x8C66:
+        case 0x9100: // GL_TEXTURE_2D_MULTISAMPLE (GL 3.2)
+        case 0x9102: // GL_TEXTURE_2D_MULTISAMPLE_ARRAY (GL 3.2)
+            return true;
+        default:
+            return false;
+    }
+}
 void glBindTexture(GLenum target, GLuint t) {
     Context& c = Context::Current();
+    // GL 4.6 §8.1: "An INVALID_ENUM error is generated if target is not one of
+    // the valid texture targets." Trước đây target lạ rơi vào slot 2D mặc định
+    // → binding sai mà không có lỗi nào báo.
+    if (!IsValidTextureTarget(target)) { c.errors.Record(0x0500); return; }
     c.RecordTexBind('B', c.state.ActiveTexture(), t, target);
     if (t && !c.textures.count(t)) {
         // Heal (Fix #6): MC đã ghi cache của nó = id (guarded _bindTexture đã
@@ -656,6 +687,9 @@ static bool PromoteGpuMipChainCube(Context& c, TextureObject& t, uint32_t want) 
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void* pixels) {
     Context& c = Context::Current();
     if (w < 0 || h < 0) { c.errors.Record(0x0501); return; }
+    // internalformat NÉN phải nạp bằng CompressedTexImage2D (spec §8.5: cột
+    // "Copyable" của format nén trong Table 8.14 để trống) → INVALID_OPERATION.
+    if (IsCompressedInternalFormat((GLenum)internalformat)) { c.errors.Record(0x0502); return; }
     // GL_TEXTURE_CUBE_MAP không phải target hợp lệ của glTexImage2D (phải dùng
     // từng face POSITIVE_X..NEGATIVE_Z). Trước đây bị nhầm với proxy → nuốt
     // lệnh, app tưởng đã tạo storage.
@@ -1056,6 +1090,8 @@ void glTexImage3D(GLenum target, GLint level, GLint inf, GLsizei w, GLsizei h, G
         return;
     }
     if (w < 0 || h < 0 || d < 0) { c.errors.Record(0x0501); return; }
+    // internalformat NÉN phải nạp bằng CompressedTexImage3D (spec §8.5).
+    if (IsCompressedInternalFormat((GLenum)inf)) { c.errors.Record(0x0502); return; }
     TextureObject* tp = BoundTex(c, target);
     if (!tp) return;
     auto& tx = *tp;
@@ -1200,6 +1236,9 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei
     bool hasUnpack = c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/) != 0;
     if (!tp || (!pixels && !hasUnpack)) { if (!pixels) c.errors.Record(0x0501); return; }
     auto& t = *tp;
+    // Texture nén không sửa được bằng lệnh texel thường (spec §8.6: format
+    // nén không "Copyable") → INVALID_OPERATION, không ghi đè shadow block nén.
+    if (IsCompressedInternalFormat(t.internalFormat)) { c.errors.Record(0x0502); return; }
     if (c.DiagOn() && (w >= 256 || h >= 256)) {
         static int nBigSub = 0;
         if (++nBigSub <= 256) {
@@ -1490,8 +1529,17 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoff, GLint yoff, GLint z
     if (!tp) return;
     TexSubImage3DCore(c, *tp, level, xoff, yoff, zoff, w, h, d, format, type, pixels);
 }
-void glTexParameterf(GLenum t, GLenum p, GLfloat v) { glTexParameteri(t, p, (GLint)v); }
-void glTexParameterfv(GLenum t, GLenum p, const GLfloat* v) { glTexParameteri(t, p, (GLint)v[0]); }
+// Ghi texture param — dùng chung cho bản bound (glTexParameter*) và bản DSA
+// (glTextureParameter*). Trước đây bản DSA ép float về int và KHÔNG ghi vào
+// fparams ⇒ mất độ chính xác (vd GL_TEXTURE_LOD_BIAS 0.5 → 0) và mất swizzle.
+static void SetTexParamF(TextureObject& tp, GLenum p, GLfloat v) {
+    // Float-valued params phải giữ nguyên độ chính xác (vd
+    // GL_TEXTURE_MAX_ANISOTROPY = 16.0). Trước đây ép về int.
+    tp.fparams[p] = v;
+    // Vẫn ghi vào map int để các param dạng int (vd LOD bias là float nhưng
+    // một số app set bằng glTexParameteri) không mất.
+    tp.params[p] = (GLint)v;
+}
 // EXT_texture_swizzle: GL swizzle value → MTLTextureSwizzle code
 // (0=Zero,1=One,2=R,3=G,4=B,5=A) để ITexture::swizzledView áp lúc draw.
 static uint8_t SwzCode(GLint v) {
@@ -1504,23 +1552,53 @@ static uint8_t SwzCode(GLint v) {
         default: return 2;     // GL_RED (và mọi giá trị lạ → spec RED)
     }
 }
+static void SetTexParamI(TextureObject& tp, GLenum pname, GLint param) {
+    tp.params[pname] = param;
+    switch (pname) { // decode cho bind swizzled view (gl_apple_draw)
+        case 0x8E42: tp.swz[0] = SwzCode(param); break; // SWIZZLE_R
+        case 0x8E43: tp.swz[1] = SwzCode(param); break; // SWIZZLE_G
+        case 0x8E44: tp.swz[2] = SwzCode(param); break; // SWIZZLE_B
+        case 0x8E45: tp.swz[3] = SwzCode(param); break; // SWIZZLE_A
+        default: break;
+    }
+}
+// GL_TEXTURE_SWIZZLE_RGBA (4 phần tử) và GL_TEXTURE_BORDER_COLOR (float[4]).
+static bool IsSwizzleRgba(GLenum p) { return p == 0x8E46; }
+
+void glTexParameterf(GLenum t, GLenum p, GLfloat v) {
+    Context& c = Context::Current();
+    TextureObject* tp = BoundTex(c, t);
+    if (!tp) return;
+    SetTexParamF(*tp, p, v);
+}
+void glTexParameterfv(GLenum t, GLenum p, const GLfloat* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }
+    // GL_TEXTURE_BORDER_COLOR (0x1004) là float[4] — 4 thành phần phải giữ
+    // riêng (0x1004..0x1007) vì fparams chỉ chứa 1 float/pname; draw path đọc
+    // theo quy ước này để dựng border color cho CLAMP_TO_BORDER.
+    if (p == 0x1004 /*GL_TEXTURE_BORDER_COLOR*/) {
+        TextureObject* tp = BoundTex(c, t);
+        if (!tp) return;
+        for (int i = 0; i < 4; ++i) tp->fparams[0x1004 + i] = v[i];
+        tp->params[p] = (GLint)v[0];
+        return;
+    }
+    glTexParameterf(t, p, v[0]);
+}
 void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     Context& c = Context::Current();
     TextureObject* tp = BoundTex(c, target);
     if (!tp) return;
-    tp->params[pname] = param;
-    switch (pname) { // decode cho bind swizzled view (gl_apple_draw)
-        case 0x8E42: tp->swz[0] = SwzCode(param); break; // SWIZZLE_R
-        case 0x8E43: tp->swz[1] = SwzCode(param); break; // SWIZZLE_G
-        case 0x8E44: tp->swz[2] = SwzCode(param); break; // SWIZZLE_B
-        case 0x8E45: tp->swz[3] = SwzCode(param); break; // SWIZZLE_A
-        default: break;
-    }
+    SetTexParamI(*tp, pname, param);
 }
 void glTexParameteriv(GLenum t, GLenum p, const GLint* v) {
+    // NULL → INVALID_VALUE (trước đây deref v[0] ⇒ CRASH).
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }
     // GL_TEXTURE_SWIZZLE_RGBA (0x8E46) nhận mảng 4 phần tử [R,G,B,A] → tách
     // store từng GL_TEXTURE_SWIZZLE_{R,G,B,A}. Các pnames khác giữ v[0].
-    if (p == 0x8E46 && v) {
+    if (IsSwizzleRgba(p)) {
         glTexParameteri(t, 0x8E42, v[0]); // SWIZZLE_R
         glTexParameteri(t, 0x8E43, v[1]); // SWIZZLE_G
         glTexParameteri(t, 0x8E44, v[2]); // SWIZZLE_B
@@ -1529,24 +1607,66 @@ void glTexParameteriv(GLenum t, GLenum p, const GLint* v) {
     }
     glTexParameteri(t, p, v[0]);
 }
-void glTexParameterIiv(GLenum t, GLenum p, const GLint* v) { glTexParameteri(t, p, v[0]); }
-void glTexParameterIuiv(GLenum t, GLenum p, const GLuint* v) { glTexParameteri(t, p, (GLint)v[0]); }
+void glTexParameterIiv(GLenum t, GLenum p, const GLint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }
+    glTexParameteri(t, p, v[0]);
+}
+void glTexParameterIuiv(GLenum t, GLenum p, const GLuint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }
+    glTexParameteri(t, p, (GLint)v[0]);
+}
 void glTextureParameterf(GLuint t, GLenum p, GLfloat v) {
     Context& c = Context::Current();
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
-    it->second.params[p] = (GLint)v;
+    SetTexParamF(it->second, p, v);
 }
-void glTextureParameterfv(GLuint t, GLenum p, const GLfloat* v) { glTextureParameterf(t, p, v[0]); }
+void glTextureParameterfv(GLuint t, GLenum p, const GLfloat* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }
+    auto it = c.textures.find(t);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    // GL_TEXTURE_BORDER_COLOR là float[4] → giữ cả 4 thành phần.
+    if (p == 0x1004) {
+        for (int i = 0; i < 4; ++i) it->second.fparams[0x1004 + i] = v[i];
+        it->second.params[p] = (GLint)v[0];
+        return;
+    }
+    SetTexParamF(it->second, p, v[0]);
+}
 void glTextureParameteri(GLuint t, GLenum p, GLint v) {
     Context& c = Context::Current();
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
-    it->second.params[p] = v;
+    SetTexParamI(it->second, p, v);
 }
-void glTextureParameteriv(GLuint t, GLenum p, const GLint* v) { glTextureParameteri(t, p, v[0]); }
-void glTextureParameterIiv(GLuint t, GLenum p, const GLint* v) { glTextureParameteri(t, p, v[0]); }
-void glTextureParameterIuiv(GLuint t, GLenum p, const GLuint* v) { glTextureParameteri(t, p, (GLint)v[0]); }
+void glTextureParameteriv(GLuint t, GLenum p, const GLint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }
+    auto it = c.textures.find(t);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    // GL_TEXTURE_SWIZZLE_RGBA (4 phần tử) → tách thành 4 swizzle riêng.
+    if (IsSwizzleRgba(p)) {
+        SetTexParamI(it->second, 0x8E42, v[0]);
+        SetTexParamI(it->second, 0x8E43, v[1]);
+        SetTexParamI(it->second, 0x8E44, v[2]);
+        SetTexParamI(it->second, 0x8E45, v[3]);
+        return;
+    }
+    SetTexParamI(it->second, p, v[0]);
+}
+void glTextureParameterIiv(GLuint t, GLenum p, const GLint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }
+    glTextureParameteri(t, p, v[0]);
+}
+void glTextureParameterIuiv(GLuint t, GLenum p, const GLuint* v) {
+    Context& c = Context::Current();
+    if (!v) { c.errors.Record(0x0501); return; }
+    glTextureParameteri(t, p, (GLint)v[0]);
+}
 void glGenerateMipmap(GLenum target) {
     Context& c = Context::Current();
     // Metal: blit generateMipmapsForTexture — cần texture mipmapped.
@@ -1588,7 +1708,13 @@ void glPixelStorei(GLenum pname, GLint param) {
         case 0x0D05: ps.packAlignment = param; break;     // PACK_ALIGNMENT
         case 0x806B: ps.packSkipImages = param; break;    // PACK_SKIP_IMAGES
         case 0x806C: ps.packImageHeight = param; break;   // PACK_IMAGE_HEIGHT
-        default: c.state.SetShadow(pname, &param, 4); break;
+        default:
+            // GL 4.6 §8.1 (table 8.1): chỉ 12 pname pixel-store lõi được
+            // chấp nhận. TGLMT không advertise extension pixel-store nào ⇒
+            // pname lạ → INVALID_ENUM (trước đây nuốt im lặng và lưu vào
+            // shadow ⇒ app tưởng đã set được pname không hỗ trợ).
+            c.errors.Record(0x0500);
+            break;
     }
 }
 // 1D texture trong TGLMT = storage 2D (w × 1) dùng chung slot 0 với 2D.
@@ -2261,20 +2387,469 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
         }
     }
 }
-// TGLMT chưa map compressed texture format nào: GL_NUM_COMPRESSED_TEXTURE_FORMATS
-// = 0. Theo spec, internalformat/format nén không hỗ trợ → INVALID_ENUM; không
-// được im lặng nhận rồi để texture rỗng. Khi thêm ASTC/ETC2/BPTC, thay các
-// hàm này bằng đường upload thật và cập nhật probe.
-static void CompressedUnsupported() { Context::Current().errors.Record(0x0500); }
-void glCompressedTexImage1D(GLenum, GLint, GLenum, GLsizei, GLint, GLsizei, const void*) { CompressedUnsupported(); }
-void glCompressedTexImage2D(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void*) { CompressedUnsupported(); }
-void glCompressedTexImage3D(GLenum, GLint, GLenum, GLsizei, GLsizei, GLsizei, GLint, GLsizei, const void*) { CompressedUnsupported(); }
-void glCompressedTexSubImage1D(GLenum, GLint, GLint, GLsizei, GLenum, GLsizei, const void*) { CompressedUnsupported(); }
-void glCompressedTexSubImage2D(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLsizei, const void*) { CompressedUnsupported(); }
-void glCompressedTexSubImage3D(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLsizei, const void*) { CompressedUnsupported(); }
-void glCompressedTextureSubImage1D(GLuint, GLint, GLint, GLsizei, GLenum, GLsizei, const void*) { CompressedUnsupported(); }
-void glCompressedTextureSubImage2D(GLuint, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLsizei, const void*) { CompressedUnsupported(); }
-void glCompressedTextureSubImage3D(GLuint, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLsizei, const void*) { CompressedUnsupported(); }
+// =====================================================================
+// Compressed texture — GL 4.6 §8.7 (CompressedTexImage*/CompressedTexSubImage*)
+// và §8.11 (Get*CompressedTexImage). Trước đây 9 hàm này chỉ ghi
+// GL_INVALID_ENUM vì TGLMT không map format nén nào.
+// =====================================================================
+// Bảng format nén TGLMT hỗ trợ: GL enum ↔ Metal pixel format ↔ kích thước block.
+// Thứ tự: Table 8.14 (GL 4.6 core) trước, rồi S3TC (EXT), rồi ASTC (KHR) —
+// GL_COMPRESSED_TEXTURE_FORMATS trả đúng thứ tự này.
+struct CompressedFmt {
+    GLenum gl;
+    metal::PixelFormat metal;
+    uint32_t bw, bh;   // số texel của 1 block
+    uint32_t bytes;    // byte mỗi block
+};
+static const CompressedFmt kCompressedFmts[] = {
+    // GL 4.6 core, Table 8.14 (thứ tự spec).
+    {0x8DBB, metal::PixelFormat::BC4_RUnorm,         4, 4,  8}, // COMPRESSED_RED_RGTC1
+    {0x8DBC, metal::PixelFormat::BC4_RSnorm,         4, 4,  8}, // COMPRESSED_SIGNED_RED_RGTC1
+    {0x8DBD, metal::PixelFormat::BC5_RGUnorm,        4, 4, 16}, // COMPRESSED_RG_RGTC2
+    {0x8DBE, metal::PixelFormat::BC5_RGSnorm,        4, 4, 16}, // COMPRESSED_SIGNED_RG_RGTC2
+    {0x8E8C, metal::PixelFormat::BC7_RGBAUnorm,      4, 4, 16}, // COMPRESSED_RGBA_BPTC_UNORM
+    {0x8E8D, metal::PixelFormat::BC7_RGBAUnorm_sRGB, 4, 4, 16}, // COMPRESSED_SRGB_ALPHA_BPTC_UNORM
+    {0x8E8E, metal::PixelFormat::BC6H_RGBFloat,      4, 4, 16}, // COMPRESSED_RGB_BPTC_SIGNED_FLOAT
+    {0x8E8F, metal::PixelFormat::BC6H_RGBUfloat,     4, 4, 16}, // COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT
+    {0x9274, metal::PixelFormat::ETC2_RGB8,          4, 4,  8}, // COMPRESSED_RGB8_ETC2
+    {0x9275, metal::PixelFormat::ETC2_RGB8_sRGB,     4, 4,  8}, // COMPRESSED_SRGB8_ETC2
+    {0x9276, metal::PixelFormat::ETC2_RGB8A1,        4, 4,  8}, // COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2
+    {0x9277, metal::PixelFormat::ETC2_RGB8A1_sRGB,   4, 4,  8}, // COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2
+    {0x9278, metal::PixelFormat::EAC_RGBA8,          4, 4, 16}, // COMPRESSED_RGBA8_ETC2_EAC
+    {0x9279, metal::PixelFormat::EAC_RGBA8_sRGB,     4, 4, 16}, // COMPRESSED_SRGB8_ALPHA8_ETC2_EAC
+    {0x9270, metal::PixelFormat::EAC_R11Unorm,       4, 4,  8}, // COMPRESSED_R11_EAC
+    {0x9271, metal::PixelFormat::EAC_R11Snorm,       4, 4,  8}, // COMPRESSED_SIGNED_R11_EAC
+    {0x9272, metal::PixelFormat::EAC_RG11Unorm,      4, 4, 16}, // COMPRESSED_RG11_EAC
+    {0x9273, metal::PixelFormat::EAC_RG11Snorm,      4, 4, 16}, // COMPRESSED_SIGNED_RG11_EAC
+    // EXT_texture_compression_s3tc: đã bị gỡ khỏi core 4.6 nhưng Metal vẫn có
+    // BC1/BC2/BC3 (iOS 16.4+) nên nhận luôn (game nạp texture DXT).
+    {0x83F0, metal::PixelFormat::BC1_RGBA,           4, 4,  8}, // COMPRESSED_RGB_S3TC_DXT1_EXT
+    {0x83F1, metal::PixelFormat::BC1_RGBA,           4, 4,  8}, // COMPRESSED_RGBA_S3TC_DXT1_EXT
+    {0x83F2, metal::PixelFormat::BC2_RGBA,           4, 4, 16}, // COMPRESSED_RGBA_S3TC_DXT3_EXT
+    {0x83F3, metal::PixelFormat::BC3_RGBA,           4, 4, 16}, // COMPRESSED_RGBA_S3TC_DXT5_EXT
+    {0x8C4C, metal::PixelFormat::BC1_RGBA_sRGB,      4, 4,  8}, // COMPRESSED_SRGB_S3TC_DXT1_EXT
+    {0x8C4D, metal::PixelFormat::BC1_RGBA_sRGB,      4, 4,  8}, // COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT
+    {0x8C4E, metal::PixelFormat::BC2_RGBA_sRGB,      4, 4, 16}, // COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT
+    {0x8C4F, metal::PixelFormat::BC3_RGBA_sRGB,      4, 4, 16}, // COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT
+    // KHR_texture_compression_astc_ldr → Metal ASTC_*_LDR (iOS 8.0+).
+    {0x93B0, metal::PixelFormat::ASTC_4x4_LDR,       4, 4, 16},
+    {0x93B1, metal::PixelFormat::ASTC_5x4_LDR,       5, 4, 16},
+    {0x93B2, metal::PixelFormat::ASTC_5x5_LDR,       5, 5, 16},
+    {0x93B3, metal::PixelFormat::ASTC_6x5_LDR,       6, 5, 16},
+    {0x93B4, metal::PixelFormat::ASTC_6x6_LDR,       6, 6, 16},
+    {0x93B5, metal::PixelFormat::ASTC_8x5_LDR,       8, 5, 16},
+    {0x93B6, metal::PixelFormat::ASTC_8x6_LDR,       8, 6, 16},
+    {0x93B7, metal::PixelFormat::ASTC_8x8_LDR,       8, 8, 16},
+    {0x93B8, metal::PixelFormat::ASTC_10x5_LDR,     10, 5, 16},
+    {0x93B9, metal::PixelFormat::ASTC_10x6_LDR,     10, 6, 16},
+    {0x93BA, metal::PixelFormat::ASTC_10x8_LDR,     10, 8, 16},
+    {0x93BB, metal::PixelFormat::ASTC_10x10_LDR,    10,10, 16},
+    {0x93BC, metal::PixelFormat::ASTC_12x10_LDR,    12,10, 16},
+    {0x93BD, metal::PixelFormat::ASTC_12x12_LDR,    12,12, 16},
+};
+static const CompressedFmt* FindCompressedFmt(GLenum ifmt) {
+    for (const CompressedFmt& f : kCompressedFmts)
+        if (f.gl == ifmt) return &f;
+    return nullptr;
+}
+// Số block theo 1 trục (ceil).
+static uint32_t CompressedBlocks(uint32_t n, uint32_t bs) { return (n + bs - 1) / bs; }
+// Kích thước (byte) ảnh nén 1 level = blocks(w) × blocks(h) × depth × byte/block.
+static size_t CompressedImageSize(const CompressedFmt& f, GLsizei w, GLsizei h, GLsizei d) {
+    if (w <= 0 || h <= 0) return 0;
+    uint32_t dep = (d > 0) ? (uint32_t)d : 1;
+    return (size_t)CompressedBlocks((uint32_t)w, f.bw) *
+           (size_t)CompressedBlocks((uint32_t)h, f.bh) * dep * f.bytes;
+}
+// Byte của MỘT hàng block (bytesPerRow khi upload).
+static size_t CompressedRowBytes(const CompressedFmt& f, GLsizei w) {
+    if (w <= 0) return 0;
+    return (size_t)CompressedBlocks((uint32_t)w, f.bw) * f.bytes;
+}
+// Target hợp lệ cho CompressedTexImage2D/SubImage2D (spec §8.7 kế thừa TexImage2D,
+// trừ rectangle vì format nén không dùng được với rectangle).
+static bool CompressedTarget2D(GLenum t) {
+    return t == 0x0DE1 /*TEXTURE_2D*/ || t == 0x8C18 /*TEXTURE_1D_ARRAY*/ ||
+           t == 0x8C1A /*TEXTURE_2D_ARRAY*/ || (t >= 0x8515 && t <= 0x851A);
+}
+// Target hợp lệ cho CompressedTexImage3D/SubImage3D (TexImage3D + cube array).
+static bool CompressedTarget3D(GLenum t) {
+    return t == 0x806F /*TEXTURE_3D*/ || t == 0x8C1A /*TEXTURE_2D_ARRAY*/ ||
+           t == 0x8513 /*TEXTURE_CUBE_MAP*/ || t == 0x9009 /*TEXTURE_CUBE_MAP_ARRAY*/;
+}
+// Shadow byte nén của 1 level (face >= 0 → cube face; level 0 → tx.pixels).
+static std::vector<uint8_t>* CompressedLevelBytes(TextureObject& tx, int face, GLint level) {
+    if (face >= 0) {
+        if (level == 0) return &tx.faces[face];
+        return &tx.faceMips[face][level].pixels;
+    }
+    if (level == 0) return &tx.pixels;
+    return &tx.mipData[level].pixels;
+}
+// Kích thước (texel) của 1 level.
+static void CompressedLevelDims(const TextureObject& tx, int face, GLint level, GLsizei* w,
+                                GLsizei* h, GLsizei* d) {
+    if (face >= 0 && level > 0) {
+        auto it = tx.faceMips[face].find(level);
+        if (it != tx.faceMips[face].end()) {
+            *w = it->second.w; *h = it->second.h; *d = it->second.d ? it->second.d : 1;
+            return;
+        }
+    } else if (level > 0) {
+        auto it = tx.mipData.find(level);
+        if (it != tx.mipData.end()) {
+            *w = it->second.w; *h = it->second.h; *d = it->second.d ? it->second.d : 1;
+            return;
+        }
+    }
+    *w = (GLsizei)tx.w; *h = (GLsizei)tx.h; *d = tx.d ? (GLsizei)tx.d : 1;
+}
+// Nguồn dữ liệu nén: client memory, hoặc OFFSET vào PIXEL_UNPACK_BUFFER.
+// ok=false khi offset vượt biên PBO (spec: INVALID_OPERATION).
+static const uint8_t* CompressedSource(Context& c, const void* data, size_t size, bool& ok) {
+    ok = true;
+    if (!data) return nullptr;
+    if (!c.state.BoundBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/)) return (const uint8_t*)data;
+    return UnpackBase(c, data, size, ok);
+}
+// Đồng bộ GPU cho texture nén. Metal tạo được texture 2D với pixel format nén;
+// các target khác (cube/array/3D) chưa có đường upload → giữ shadow CPU.
+static void CompressedSyncGpu(Context& c, TextureObject& tx) {
+    if (c.device->isNull()) return;
+    const CompressedFmt* f = FindCompressedFmt(tx.internalFormat);
+    if (!f || !tx.w || !tx.h) { tx.gpu.reset(); return; }
+    if (tx.target != 0x0DE1 /*TEXTURE_2D*/) {
+        tx.gpu.reset();
+        if (c.DiagOn())
+            fprintf(stderr,
+                    "[TGLMT] compressed: target 0x%x chưa có đường upload GPU (giữ shadow)\n",
+                    (unsigned)tx.target);
+        return;
+    }
+    uint32_t levels = tx.levels > 0 ? (uint32_t)tx.levels : 1;
+    size_t bpr0 = CompressedRowBytes(*f, (GLsizei)tx.w);
+    bool haveGpu = tx.gpu && tx.gpu->isCompressed() && tx.gpu->levelCount() >= levels;
+    if (!haveGpu) {
+        auto gpu = c.device->newCompressedTexture(tx.w, tx.h, f->metal, levels,
+                                                  tx.pixels.data(), bpr0);
+        if (!gpu) {
+            tx.gpu.reset();
+            if (c.DiagOn())
+                fprintf(stderr,
+                        "[TGLMT] compressed: device không tạo được texture nén (giữ shadow)\n");
+            return;
+        }
+        tx.gpu = std::move(gpu);
+        // Level 0 đã được nạp lúc tạo; các level >0 nạp ở dưới.
+    } else if (!tx.pixels.empty()) {
+        // Nạp lại CẢ level 0: vùng con có thể lệch block, Metal replaceRegion
+        // yêu cầu vùng canh block → nạp nguyên level luôn cho an toàn.
+        c.device->updateCompressedTexture(tx.gpu.get(), 0, 0, 0, tx.w, tx.h,
+                                          tx.pixels.data(), bpr0);
+    }
+    for (auto& kv : tx.mipData) {
+        if (kv.second.pixels.empty()) continue;
+        size_t lbpr = CompressedRowBytes(*f, kv.second.w);
+        c.device->updateCompressedTexture(tx.gpu.get(), (uint32_t)kv.first, 0, 0,
+                                          (uint32_t)kv.second.w, (uint32_t)kv.second.h,
+                                          kv.second.pixels.data(), lbpr);
+    }
+}
+// Ghi 1 level nén vào shadow + đồng bộ GPU.
+static void CompressedStoreLevel(Context& c, TextureObject& tx, int face, GLint level,
+        GLsizei w, GLsizei h, GLsizei d, const uint8_t* src, size_t size) {
+    std::vector<uint8_t>* store = CompressedLevelBytes(tx, face, level);
+    if (!store) return;
+    if (src) store->assign(src, src + size);
+    else store->assign(size, 0);
+    if (face >= 0) {
+        if (level == 0) { tx.w = (uint32_t)w; tx.h = (uint32_t)h; }
+        else {
+            auto& ml = tx.faceMips[face][level];
+            ml.w = w; ml.h = h; ml.d = 0;
+        }
+    } else {
+        // tx.d = 0 cho texture 2D (giống glTexImage2D) → IsVolumeTexture/clear
+        // volume không tưởng là texture thể tích.
+        if (level == 0) { tx.w = (uint32_t)w; tx.h = (uint32_t)h; tx.d = (d > 1) ? (uint32_t)d : 0; }
+        else {
+            auto& ml = tx.mipData[level];
+            ml.w = w; ml.h = h; ml.d = d;
+        }
+    }
+    CompressedSyncGpu(c, tx);
+}
+// Chèn block nén của vùng (xoff,yoff,zoff,w,h,d) vào shadow 1 level.
+// Layout shadow: block theo hàng, hàng block theo slice (slice z trước).
+static void CompressedMergeRegion(std::vector<uint8_t>& dst, GLsizei dstW, GLsizei dstH,
+        const CompressedFmt& f, GLint xoff, GLint yoff, GLint zoff, GLsizei w, GLsizei h,
+        GLsizei d, const uint8_t* src) {
+    uint32_t bprDst = CompressedBlocks((uint32_t)dstW, f.bw);
+    uint32_t bpcDst = CompressedBlocks((uint32_t)dstH, f.bh);
+    uint32_t bprSrc = CompressedBlocks((uint32_t)w, f.bw);
+    uint32_t bpcSrc = CompressedBlocks((uint32_t)h, f.bh);
+    size_t dstSlice = (size_t)bprDst * bpcDst * f.bytes;
+    size_t srcSlice = (size_t)bprSrc * bpcSrc * f.bytes;
+    uint32_t bx0 = (uint32_t)xoff / f.bw, by0 = (uint32_t)yoff / f.bh;
+    for (GLsizei z = 0; z < d; ++z) {
+        size_t dstBase = (size_t)(zoff + z) * dstSlice;
+        if (dstBase + dstSlice > dst.size()) break;
+        uint8_t* dstSlicePtr = dst.data() + dstBase;
+        const uint8_t* srcSlicePtr = src + (size_t)z * srcSlice;
+        for (uint32_t r = 0; r < bpcSrc; ++r) {
+            for (uint32_t col = 0; col < bprSrc; ++col) {
+                size_t di = ((size_t)(by0 + r) * bprDst + (bx0 + col)) * f.bytes;
+                size_t si = ((size_t)r * bprSrc + col) * f.bytes;
+                if (di + f.bytes > dstSlice || si + f.bytes > srcSlice) continue;
+                memcpy(dstSlicePtr + di, srcSlicePtr + si, f.bytes);
+            }
+        }
+    }
+}
+// --- API công khai dùng chung với gl_get_extra.cpp (Get*CompressedTexImage) ---
+bool IsCompressedInternalFormat(GLenum ifmt) { return FindCompressedFmt(ifmt) != nullptr; }
+size_t CompressedLevelImageSize(GLenum ifmt, GLsizei w, GLsizei h, GLsizei d) {
+    const CompressedFmt* f = FindCompressedFmt(ifmt);
+    return f ? CompressedImageSize(*f, w, h, d) : 0;
+}
+void CompressedBlockDims(GLenum ifmt, GLint* bw, GLint* bh) {
+    const CompressedFmt* f = FindCompressedFmt(ifmt);
+    if (bw) *bw = f ? (GLint)f->bw : 0;
+    if (bh) *bh = f ? (GLint)f->bh : 0;
+}
+GLint CompressedBlockBytes(GLenum ifmt) {
+    const CompressedFmt* f = FindCompressedFmt(ifmt);
+    return f ? (GLint)f->bytes : 0;
+}
+const std::vector<uint8_t>* CompressedLevelData(const TextureObject& tx, int face,
+                                                GLint level) {
+    if (face >= 0) {
+        if (level == 0) return tx.faces[face].empty() ? nullptr : &tx.faces[face];
+        auto it = tx.faceMips[face].find(level);
+        if (it == tx.faceMips[face].end() || it->second.pixels.empty()) return nullptr;
+        return &it->second.pixels;
+    }
+    if (level == 0) return tx.pixels.empty() ? nullptr : &tx.pixels;
+    auto it = tx.mipData.find(level);
+    if (it == tx.mipData.end() || it->second.pixels.empty()) return nullptr;
+    return &it->second.pixels;
+}
+void CompressedLevelExtent(const TextureObject& tx, int face, GLint level, GLsizei* w,
+                           GLsizei* h, GLsizei* d) {
+    CompressedLevelDims(tx, face, level, w, h, d);
+}
+// Danh sách format nén advertise cho GL_COMPRESSED_TEXTURE_FORMATS.
+const std::vector<GLenum>& CompressedTextureFormats() {
+    static const std::vector<GLenum> list = [] {
+        std::vector<GLenum> out;
+        out.reserve(sizeof(kCompressedFmts) / sizeof(kCompressedFmts[0]));
+        for (const CompressedFmt& f : kCompressedFmts) out.push_back(f.gl);
+        return out;
+    }();
+    return list;
+}
+
+// --- CompressedTexImage* (spec §8.7) ---
+// GL không định nghĩa format nén 1D: "An INVALID_ENUM error is generated by
+// CompressedTexImage1D if internalformat is one of the specific compressed
+// formats" (§8.7) — và format generic cũng INVALID_ENUM theo quy tắc chung.
+// ⇒ mọi internalformat của CompressedTexImage1D đều bị từ chối.
+void glCompressedTexImage1D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLint border, GLsizei imageSize, const void* data) {
+    (void)target; (void)level; (void)internalformat; (void)width; (void)border;
+    (void)imageSize; (void)data;
+    Context::Current().errors.Record(0x0500);
+}
+void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLsizei height, GLint border, GLsizei imageSize,
+                            const void* data) {
+    Context& c = Context::Current();
+    // Format kiểm tra TRƯỚC: internalformat generic (GL_COMPRESSED_RGBA...) không
+    // bao giờ hợp lệ → INVALID_ENUM, kể cả khi texture chưa bind.
+    const CompressedFmt* f = FindCompressedFmt(internalformat);
+    if (!f) { c.errors.Record(0x0500); return; }
+    if (target == 0x84F5 /*TEXTURE_RECTANGLE*/ || target == 0x84F7 /*PROXY_RECTANGLE*/ ||
+        !CompressedTarget2D(target)) {
+        c.errors.Record(0x0500); return;
+    }
+    if (level < 0 || width < 0 || height < 0 || imageSize < 0) { c.errors.Record(0x0501); return; }
+    // Format nén không có border (spec §8.5: border của TexImage2D phải = 0).
+    if (border != 0) { c.errors.Record(0x0501); return; }
+    size_t need = CompressedImageSize(*f, width, height, 1);
+    if ((size_t)imageSize != need) { c.errors.Record(0x0501); return; }
+    TextureObject* tp = BoundTex(c, target);
+    if (!tp) return;
+    auto& tx = *tp;
+    bool ok = true;
+    const uint8_t* bytes = CompressedSource(c, data, need, ok);
+    if (!ok) { c.errors.Record(0x0502); return; }
+    int face = (target >= 0x8515 && target <= 0x851A) ? (int)(target - 0x8515) : -1;
+    if (level == 0) {
+        // Level 0 định nghĩa lại storage: format + kích thước + mip cũ.
+        tx.mipData.clear();
+        for (int i = 0; i < 6; ++i) { tx.faceMips[i].clear(); tx.faces[i].clear(); }
+        tx.levels = 1;
+        tx.internalFormat = internalformat;
+        tx.isCube = (face >= 0);
+        tx.gpu.reset();
+    } else {
+        if (level + 1 > tx.levels) tx.levels = level + 1;
+        if (!IsCompressedInternalFormat(tx.internalFormat)) tx.internalFormat = internalformat;
+    }
+    CompressedStoreLevel(c, tx, face, level, width, height, 1, bytes, need);
+}
+void glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLsizei height, GLsizei depth, GLint border, GLsizei imageSize,
+                            const void* data) {
+    Context& c = Context::Current();
+    const CompressedFmt* f = FindCompressedFmt(internalformat);
+    if (!f) { c.errors.Record(0x0500); return; }
+    if (target == 0x84F5 || target == 0x84F7 || !CompressedTarget3D(target)) {
+        c.errors.Record(0x0500); return;
+    }
+    if (level < 0 || width < 0 || height < 0 || depth < 0 || imageSize < 0) {
+        c.errors.Record(0x0501); return;
+    }
+    if (border != 0) { c.errors.Record(0x0501); return; }
+    size_t need = CompressedImageSize(*f, width, height, depth);
+    if ((size_t)imageSize != need) { c.errors.Record(0x0501); return; }
+    TextureObject* tp = BoundTex(c, target);
+    if (!tp) return;
+    auto& tx = *tp;
+    bool ok = true;
+    const uint8_t* bytes = CompressedSource(c, data, need, ok);
+    if (!ok) { c.errors.Record(0x0502); return; }
+    if (level == 0) {
+        tx.mipData.clear();
+        for (int i = 0; i < 6; ++i) { tx.faceMips[i].clear(); tx.faces[i].clear(); }
+        tx.levels = 1;
+        tx.internalFormat = internalformat;
+        tx.isCube = false;
+        tx.gpu.reset();
+    } else {
+        if (level + 1 > tx.levels) tx.levels = level + 1;
+        if (!IsCompressedInternalFormat(tx.internalFormat)) tx.internalFormat = internalformat;
+    }
+    CompressedStoreLevel(c, tx, -1, level, width, height, depth, bytes, need);
+}
+// Lõi chung CompressedTexSubImage*D / CompressedTextureSubImage*D.
+// tx đã resolve; effectiveTarget quyết định cube face hay texture 2D/3D.
+static void CompressedSubImageCore(Context& c, TextureObject& tx, GLenum effectiveTarget,
+        GLint level, GLint xoff, GLint yoff, GLint zoff, GLsizei w, GLsizei h, GLsizei d,
+        GLenum format, GLsizei imageSize, const void* data) {
+    const CompressedFmt* f = FindCompressedFmt(format);
+    if (!f) { c.errors.Record(0x0500); return; }
+    // Không có chuyển đổi ảnh: format phải khớp format của texture.
+    if (tx.internalFormat != format) { c.errors.Record(0x0502); return; }
+    int face = (effectiveTarget >= 0x8515 && effectiveTarget <= 0x851A)
+                   ? (int)(effectiveTarget - 0x8515) : -1;
+    if (level >= tx.levels) { c.errors.Record(0x0501); return; }
+    GLsizei lw, lh, ld;
+    CompressedLevelDims(tx, face, level, &lw, &lh, &ld);
+    if (xoff + w > lw || yoff + h > lh || zoff + d > ld) { c.errors.Record(0x0501); return; }
+    // Vùng nén sửa ở mức block (spec §8.7 nới lỏng cho format nén) → offset
+    // phải canh block, lệch block là vi phạm giới hạn của format.
+    if (xoff % (GLint)f->bw || yoff % (GLint)f->bh) { c.errors.Record(0x0502); return; }
+    size_t need = CompressedImageSize(*f, w, h, d);
+    if ((size_t)imageSize != need) { c.errors.Record(0x0501); return; }
+    bool ok = true;
+    const uint8_t* bytes = CompressedSource(c, data, need, ok);
+    if (!ok) { c.errors.Record(0x0502); return; }
+    if (!bytes) return; // NULL → nội dung không đổi
+    std::vector<uint8_t>* store = CompressedLevelBytes(tx, face, level);
+    if (!store) return;
+    size_t levelSize = CompressedImageSize(*f, lw, lh, ld);
+    if (store->size() < levelSize) store->assign(levelSize, 0);
+    CompressedMergeRegion(*store, lw, lh, *f, xoff, yoff, zoff, w, h, d, bytes);
+    CompressedSyncGpu(c, tx);
+}
+// GL không định nghĩa format nén 1D → SubImage1D cũng bị từ chối (spec §8.7).
+void glCompressedTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width,
+                               GLenum format, GLsizei imageSize, const void* data) {
+    (void)target; (void)level; (void)xoffset; (void)width; (void)imageSize; (void)data;
+    Context::Current().errors.Record(0x0500);
+}
+void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLsizei width, GLsizei height, GLenum format, GLsizei imageSize,
+                               const void* data) {
+    Context& c = Context::Current();
+    const CompressedFmt* f = FindCompressedFmt(format);
+    if (!f) { c.errors.Record(0x0500); return; }
+    if (target == 0x84F5 || target == 0x84F7 || !CompressedTarget2D(target)) {
+        c.errors.Record(0x0500); return;
+    }
+    if (level < 0 || xoffset < 0 || yoffset < 0 || width < 0 || height < 0 || imageSize < 0) {
+        c.errors.Record(0x0501); return;
+    }
+    TextureObject* tp = BoundTex(c, target);
+    if (!tp) return;
+    CompressedSubImageCore(c, *tp, target, level, xoffset, yoffset, 0, width, height, 1,
+                            format, imageSize, data);
+}
+void glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                               GLenum format, GLsizei imageSize, const void* data) {
+    Context& c = Context::Current();
+    const CompressedFmt* f = FindCompressedFmt(format);
+    if (!f) { c.errors.Record(0x0500); return; }
+    if (target == 0x84F5 || target == 0x84F7 || !CompressedTarget3D(target)) {
+        c.errors.Record(0x0500); return;
+    }
+    if (level < 0 || xoffset < 0 || yoffset < 0 || zoffset < 0 || width < 0 || height < 0 ||
+        depth < 0 || imageSize < 0) {
+        c.errors.Record(0x0501); return;
+    }
+    TextureObject* tp = BoundTex(c, target);
+    if (!tp) return;
+    CompressedSubImageCore(c, *tp, target, level, xoffset, yoffset, zoffset, width, height,
+                            depth, format, imageSize, data);
+}
+// --- DSA (GL 4.5): CompressedTextureSubImage* nhận texture theo TÊN ---
+void glCompressedTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width,
+                                   GLenum format, GLsizei imageSize, const void* data) {
+    (void)texture; (void)level; (void)xoffset; (void)width; (void)imageSize; (void)data;
+    Context::Current().errors.Record(0x0500);
+}
+void glCompressedTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset,
+                                   GLsizei width, GLsizei height, GLenum format,
+                                   GLsizei imageSize, const void* data) {
+    Context& c = Context::Current();
+    const CompressedFmt* f = FindCompressedFmt(format);
+    if (!f) { c.errors.Record(0x0500); return; }
+    if (level < 0 || xoffset < 0 || yoffset < 0 || width < 0 || height < 0 || imageSize < 0) {
+        c.errors.Record(0x0501); return;
+    }
+    auto it = c.textures.find(texture);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    auto& tx = it->second;
+    GLenum eff = tx.target;
+    if (eff == 0x84F5 || eff == 0x84F7 || !CompressedTarget2D(eff)) {
+        c.errors.Record(0x0502); return;
+    }
+    CompressedSubImageCore(c, tx, eff, level, xoffset, yoffset, 0, width, height, 1, format,
+                            imageSize, data);
+}
+void glCompressedTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset,
+                                   GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                                   GLenum format, GLsizei imageSize, const void* data) {
+    Context& c = Context::Current();
+    const CompressedFmt* f = FindCompressedFmt(format);
+    if (!f) { c.errors.Record(0x0500); return; }
+    if (level < 0 || xoffset < 0 || yoffset < 0 || zoffset < 0 || width < 0 || height < 0 ||
+        depth < 0 || imageSize < 0) {
+        c.errors.Record(0x0501); return;
+    }
+    auto it = c.textures.find(texture);
+    if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    auto& tx = it->second;
+    GLenum eff = tx.target;
+    if (eff == 0x84F5 || eff == 0x84F7 || !CompressedTarget3D(eff)) {
+        c.errors.Record(0x0502); return;
+    }
+    CompressedSubImageCore(c, tx, eff, level, xoffset, yoffset, zoffset, width, height, depth,
+                            format, imageSize, data);
+}
+
 // Ghi 1 texel clear-value (format,type,data) vào dst (srcBpp bytes).
 // Hỗ trợ UNSIGNED_BYTE / FLOAT / HALF_FLOAT / USHORT / UINT + NULL (zero).
 // Trả false nếu format/type không hỗ trợ → caller INVALID_ENUM (trung thực).
@@ -2504,12 +3079,50 @@ void glClearTexSubImage(GLuint tex, GLint level, GLint x, GLint y, GLint z,
     if (z != 0 || d != 1) { c.errors.Record(0x0501); return; }
     ClearTexLevel(c, it->second, level, x, y, w, h, format, type, data);
 }
-void glInvalidateTexImage(GLuint a, GLint b) { (void)a;(void)b; }
-void glInvalidateTexSubImage(GLuint a, GLint b, GLint c_, GLint d, GLint e, GLsizei f, GLsizei g, GLsizei h) { (void)a;(void)b;(void)c_;(void)d;(void)e;(void)f;(void)g;(void)h; }
+// GL 4.6 §8.20 — InvalidateTexImage:
+//   INVALID_OPERATION if texture is zero or is not the name of an existing
+//   texture object.
+// Nội dung sau invalidate là undefined; phần bắt buộc sinh lỗi thì trước đây
+// thiếu (hàm là no-op hoàn toàn).
+void glInvalidateTexImage(GLuint texture, GLint level) {
+    Context& c = Context::Current();
+    if (!texture || !c.textures.count(texture)) { c.errors.Record(0x0502); return; }
+    if (level < 0) { c.errors.Record(0x0501); return; }
+    auto it = c.textures.find(texture);
+    if (it == c.textures.end()) return;
+    it->second.contentUndefined = true;
+}
+
+// GL 4.6 §8.20 — InvalidateTexSubImage:
+//   INVALID_VALUE    if level, xoffset, yoffset, zoffset, width, height or
+//                    depth is negative.
+//   INVALID_OPERATION if texture is zero or is not the name of an existing
+//                    texture object.
+void glInvalidateTexSubImage(GLuint texture, GLint level,
+                             GLint xoffset, GLint yoffset, GLint zoffset,
+                             GLsizei width, GLsizei height, GLsizei depth) {
+    Context& c = Context::Current();
+    if (!texture || !c.textures.count(texture)) { c.errors.Record(0x0502); return; }
+    if (level < 0 || xoffset < 0 || yoffset < 0 || zoffset < 0 ||
+        width < 0 || height < 0 || depth < 0) {
+        c.errors.Record(0x0501);
+        return;
+    }
+    auto it = c.textures.find(texture);
+    if (it == c.textures.end()) return;
+    it->second.contentUndefined = true;
+}
 void glTextureStorage1D(GLuint t, GLsizei l, GLenum inf, GLsizei w) {
     Context& c = Context::Current();
     auto it = c.textures.find(t);
     if (it == c.textures.end()) { c.errors.Record(0x0502); return; }
+    // GL 4.6 §8.1: levels < 1 → INVALID_VALUE; số mip level vượt quá kích
+    // thước tối đa (log2(w)+1) → INVALID_VALUE. (glTextureStorage2D/3D đã
+    // kiểm; bản 1D trước đây bỏ qua ⇒ texture 1D sai số mip.)
+    if (l < 1 || w < 1) { c.errors.Record(0x0501); return; }
+    GLsizei maxL = 1;
+    for (GLsizei m = w; m > 1; m >>= 1) ++maxL;
+    if (l > maxL) { c.errors.Record(0x0501); return; }
     it->second.w = w; it->second.h = 1; it->second.internalFormat = inf; it->second.levels = l;
     // P1: immutable storage chỉ CẤP chỗ (không có dữ liệu) → shadow toàn số 0,
     // không có thông tin. Giữ lại đúng như glTexImage2D: Null / không có gpu /

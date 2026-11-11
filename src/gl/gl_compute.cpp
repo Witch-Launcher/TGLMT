@@ -156,8 +156,8 @@ static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
             if (e.loc < 0) continue;
             auto uit = pr.uniforms.find(e.loc);
             if (uit == pr.uniforms.end()) continue;
-            size_t n = std::min(e.size, uit->second.size());
-            if (e.offset + n <= ub.size()) memcpy(ub.data() + e.offset, uit->second.data(), n);
+            size_t n = std::min(e.size, uit->second.bytes.size());
+            if (e.offset + n <= ub.size()) memcpy(ub.data() + e.offset, uit->second.bytes.data(), n);
         }
         // Upload (compute hiếm → newBuffer mỗi dispatch chấp nhận được; cache theo nội dung).
         static thread_local std::vector<uint8_t> lastUB;
@@ -243,9 +243,10 @@ static void DispatchComputeImpl(GLuint x, GLuint y, GLuint z,
                 fprintf(stderr, "\n");
             }
             for (auto& u : pr.uniforms) {
-                if (u.second.size() >= 4)
+                if (u.second.bytes.size() >= 4)
                     fprintf(stderr, "[TGLMT] cuni loc=%d size=%zu u0=%u\n",
-                            (int)u.first, u.second.size(), *(const uint32_t*)u.second.data());
+                            (int)u.first, u.second.bytes.size(),
+                            *(const uint32_t*)u.second.bytes.data());
             }
             fflush(stderr);
         }
@@ -369,8 +370,8 @@ void glDispatchComputeIndirect(GLintptr ind) {
             if (e.loc < 0) continue;
             auto uit = pr.uniforms.find(e.loc);
             if (uit == pr.uniforms.end()) continue;
-            size_t n = std::min(e.size, uit->second.size());
-            if (e.offset + n <= ub.size()) memcpy(ub.data() + e.offset, uit->second.data(), n);
+            size_t n = std::min(e.size, uit->second.bytes.size());
+            if (e.offset + n <= ub.size()) memcpy(ub.data() + e.offset, uit->second.bytes.data(), n);
         }
         auto ubuf = c.device->newBufferWithBytes(ub.data(), ub.size(), metal::StorageMode::Shared);
         if (ubuf) enc->setBuffer(ubuf.get(), 16);

@@ -69,9 +69,13 @@ int main() {
 
     tglmt::GLuint c0 = 0, c1 = 0, depth = 0, fbo = 0;
     glGenTextures(1, &c0); glBindTexture(0x9100, c0);
-    glTexImage2DMultisample(0x9100, 4, 0x8058, 64, 64, 0x1401);
+    // Tham số cuối là `fixedsamplelocations` (GLboolean) — trước đây truyền
+    // nhầm 0x1401 (GL_UNSIGNED_BYTE) làm sinh cảnh báo implicit-conversion.
+    glTexImage2DMultisample(0x9100, 4, 0x8058, 64, 64, tglmt::GL_TRUE);
     glGenTextures(1, &c1); glBindTexture(0x9100, c1);
-    glTexImage2DMultisample(0x9100, 4, 0x8058, 64, 64, 0x1401);
+    // Tham số cuối là `fixedsamplelocations` (GLboolean) — trước đây truyền
+    // nhầm 0x1401 (GL_UNSIGNED_BYTE) làm sinh cảnh báo implicit-conversion.
+    glTexImage2DMultisample(0x9100, 4, 0x8058, 64, 64, tglmt::GL_TRUE);
     glGenTextures(1, &depth); glBindTexture(0x0DE1, depth);
     glTexImage2D(0x0DE1, 0, 0x81A6 /*DEPTH_COMPONENT24*/, 64, 64, 0, 0x1902, 0x1406, nullptr);
     glGenFramebuffers(1, &fbo); glBindFramebuffer(0x8D40, fbo);

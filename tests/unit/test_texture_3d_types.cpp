@@ -54,7 +54,8 @@ int main() {
     Check(td.pixels.size() == dsrc.size(), "DOUBLE shadow đủ 8 byte/component");
 
     // Sub-image HALF ở offset z=1 phải ghi đúng 2 byte/component, không tràn.
-    std::vector<unsigned char> sub(2 * 2 * 2 * 2, 0xAB);
+    // RGBA + HALF_FLOAT = 8 byte/pixel ⇒ 2x2x1 cần 32 byte (trước đây 16).
+    std::vector<unsigned char> sub(2 * 2 * 1 * 8, 0xAB);
     glTexSubImage3D(0x806F, 0, 0, 0, 1, 2, 2, 1,
                     0x1908, 0x140B, sub.data());
     Check(glGetError() == 0, "HALF sub-image no error");

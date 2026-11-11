@@ -94,6 +94,13 @@ void StateTracker::BindBuffer(GLenum t, GLuint b){
 GLuint StateTracker::BoundBuffer(GLenum t) const {
     auto it=bufferBindings_.find(t); return it==bufferBindings_.end()?0:it->second;
 }
+void StateTracker::UnbindBufferEverywhere(GLuint b){
+    if (!b) return;
+    bool any = false;
+    for (auto& kv : bufferBindings_)
+        if (kv.second == b) { kv.second = 0; any = true; }
+    if (any) ++stateSeq_;
+}
 void StateTracker::BindTextureUnit(GLuint u, GLuint t, GLenum tgt){
     if (u >= kMaxTextureUnits) return;
     // Per-target: cube/buffer bind KHÔNG đựng đè slot 2D (và ngược lại).
@@ -114,6 +121,13 @@ void StateTracker::UnbindTextureEverywhere(GLuint t){
 }
 void StateTracker::SetActiveTexture(GLuint u){ if (activeTex_==u) return; activeTex_=u; ++stateSeq_; }
 void StateTracker::BindSampler(GLuint u, GLuint s){ if(u<kMaxTextureUnits) { if (samplerBound_[u]==s) return; samplerBound_[u]=s; ++stateSeq_; } }
+void StateTracker::UnbindSamplerEverywhere(GLuint s){
+    if (!s) return;
+    bool any = false;
+    for (auto& kv : samplerBound_)
+        if (kv == s) { kv = 0; any = true; }
+    if (any) ++stateSeq_;
+}
 void StateTracker::BindVAO(GLuint v){ if (boundVAO_==v) return; boundVAO_=v; ++stateSeq_; }
 void StateTracker::BindFBO(GLenum t, GLuint f){
     GLuint oldR = boundReadFBO_, oldD = boundDrawFBO_;

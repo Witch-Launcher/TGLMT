@@ -418,14 +418,46 @@ void TestCompressedContract(Suite& t) {
     ClearErrors();
     GLint n = -1;
     glGetIntegerv(0x86A2, &n);
+    // CompressedTexImage2D cần texture đang bind (spec §8.5: INVALID_OPERATION
+    // nếu không có texture nào bind với target).
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(0x0DE1 /*TEXTURE_2D*/, tex);
+    // DXT1 (GL_COMPRESSED_RGB_S3TC_DXT1_EXT 0x83F0): block 4x4, 8 byte/block
+    // → ảnh 4x4 = 1 block = 8 byte. imageSize phải khớp (spec §8.7: "An
+    // INVALID_VALUE error is generated if the imageSize parameter is not
+    // consistent with the format, dimensions, and contents").
     unsigned char data[64] = {};
-    glCompressedTexImage2D(0x0DE1, 0, 0x83F0, 4, 4, 0, 32, data);
+    glCompressedTexImage2D(0x0DE1, 0, 0x83F0, 4, 4, 0, 8, data);
     GLenum e = glGetError();
     if (n == 0)
         t.Check(e == 0x0500, "compressed unsupported rejects DXT1", "formats=0 err=" + ErrName(e));
     else
         t.Check(e == 0, "compressed DXT1 upload", "formats=" + std::to_string(n) + " err=" + ErrName(e));
     ClearErrors();
+    // imageSize sai (32 byte cho ảnh 4x4 DXT1 = 1 block 8 byte) → INVALID_VALUE.
+    glCompressedTexImage2D(0x0DE1, 0, 0x83F0, 4, 4, 0, 32, data);
+    e = glGetError();
+    if (n != 0)
+        t.Check(e == 0x0501, "compressed DXT1 wrong imageSize rejects",
+                "err=" + ErrName(e));
+    ClearErrors();
+    // border khác 0 với format nén → INVALID_VALUE (spec §8.5).
+    glCompressedTexImage2D(0x0DE1, 0, 0x83F0, 4, 4, 1, 8, data);
+    e = glGetError();
+    if (n != 0)
+        t.Check(e == 0x0501, "compressed DXT1 nonzero border rejects",
+                "err=" + ErrName(e));
+    ClearErrors();
+    // Không có texture nào bind → INVALID_OPERATION.
+    glBindTexture(0x0DE1, 0);
+    glCompressedTexImage2D(0x0DE1, 0, 0x83F0, 4, 4, 0, 8, data);
+    e = glGetError();
+    if (n != 0)
+        t.Check(e == 0x0502, "compressed DXT1 without bound texture rejects",
+                "err=" + ErrName(e));
+    ClearErrors();
+    glDeleteTextures(1, &tex);
 }
 
 void TestPipelineContract(Suite& t) {

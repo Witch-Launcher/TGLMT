@@ -4,7 +4,10 @@
 và trả giá trị an toàn (0/null), không giả vờ pass.
 Usage: python3 tools/gen_stubs.py
 """
-import re, pathlib, xml.etree.ElementTree as ET
+import re, pathlib, xml.etree.ElementTree as ET, sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import gl46_catalog
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GLXML = ROOT / "docs/khronos/gl.xml"
@@ -25,36 +28,15 @@ for f in (ROOT / "src/gl").glob("*.cpp"):
         if base.endswith("ui") and "PK" in txt[max(0, m.start()-200):m.start()+200]:
             impl.add(base + "v")
 
-t = ET.parse(str(GLXML)); r = t.getroot()
-proto_of = {}
-for cmds in r.findall("commands"):
-    for cmd in cmds.findall("command"):
-        pname = cmd.find("proto").find("name").text.strip()
-        ret = "".join(cmd.find("proto").itertext()).replace(pname, "").strip()
-        params = []
-        for p in cmd.findall("param"):
-            pt = "".join(p.itertext()).strip()
-            # tách tên biến cuối để tạo body
-            parts = pt.rsplit(None, 1)
-            params.append(pt)
-        proto_of[pname] = (ret, params)
+proto_of = gl46_catalog.parse_command_prototypes(GLXML)
 
-# core46
-core = {}
-for f in r.findall("feature"):
-    n = f.get("name")
-    if n.startswith("GL_VERSION_") and "ES" not in n:
-        ver = tuple(map(int, n.replace("GL_VERSION_", "").split("_")))
-        if ver <= (4, 6):
-            for req in f.findall("require"):
-                for c in req.findall("command"):
-                    core[c.get("name")] = n
-removed = set()
-for f in r.findall("feature"):
-    for rm in f.findall("remove"):
-        for c in rm.findall("command"):
-            removed.add(c.get("name"))
-core = {k: v for k, v in core.items() if k not in removed}
+# core46 — catalog chuẩn (657 hàm core thật) + 42 hàm compatibility-only.
+# Cả hai nhóm đều phải có định nghĩa để link (gl46.h khai báo chúng).
+core = gl46_catalog.parse_core_commands(GLXML)
+compat = gl46_catalog.parse_compat_only_commands(GLXML)
+core = dict(core)
+for _k, _v in compat.items():
+    core.setdefault(_k, _v)
 
 missing = sorted([k for k in core if k not in impl])
 print(f"[stubs] implemented tay: {len(impl)}, thiếu: {len(missing)}")

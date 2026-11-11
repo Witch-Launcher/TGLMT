@@ -82,12 +82,12 @@ void main() {
 
     // 5) Biên dịch MSL thật nếu toolchain sẵn (probe như test_converter_aquarium).
     if (r.ok && Run("xcrun --sdk macosx --find metal >/dev/null 2>&1")) {
-        { FILE* f = fopen("/tmp/tglmt-fragout-probe.msl", "w");
+        { FILE* f = fopen("/tmp/tglmt-fragout-probe.metal", "w");
           if (f) { fputs("#include <metal_stdlib>\nusing namespace metal;\nkernel void probe(){}\n", f); fclose(f); } }
-        if (Run("xcrun -sdk macosx metal -c /tmp/tglmt-fragout-probe.msl -o /tmp/tglmt-fragout-probe.air >/dev/null 2>&1")) {
-            FILE* f = fopen("/tmp/tglmt-fragout-center.msl", "w");
+        if (Run("xcrun -sdk macosx metal -c /tmp/tglmt-fragout-probe.metal -o /tmp/tglmt-fragout-probe.air >/dev/null 2>&1")) {
+            FILE* f = fopen("/tmp/tglmt-fragout-center.metal", "w");
             if (f) { fputs(r.msl.c_str(), f); fclose(f); }
-            CHECK(Run("xcrun -sdk macosx metal -c /tmp/tglmt-fragout-center.msl -o /tmp/tglmt-fragout-center.air >/dev/null 2>&1"),
+            CHECK(Run("xcrun -sdk macosx metal -c /tmp/tglmt-fragout-center.metal -o /tmp/tglmt-fragout-center.air >/dev/null 2>&1"),
                   "MSL centerDepth biên dịch được (metal -c)");
         } else {
             printf("SKIP: metal toolchain thiếu component\n");

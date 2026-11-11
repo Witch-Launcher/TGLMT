@@ -105,7 +105,13 @@ public:
     void SetFrontFace(GLenum mode);
     GLenum CullMode() const { return cullMode_; }
     GLenum FrontFace() const { return frontFace_; }
-    void SetLineWidth(float w) { if (lineWidth_==w) return; lineWidth_=w; ++stateSeq_; }
+    void SetLineWidth(float w) {
+        if (lineWidth_==w) return;
+        lineWidth_=w; ++stateSeq_;
+        // shadow cho glGet(GL_LINE_WIDTH) — spec yêu cầu trả lại giá trị đã set.
+        SetShadow(0x0B21 /*LINE_WIDTH*/, &w, 4);
+    }
+    float LineWidth() const { return lineWidth_; }
     void SetViewport(int idx, float x, float y, float w, float h) {
         if (idx>=0&&idx<kMaxViewports) {
             auto& v = viewports_[idx];
@@ -135,15 +141,39 @@ public:
     float PolygonUnits() const { return polyUnits_; }
     float PolygonClamp() const { return polyClamp_; }
     // Scissor (glScissor*): Metal setScissorRect — trước đây no-op, giờ lưu thật.
-    void SetScissor(int x, int y, int w, int h) {
-        if (scissor_.x==x&&scissor_.y==y&&scissor_.w==w&&scissor_.h==h) return;
-        scissor_ = {x, y, w, h}; ++stateSeq_;
-    }
+    // ARB_viewport_array (glspec46.core.pdf §14.9.2): MỖI viewport index có một
+    // scissor box riêng — gộp chung 1 box là sai (viewport i bị cắt theo box của
+    // viewport 0). Vì vậy lưu theo index.
     struct ScissorBox { int x = 0, y = 0, w = 0, h = 0; };
-    ScissorBox GetScissor() const { return scissor_; }
+    void SetScissor(int idx, int x, int y, int w, int h) {
+        if (idx < 0 || idx >= kMaxViewports) return;
+        auto& b = scissor_[idx];
+        if (b.x==x&&b.y==y&&b.w==w&&b.h==h) return;
+        b = {x, y, w, h}; ++stateSeq_;
+        // shadow cho glGetIntegeri_v(GL_SCISSOR_BOX, idx) — phải là 4 GIÁ TRỊ
+        // (x, y, w, h) liên tiếp (spec §14.9.2), không phải 1 số.
+        GLint box4[4] = {x, y, w, h};
+        SetShadow(0x0C10 /*SCISSOR_BOX*/, box4, sizeof(box4), (GLuint)idx);
+    }
+    // glScissor (legacy, không indexed): đặt box cho TẤT CẢ viewport (spec §14.9.2).
+    void SetScissorAll(int x, int y, int w, int h) {
+        for (int i = 0; i < kMaxViewports; ++i) SetScissor(i, x, y, w, h);
+    }
+    ScissorBox GetScissor(int idx = 0) const {
+        return (idx >= 0 && idx < kMaxViewports) ? scissor_[idx] : ScissorBox{};
+    }
+    // Viewport index của draw hiện tại. GL KHÔNG có state CPU cho nó: index đến từ
+    // output gl_ViewportIndex của geometry shader (glref: "GL_VIEWPORT_INDEX" không
+    // phải enum GL nào — 0x825C là GL_VIEWPORT_SUBPIXEL_BITS). TGLMT emulate GS bằng
+    // compute-prepass nên không mang được index → luôn 0, nhưng draw path vẫn đọc
+    // qua đây để một ngày nối được geometry-shader viewport index.
+    GLuint CurrentViewportIndex() const { return viewportIndex_; }
+    void SetCurrentViewportIndex(GLuint i) { if (i < (GLuint)kMaxViewports) viewportIndex_ = i; }
 
     // --- bindings (shadow, Metal encode dùng) ---
     void BindBuffer(GLenum target, GLuint buf);
+    // GL 4.6 §6.1: xoá buffer đang bound → binding về 0 (default buffer).
+    void UnbindBufferEverywhere(GLuint buf);
     GLuint BoundBuffer(GLenum target) const;
     // Per-target slots (GL §8.1: mỗi unit có binding point RIÊNG cho từng target).
     // Bug cũ: gộp 1 slot/unit → cube (panorama) / buffer (clouds isamplerBuffer
@@ -187,6 +217,8 @@ public:
         return unit < (GLuint)kMaxTextureUnits ? texTarget_[unit] : 0;
     }
     void BindSampler(GLuint unit, GLuint s);
+    // GL 4.6 §8.2: xoá sampler đang bind → binding về 0.
+    void UnbindSamplerEverywhere(GLuint s);
     GLuint BoundSampler(GLuint unit) const {
         return unit < (GLuint)kMaxTextureUnits ? samplerBound_[unit] : 0;
     }
@@ -242,10 +274,11 @@ private:
     // Mặc định FRONT_AND_BACK (0x0408) để giữ behavior cũ (cả 2 faces).
     GLenum activeStencilFace_ = 0x0408;
     std::array<ViewportState, kMaxViewports> viewports_;
+    GLuint viewportIndex_ = 0; // viewport index của draw (xem CurrentViewportIndex)
     GLenum cullMode_ = 0x0405;  // BACK
     GLenum frontFace_ = 0x0901; // CCW
     GLenum polyMode_ = 0x1B02;  // FILL (GL_FILL)
-    ScissorBox scissor_ = {0, 0, 0, 0};
+    ScissorBox scissor_[kMaxViewports] = {};
     float polyFactor_ = 0, polyUnits_ = 0, polyClamp_ = 0;
     float lineWidth_ = 1.0f;
     GLenum clipOrigin_ = 0x8CA1; // LOWER_LEFT (đã đối chiếu gl.xml; trước đây ghi nhầm 0x8CA0)

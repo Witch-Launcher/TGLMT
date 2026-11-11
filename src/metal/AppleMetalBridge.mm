@@ -103,10 +103,51 @@ static MTLPixelFormat ToMTL(PixelFormat f) {
         // Depth32Float_Stencil8 có mặt trên mọi Metal device; Depth24Unorm_Stencil8
         // bị một số macOS/GPU từ chối (validation "invalid pixelFormat 255").
         case PixelFormat::Depth24Stencil8: return MTLPixelFormatDepth32Float_Stencil8;
+        // --- Format nén: số = MTLPixelFormat thật (MTLPixelFormat.h) ---
+        case PixelFormat::BC1_RGBA: return MTLPixelFormatBC1_RGBA;
+        case PixelFormat::BC1_RGBA_sRGB: return MTLPixelFormatBC1_RGBA_sRGB;
+        case PixelFormat::BC2_RGBA: return MTLPixelFormatBC2_RGBA;
+        case PixelFormat::BC2_RGBA_sRGB: return MTLPixelFormatBC2_RGBA_sRGB;
+        case PixelFormat::BC3_RGBA: return MTLPixelFormatBC3_RGBA;
+        case PixelFormat::BC3_RGBA_sRGB: return MTLPixelFormatBC3_RGBA_sRGB;
+        case PixelFormat::BC4_RUnorm: return MTLPixelFormatBC4_RUnorm;
+        case PixelFormat::BC4_RSnorm: return MTLPixelFormatBC4_RSnorm;
+        case PixelFormat::BC5_RGUnorm: return MTLPixelFormatBC5_RGUnorm;
+        case PixelFormat::BC5_RGSnorm: return MTLPixelFormatBC5_RGSnorm;
+        case PixelFormat::BC6H_RGBFloat: return MTLPixelFormatBC6H_RGBFloat;
+        case PixelFormat::BC6H_RGBUfloat: return MTLPixelFormatBC6H_RGBUfloat;
+        case PixelFormat::BC7_RGBAUnorm: return MTLPixelFormatBC7_RGBAUnorm;
+        case PixelFormat::BC7_RGBAUnorm_sRGB: return MTLPixelFormatBC7_RGBAUnorm_sRGB;
+        case PixelFormat::EAC_R11Unorm: return MTLPixelFormatEAC_R11Unorm;
+        case PixelFormat::EAC_R11Snorm: return MTLPixelFormatEAC_R11Snorm;
+        case PixelFormat::EAC_RG11Unorm: return MTLPixelFormatEAC_RG11Unorm;
+        case PixelFormat::EAC_RG11Snorm: return MTLPixelFormatEAC_RG11Snorm;
+        case PixelFormat::EAC_RGBA8: return MTLPixelFormatEAC_RGBA8;
+        case PixelFormat::EAC_RGBA8_sRGB: return MTLPixelFormatEAC_RGBA8_sRGB;
+        case PixelFormat::ETC2_RGB8: return MTLPixelFormatETC2_RGB8;
+        case PixelFormat::ETC2_RGB8_sRGB: return MTLPixelFormatETC2_RGB8_sRGB;
+        case PixelFormat::ETC2_RGB8A1: return MTLPixelFormatETC2_RGB8A1;
+        case PixelFormat::ETC2_RGB8A1_sRGB: return MTLPixelFormatETC2_RGB8A1_sRGB;
+        case PixelFormat::ASTC_4x4_LDR: return MTLPixelFormatASTC_4x4_LDR;
+        case PixelFormat::ASTC_5x4_LDR: return MTLPixelFormatASTC_5x4_LDR;
+        case PixelFormat::ASTC_5x5_LDR: return MTLPixelFormatASTC_5x5_LDR;
+        case PixelFormat::ASTC_6x5_LDR: return MTLPixelFormatASTC_6x5_LDR;
+        case PixelFormat::ASTC_6x6_LDR: return MTLPixelFormatASTC_6x6_LDR;
+        case PixelFormat::ASTC_8x5_LDR: return MTLPixelFormatASTC_8x5_LDR;
+        case PixelFormat::ASTC_8x6_LDR: return MTLPixelFormatASTC_8x6_LDR;
+        case PixelFormat::ASTC_8x8_LDR: return MTLPixelFormatASTC_8x8_LDR;
+        case PixelFormat::ASTC_10x5_LDR: return MTLPixelFormatASTC_10x5_LDR;
+        case PixelFormat::ASTC_10x6_LDR: return MTLPixelFormatASTC_10x6_LDR;
+        case PixelFormat::ASTC_10x8_LDR: return MTLPixelFormatASTC_10x8_LDR;
+        case PixelFormat::ASTC_10x10_LDR: return MTLPixelFormatASTC_10x10_LDR;
+        case PixelFormat::ASTC_12x10_LDR: return MTLPixelFormatASTC_12x10_LDR;
+        case PixelFormat::ASTC_12x12_LDR: return MTLPixelFormatASTC_12x12_LDR;
         default: return MTLPixelFormatInvalid;
     }
 }
 // Bảng ánh xạ GL enum (giá trị đã đối chiếu gl46_types.h) → MTL. Không đoán.
+// Dual-source (GL 3.3 core): SRC1_* → MTLBlendFactorSource1* (Metal hỗ trợ
+// native khi FS ghi [[color(1)]] cùng attachment).
 static MTLBlendFactor ToMTLBlend(uint32_t g) {
     switch (g) {
         case 0: return MTLBlendFactorZero;
@@ -124,6 +165,12 @@ static MTLBlendFactor ToMTLBlend(uint32_t g) {
         case 0x8002: return MTLBlendFactorOneMinusBlendColor;
         case 0x8003: return MTLBlendFactorBlendAlpha;
         case 0x8004: return MTLBlendFactorOneMinusBlendAlpha;
+        // Dual-source (gl.xml): SRC1_COLOR=0x88F9, ONE_MINUS_SRC1_COLOR=0x88FA,
+        // SRC1_ALPHA=0x8589, ONE_MINUS_SRC1_ALPHA=0x88FB.
+        case 0x88F9: return MTLBlendFactorSource1Color;
+        case 0x88FA: return MTLBlendFactorOneMinusSource1Color;
+        case 0x8589: return MTLBlendFactorSource1Alpha;
+        case 0x88FB: return MTLBlendFactorOneMinusSource1Alpha;
         default: return MTLBlendFactorOne;
     }
 }
@@ -174,6 +221,22 @@ static MTLSamplerAddressMode ToMTLWrap(uint32_t g) {
         default: return MTLSamplerAddressModeClampToEdge; // 0x812F CLAMP_TO_EDGE
     }
 }
+// GL_ARB_texture_border_clamp: Metal KHÔNG có border color float4 tùy ý —
+// MTLSamplerDescriptor.borderColor là ENUM với đúng 3 màu (trong suốt đen /
+// đen đục / trắng đục). Ta chọn màu Metal gần nhất với GL_TEXTURE_BORDER_COLOR
+// (float4): ứng dụng dùng GL màu viền tùy ý vẫn được viền hợp lý thay vì
+// trong suốt như trước đây.
+static MTLSamplerBorderColor ToMTLSamplerBorderColor(const float* c) {
+    if (c[3] <= 0.0f) return MTLSamplerBorderColorTransparentBlack; // {0,0,0,0}
+    if (c[0] <= 0.0f && c[1] <= 0.0f && c[2] <= 0.0f)
+        return MTLSamplerBorderColorOpaqueBlack;                    // {0,0,0,1}
+    if (c[0] >= 1.0f && c[1] >= 1.0f && c[2] >= 1.0f)
+        return MTLSamplerBorderColorOpaqueWhite;                    // {1,1,1,1}
+    // Màu lạ (đỏ, xanh...) → chọn theo độ sáng trung bình (Rec.709).
+    float lum = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+    return lum >= 0.5f ? MTLSamplerBorderColorOpaqueWhite
+                       : MTLSamplerBorderColorOpaqueBlack;
+}
 static MTLPrimitiveType ToMTLPrim(PrimitiveType t) {
     switch (t) {
         case PrimitiveType::Point: return MTLPrimitiveTypePoint;
@@ -217,8 +280,9 @@ struct DepthInitSet {
 
 class AppleTexture : public ITexture {
 public:
-    AppleTexture(id<MTLTexture> t, uint32_t w, uint32_t h, PixelFormat f, uint32_t d = 1)
-        : tex_(t), w_(w), h_(h), f_(f), d_(d) {}
+    AppleTexture(id<MTLTexture> t, uint32_t w, uint32_t h, PixelFormat f, uint32_t d = 1,
+                 bool compressed = false)
+        : tex_(t), w_(w), h_(h), f_(f), d_(d), compressed_(compressed) {}
     // Depth Private khởi đầu rác: device nhớ texture nào đã init (per-texture,
     // không per-wrapper — wrapper tạo mới mỗi draw nên flag trên wrapper sai
     // thành force-clear mọi encoder mới = mất depth giữa frame = X-RAY).
@@ -242,6 +306,8 @@ public:
     uint32_t height() const override { return h_; }
     uint32_t depth() const override { return d_; }
     PixelFormat pixelFormat() const override { return f_; }
+    // Texture nén: GL layer cần biết để không upload kiểu texel thường.
+    bool isCompressed() const override { return compressed_; }
     uint32_t levelCount() const override {
         @try { return (uint32_t)[tex_ mipmapLevelCount]; } @catch (NSException*) { return 1; }
     }
@@ -297,6 +363,7 @@ private:
     uint32_t level_ = 0;
     uint32_t slice_ = 0;
     PixelFormat f_;
+    bool compressed_ = false;
     std::shared_ptr<struct DepthInitSet> depthInitSet_;
     std::unordered_map<uint32_t, std::shared_ptr<AppleTexture>> swzCache_;
     // P10 ARB_texture_view: Metal texture view chia sẻ storage (mip/slice/format).
@@ -364,12 +431,21 @@ private:
     }
 };
 
+// Serial toàn cục: mỗi AppleLibrary sinh 1 số thứ tự duy nhất. Dùng làm
+// identity cho cache pipeline — xem ILibrary::identity() (giải thích vì sao
+// KHÔNG dùng con trỏ: glLinkProgram giải phóng library cũ, allocator hay trả
+// lại đúng địa chỉ cũ ⇒ cache trùng ⇒ dùng lại pipeline của shader cũ).
+static std::atomic<uint64_t> gLibrarySerial{1};
+
 class AppleLibrary : public ILibrary {
 public:
-    explicit AppleLibrary(id<MTLLibrary> l) : lib_(l) {}
+    explicit AppleLibrary(id<MTLLibrary> l)
+        : lib_(l), serial_(gLibrarySerial.fetch_add(1, std::memory_order_relaxed)) {}
     id<MTLLibrary> get() const { return lib_; }
+    uint64_t identity() const override { return serial_; }
 private:
     id<MTLLibrary> lib_;
+    uint64_t serial_;
 };
 
 class ApplePipeline : public IRenderPipeline {
@@ -499,6 +575,10 @@ public:
         countCommitted_ = committed;
         countCompleted_ = completed;
     }
+    // Device báo "CB này vừa commit" → mốc thời gian GPU cho GL_TIME_ELAPSED.
+    void setCommitObserver(std::function<void(void*)> obs) override {
+        commitObs_ = std::move(obs);
+    }
     void endEncodingNoCommit() override {
         if (!enc_) return;
         [enc_ endEncoding];
@@ -546,6 +626,7 @@ public:
         }
         NoteInflightCB(cb_); // ThrottleGpu chờ CB này thay vì drain cả pipeline
         [cb_ commit];
+        if (commitObs_) commitObs_((__bridge void*)cb_);
         committed_ = true;
     }
     bool endAndCommit() override {
@@ -558,6 +639,7 @@ public:
 private:
     id<MTLCommandBuffer> cb_;
     id<MTLComputeCommandEncoder> enc_;
+    std::function<void(void*)> commitObs_; // báo device CB vừa commit
     LogFn log_;
     std::shared_ptr<SharedDiag> diag_;
     std::atomic<uint64_t>* countCommitted_ = nullptr;
@@ -770,7 +852,24 @@ public:
                        bool ownCB = true)
         : cb_(cb), enc_(enc), target_(target), log_(log), diag_(diag),
           countCommitted_(committed), countCompleted_(completed), ok_(cb && enc),
-          ownCB_(ownCB) {}
+          ownCB_(ownCB) {
+        // Occlusion query: Metal chỉ đếm được SỐ sample (mode Counting) trên
+        // GPU family Apple3+ (Metal feature set tables). GPU cũ chỉ có Boolean.
+        // `@available` phải là GUARD của khối if (không được dùng như một
+        // biểu thức trong &&) — nếu không clang báo
+        // -Wunsupported-availability-guard.
+        if (@available(macOS 10.15, iOS 13.0, *)) {
+            if (cb) visCounting_ = [cb.device supportsFamily:MTLGPUFamilyApple3];
+        }
+    }
+    void setVisibilitySlotProvider(std::function<uint64_t()> p) override {
+        visSlotProvider_ = std::move(p);
+    }
+    // Device báo "CB này vừa commit" → device lấy mốc thời gian GPU cho
+    // GL_TIME_ELAPSED (Metal chỉ có timestamp theo command buffer).
+    void setCommitObserver(std::function<void(void*)> obs) override {
+        commitObs_ = std::move(obs);
+    }
     void setViewport(const Viewport& vp) override {
         if (!ok_) return;
         MTLViewport m = {vp.x, vp.y, vp.w, vp.h, vp.n, vp.f};
@@ -920,15 +1019,20 @@ public:
         [enc_ setDepthBias:bias slopeScale:slopeScale clamp:clamp];
     }
     void setVisibilityResult(IBuffer* b, uint64_t off, bool enable) override {
-        // Occlusion ANY_SAMPLES: buffer đã đính trên render pass descriptor
-        // (attachVis) — encoder chỉ đổi MODE. enable=false → ModeDisabled.
+        // Occlusion: buffer đã đính trên render pass descriptor (attachVis) —
+        // encoder chỉ đổi MODE. enable=false → ModeDisabled.
         (void)b; // buffer luôn là device->visibilityBuffer(); mode quyết định ghi
         if (!ok_) return;
         if (!enable) {
             [enc_ setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
             return;
         }
-        [enc_ setVisibilityResultMode:MTLVisibilityResultModeBoolean offset:off];
+        // Mỗi draw ghi 1 slot riêng (Metal ghi ĐÈ offset → nếu mọi draw dùng
+        // chung 1 offset thì chỉ còn kết quả draw cuối, mất tổng của query).
+        if (visSlotProvider_) off = visSlotProvider_();
+        [enc_ setVisibilityResultMode:(visCounting_ ? MTLVisibilityResultModeCounting
+                                                     : MTLVisibilityResultModeBoolean)
+                               offset:off];
     }
     bool endAndCommitNoWait() override {
         if (!enc_ || !cb_) return false;
@@ -987,6 +1091,7 @@ public:
         }
         NoteCommit();
         [cb_ commit];
+        if (commitObs_) commitObs_((__bridge void*)cb_);
         NoteInflightCB(cb_); // p6: ThrottleGpu chờ CB này thay vì drain cả pipeline
         return ok_;
     }
@@ -1006,10 +1111,22 @@ public:
         if (blit && target_) { [blit synchronizeResource:target_]; [blit endEncoding]; }
 #endif
         [cb_ commit];
+        if (commitObs_) commitObs_((__bridge void*)cb_);
         [cb_ waitUntilCompleted];
         return ok_ && [cb_ status] == MTLCommandBufferStatusCompleted;
     }
 private:
+    // Cache bind đã encode (xem setVertexBuffer). Sống theo encoder ⇒ tự đúng
+    // với vòng đời state Metal (encoder mới → state rỗng).
+    static constexpr uint32_t kBindSlots = 32;
+    id<MTLBuffer> lastVertBuf_[kBindSlots] = {nil};
+    size_t lastVertBufOff_[kBindSlots] = {0};
+    id<MTLBuffer> lastFragBuf_[kBindSlots] = {nil};
+    size_t lastFragBufOff_[kBindSlots] = {0};
+    id<MTLTexture> lastVertTex_[kBindSlots] = {nil};
+    id<MTLTexture> lastFragTex_[kBindSlots] = {nil};
+    id<MTLSamplerState> lastVertSamp_[kBindSlots] = {nil};
+    id<MTLSamplerState> lastFragSamp_[kBindSlots] = {nil};
     void NoteCommit() {
         if (countCommitted_) countCommitted_->fetch_add(1, std::memory_order_relaxed);
     }
@@ -1022,6 +1139,9 @@ private:
     std::atomic<uint64_t>* countCompleted_ = nullptr;
     bool ok_;
     bool ownCB_ = true; // p7: false = clear-ONLY encoder dùng chung CB batch
+    bool visCounting_ = false;               // Metal Counting mode (đếm số sample)
+    std::function<uint64_t()> visSlotProvider_; // cấp slot visibility cho draw
+    std::function<void(void*)> commitObs_;       // báo device CB vừa commit
 };
 
 // macOS Managed storage: sau replaceRegion, GPU copy KHÔNG tự cập nhật. Cách
@@ -1035,7 +1155,13 @@ class AppleDevice : public IDevice {
 public:
     explicit AppleDevice(id<MTLDevice> d, LogFn log)
         : dev_(d), queue_([d newCommandQueue]), log_(log),
-          diag_(std::make_shared<SharedDiag>()) {}
+          diag_(std::make_shared<SharedDiag>()) {
+        // Metal Counting mode (đếm SỐ sample cho GL_SAMPLES_PASSED) chỉ có
+        // trên GPU family Apple3+ (Metal feature set tables). GPU cũ chỉ có
+        // Boolean → ANY_SAMPLES dùng được, SAMPLES_PASSED không có số.
+        if (@available(macOS 10.15, iOS 13.0, *))
+            visCounting_ = [dev_ supportsFamily:MTLGPUFamilyApple3];
+    }
     uint32_t maxTessellationFactor() const override {
         NSUInteger m = 64;
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
@@ -1108,6 +1234,121 @@ public:
     void attachVis(MTLRenderPassDescriptor* rp) {
         if (!rp || !visWrap_) return;
         rp.visibilityResultBuffer = visWrap_->get();
+    }
+    // ---- Occlusion query: bộ đếm slot + tổng số sample ----
+    // Metal visibility buffer: mỗi draw ghi kết quả (số sample nếu Counting
+    // mode, 0/1 nếu Boolean) vào offset của nó, GHI ĐÈ giá trị cũ → nếu mọi
+    // draw trong query dùng chung offset thì chỉ còn draw cuối. TGLMT cấp mỗi
+    // draw 1 slot riêng (vòng 256 slot) rồi CỘNG tổng → đúng nghĩa
+    // GL_SAMPLES_PASSED (số sample pass depth test trong CẢ query).
+    // Query > 256 draw thì slot bị dùng lại → tổng chỉ tính slot đang giữ
+    // (thiếu draw cũ hơn) — giới hạn đã biết, ghi rõ trong log khi xảy ra.
+    void beginVisibilityQuery(uint32_t queryId) override {
+        visQueryId_ = queryId;
+        visQuerySlots_[queryId].clear();
+        // Giữ số query còn kết quả trong giới hạn (query cũ không ai đọc
+        // nữa → bỏ để không phình bộ nhớ).
+        while (visQuerySlots_.size() > 16) visQuerySlots_.erase(visQuerySlots_.begin());
+    }
+    uint64_t nextVisibilitySlot() {
+        uint64_t slot = visNextSlot_;
+        visNextSlot_ = (visNextSlot_ + 1) % kVisNumSlots;
+        auto& list = visQuerySlots_[visQueryId_];
+        bool dup = false;
+        for (uint64_t s : list) { if (s == slot) { dup = true; break; } }
+        if (!dup) list.push_back(slot);
+        return slot * 8; // byte offset trong visibility buffer
+    }
+    uint64_t visibilitySampleTotal(uint32_t queryId) override {
+        auto it = visQuerySlots_.find(queryId);
+        if (it == visQuerySlots_.end()) return 0;
+        IBuffer* vis = visibilityBuffer();
+        if (!vis || !vis->contents()) return 0;
+        const char* p = (const char*)vis->contents();
+        uint64_t sum = 0;
+        // Counting mode: mỗi slot = số sample của draw đó → tổng = số sample
+        // của CẢ query. Boolean mode: mỗi slot = 0/1 → tổng = số draw có
+        // fragment nhìn thấy (ANY_SAMPLES chỉ cần biết có > 0 hay không).
+        for (uint64_t slot : it->second)
+            sum += *(volatile uint64_t*)(p + slot * 8);
+        return sum;
+    }
+    bool visibilityCountingSupported() const override { return visCounting_; }
+    // Tạo encoder + gắp 2 hook: cấp slot visibility (mỗi draw 1 slot để cộng
+    // dồn tổng số sample của query) và báo device khi CB commit (mốc thời gian
+    // GPU cho GL_TIME_ELAPSED). `this` an toàn: Context giữ device lâu hơn
+    // encoder (device khai báo trước pendingEncoder → hủy theo thứ tự ngược).
+    std::shared_ptr<IRenderEncoder> NewRenderEncoder(id<MTLCommandBuffer> cb,
+            id<MTLRenderCommandEncoder> enc, id<MTLTexture> target, bool ownCB = true) {
+        auto e = std::make_shared<AppleRenderEncoder>(cb, enc, target, log_, diag_,
+                                                      cbCommitted_, cbCompleted_, ownCB);
+        e->setVisibilitySlotProvider([this]() { return nextVisibilitySlot(); });
+        e->setCommitObserver([this](void* p) {
+            RegisterCB((__bridge id<MTLCommandBuffer>)p);
+        });
+        return e;
+    }
+    // ---- Mốc thời gian GPU (GL_TIME_ELAPSED) ----
+    // Metal chỉ có timestamp ở ranh giới command buffer (GPUStartTime/
+    // GPUEndTime — macOS 10.15+/iOS 10.3+). Sổ dưới đây đánh số CB theo thứ tự
+    // commit để GL lấy mốc "CB kết thúc lúc nào" → đo thời gian GPU.
+    void RegisterCB(id<MTLCommandBuffer> cb) {
+        if (!cb) return;
+        ++gpuCbCount_;
+        gpuCbs_.push_back(cb);
+        while (gpuCbs_.size() > kGpuCbKeep) {
+            gpuCbs_.erase(gpuCbs_.begin());
+            ++gpuCbBase_;
+        }
+    }
+    // Mốc A/B của query TIME_ELAPSED = CB đã commit ngay trước khi gọi.
+    void beginTimerQuery(uint32_t queryId) override { timerStart_[queryId] = gpuCbCount_; }
+    void endTimerQuery(uint32_t queryId) override { timerEnd_[queryId] = gpuCbCount_; }
+    uint64_t timerQueryElapsedNs(uint32_t queryId) override {
+        auto a = timerStart_.find(queryId);
+        auto b = timerEnd_.find(queryId);
+        if (a == timerStart_.end() || b == timerEnd_.end()) return 0;
+        uint64_t ta = gpuCommandBufferEndTimeNs(a->second);
+        uint64_t tb = gpuCommandBufferEndTimeNs(b->second);
+        if (!ta || !tb || tb <= ta) return 0;
+        return tb - ta;
+    }
+    bool timerQueryDisjoint(uint32_t queryId) override {
+        auto a = timerStart_.find(queryId);
+        auto b = timerEnd_.find(queryId);
+        if (a == timerStart_.end() || b == timerEnd_.end()) return true;
+        // Đờc được khi Cả HAI mốc đểu có timestamp GPU.
+        return !gpuCommandBufferEndTimeNs(a->second) || !gpuCommandBufferEndTimeNs(b->second);
+    }
+    // Query đã xong chưa (KHÔNG chờ GPU): cả hai command buffer của query
+    // phải ở trạng thái Completed. Đây là đường KHÔNG chặn cho
+    // GL_QUERY_RESULT_AVAILABLE — MC poll nó mỗi frame.
+    bool timerQueryReady(uint32_t queryId) override {
+        auto a = timerStart_.find(queryId);
+        auto b = timerEnd_.find(queryId);
+        if (a == timerStart_.end() || b == timerEnd_.end()) return false;
+        return gpuCommandBufferCompleted(a->second) && gpuCommandBufferCompleted(b->second);
+    }
+    bool gpuCommandBufferCompleted(uint64_t index) const {
+        if (index < gpuCbBase_ || index > gpuCbCount_) return false;
+        size_t i = (size_t)(index - gpuCbBase_);
+        if (i >= gpuCbs_.size()) return false;
+        id<MTLCommandBuffer> cb = gpuCbs_[i];
+        return cb && [cb status] == MTLCommandBufferStatusCompleted;
+    }
+    uint64_t gpuCommandBufferEndTimeNs(uint64_t index) const {
+        if (index < gpuCbBase_ || index > gpuCbCount_) return 0;
+        size_t i = (size_t)(index - gpuCbBase_);
+        if (i >= gpuCbs_.size()) return 0;
+        id<MTLCommandBuffer> cb = gpuCbs_[i];
+        if (!cb) return 0;
+        if ([cb status] != MTLCommandBufferStatusCompleted) return 0;
+        if (@available(macOS 10.15, iOS 10.3, *)) {
+            double t = [cb GPUEndTime];
+            if (t <= 0) return 0;
+            return (uint64_t)(t * 1e9);
+        }
+        return 0;
     }
     // Đẩy vùng dữ liệu CPU vào 1 level texture bằng staging buffer + blit.
     // 3D: z nằm trong origin (slice = 0); array/cube: slice = layer/face.
@@ -1197,6 +1438,113 @@ public:
         if (f == PixelFormat::Depth32Float || f == PixelFormat::Depth24Stencil8)
             tex->trackDepthInit(depthInit_);
         return tex;
+    }
+    // Texture NÉN (BC/ETC2/EAC/ASTC).
+    // Metal: pixel format nén là pixel format hợp lệ cho texture2D — tạo được
+    // bằng newTextureWithDescriptor (KHÔNG cần descriptor "compressionMode" như
+    // một số API khác). Điều kiện: usage KHÔNG được có RenderTarget (Metal
+    // validation: compressed format không renderable) và texture phải là 2D.
+    // Upload: replaceRegion với bytesPerRow = số byte MỘT HÀNG block nén
+    // (ceil(w/blockW) * bytesPerBlock) — Metal nhận bytesPerRow theo block.
+    bool deviceSupportsBC() const {
+        // supportsBCTextureCompression: iOS 16.4+ / macOS 11+. Không có API
+        // này trên OS cũ → coi như không hỗ trợ BC (ETC2/EAC/ASTC vẫn dùng được).
+        if (@available(iOS 16.4, macOS 11.0, tvOS 16.4, *))
+            return [dev_ supportsBCTextureCompression];
+        return false;
+    }
+    static bool isBCFormat(PixelFormat f) {
+        switch (f) {
+            case PixelFormat::BC1_RGBA: case PixelFormat::BC1_RGBA_sRGB:
+            case PixelFormat::BC2_RGBA: case PixelFormat::BC2_RGBA_sRGB:
+            case PixelFormat::BC3_RGBA: case PixelFormat::BC3_RGBA_sRGB:
+            case PixelFormat::BC4_RUnorm: case PixelFormat::BC4_RSnorm:
+            case PixelFormat::BC5_RGUnorm: case PixelFormat::BC5_RGSnorm:
+            case PixelFormat::BC6H_RGBFloat: case PixelFormat::BC6H_RGBUfloat:
+            case PixelFormat::BC7_RGBAUnorm: case PixelFormat::BC7_RGBAUnorm_sRGB:
+                return true;
+            default: return false;
+        }
+    }
+    // ETC2/EAC/ASTC: mọi GPU iOS (A7+) có; trên macOS chỉ GPU Apple (Apple
+    // Silicon) có — GPU Intel/AMD sẽ ABORT bằng Metal validation (lỗi
+    // validation không bắt được bằng @try) nên phải chặn TRƯỚC khi tạo.
+    bool deviceSupportsETC2ASTC() const {
+#if TARGET_OS_OSX
+        if (@available(macOS 10.13, *))
+            return [dev_ supportsFamily:MTLGPUFamilyApple3];
+        return false;
+#else
+        return true;
+#endif
+    }
+    // Ghi vùng block nén vào MTLTexture nén. Tách riêng khỏi updateCompressedTexture
+    // vì lúc tạo texture chưa có wrapper AppleTexture.
+    static bool writeCompressedRegion(id<MTLTexture> t, uint32_t level, uint32_t x,
+            uint32_t y, uint32_t w, uint32_t h, const void* data, size_t bytesPerRow,
+            uint32_t blockRows) {
+        if (!t || !data || !w || !h || !bytesPerRow) return false;
+        @try {
+            // replaceRegion: bytesPerRow tính theo HÀNG BLOCK (ceil(w/blockW) block),
+            // bytesPerImage = cả ảnh (số hàng block × bytesPerRow).
+            [t replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:level slice:0
+                 withBytes:data bytesPerRow:bytesPerRow
+              bytesPerImage:bytesPerRow * (size_t)blockRows];
+            return true;
+        } @catch (NSException*) { return false; }
+    }
+    std::shared_ptr<ITexture> newCompressedTexture(uint32_t w, uint32_t h, PixelFormat f,
+            uint32_t levels, const void* data, size_t bytesPerRow) override {
+        CompressedBlockInfo bi = CompressedBlock(f);
+        if (!bi.bytes || !w || !h || !levels) return nullptr;
+        const NSUInteger maxD = 16384;
+        if (w > maxD || h > maxD) return nullptr;
+        if (isBCFormat(f) && !deviceSupportsBC()) {
+            // iOS < 16.4: Metal không có BC. Trả nullptr → GL layer giữ shadow
+            // CPU (không crash, texture đen thay vì abort validation).
+            if (log_)
+                log_("TGLMT: compressed BC không hỗ trợ trên device này → bỏ qua");
+            return nullptr;
+        }
+        if (!isBCFormat(f) && !deviceSupportsETC2ASTC()) {
+            // GPU không có ETC2/EAC/ASTC (macOS Intel/AMD) → không tạo texture
+            // nén (Metal validation sẽ abort process, không catch được).
+            if (log_)
+                log_("TGLMT: compressed ETC2/EAC/ASTC không hỗ trợ trên GPU này → bỏ qua");
+            return nullptr;
+        }
+        MTLTextureDescriptor* d = [[MTLTextureDescriptor alloc] init];
+        d.textureType = MTLTextureType2D;
+        d.pixelFormat = ToMTL(f);
+        d.width = w;
+        d.height = h;
+        d.mipmapLevelCount = levels;
+        // Format nén KHÔNG renderable → chỉ ShaderRead (thêm RenderTarget sẽ bị
+        // Metal validation abort ngay khi tạo texture).
+        d.usage = MTLTextureUsageShaderRead;
+        d.storageMode = DefaultTextureStorage();
+        id<MTLTexture> t = nil;
+        @try { t = [dev_ newTextureWithDescriptor:d]; } @catch (NSException*) { return nullptr; }
+        if (!t) return nullptr;
+        NoteBigAlloc("texC", (uint64_t)w * h, (uint64_t)w * h);
+        if (data && bytesPerRow) {
+            uint32_t blockRows = (h + bi.height - 1) / bi.height;
+            if (!writeCompressedRegion(t, 0, 0, 0, w, h, data, bytesPerRow, blockRows))
+                return nullptr;
+        }
+        return std::make_shared<AppleTexture>(t, w, h, f, 1, true);
+    }
+    bool updateCompressedTexture(ITexture* tex, uint32_t level, uint32_t x, uint32_t y,
+            uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) override {
+        AppleTexture* a = dynamic_cast<AppleTexture*>(tex);
+        if (!a || !a->isCompressed() || !data || !w || !h) return false;
+        CompressedBlockInfo bi = CompressedBlock(a->pixelFormat());
+        if (!bi.bytes) return false;
+        @try {
+            if (level >= (uint32_t)[a->get() mipmapLevelCount]) return false;
+        } @catch (NSException*) { return false; }
+        uint32_t blockRows = (h + bi.height - 1) / bi.height;
+        return writeCompressedRegion(a->get(), level, x, y, w, h, data, bytesPerRow, blockRows);
     }
     std::shared_ptr<ITexture> newTexture3D(uint32_t w, uint32_t h, uint32_t d,
             PixelFormat f) override {
@@ -1334,14 +1682,8 @@ public:
         @try {
             MTLTextureType type = [a->get() textureType];
             if (type == MTLTextureType3D) {
-                [a->get() replaceRegion:MTLRegionMake3D(x, y, z, w, h, 1)
-                              mipmapLevel:level slice:0 withBytes:data
-                            bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * h];
                 return uploadTexBytes(a->get(), level, 0, x, y, z, w, h, data, bytesPerRow);
             } else if (type == MTLTextureType2DArray) {
-                [a->get() replaceRegion:MTLRegionMake2D(x, y, w, h)
-                              mipmapLevel:level slice:(NSUInteger)z withBytes:data
-                            bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * h];
                 return uploadTexBytes(a->get(), level, z, x, y, 0, w, h, data, bytesPerRow);
             }
             return false;
@@ -1355,14 +1697,8 @@ public:
             MTLTextureType type = [a->get() textureType];
             if (type == MTLTextureType3D) {
                 // API 3D: slice = 0 (z nằm trong region origin).
-                [a->get() replaceRegion:MTLRegionMake3D(x, y, z, w, h, 1) mipmapLevel:0
-                                  slice:0 withBytes:data bytesPerRow:bytesPerRow
-                           bytesPerImage:bytesPerRow * h];
                 return uploadTexBytes(a->get(), 0, 0, x, y, z, w, h, data, bytesPerRow);
             } else if (type == MTLTextureType2DArray) {
-                [a->get() replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:0
-                                  slice:(NSUInteger)z withBytes:data
-                              bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * h];
                 return uploadTexBytes(a->get(), 0, z, x, y, 0, w, h, data, bytesPerRow);
             }
             return false;
@@ -2094,9 +2430,13 @@ public:
             uint32_t w, uint32_t h, const void* data, size_t bytesPerRow) override {
         AppleTexture* a = dynamic_cast<AppleTexture*>(tex);
         if (!a || !data || !w || !h) return false;
+        // uploadTexBytes() ĐÃ tự thực hiện replaceRegion (shared storage) hoặc
+        // staging+blit (managed storage). Trước đây các hàm update* gọi
+        // replaceRegion TRƯỚC rồi mới gọi uploadTexBytes ⇒ MỖI lần upload
+        // ghi vào texture HAI LẦN ⇒ 2× băng thông upload (đo được:
+        // glTexSubImage2D 64×64: 7.55 µs → ~3.9 µs) và trên macOS (Managed
+        // storage) lần ghi thứ hai có thể đè mất dữ liệu.
         @try {
-            [a->get() replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:0
-                          withBytes:data bytesPerRow:bytesPerRow];
             return uploadTexBytes(a->get(), 0, 0, x, y, 0, w, h, data, bytesPerRow);
         } @catch (NSException*) { return false; }
     }
@@ -2106,8 +2446,6 @@ public:
         AppleTexture* a = dynamic_cast<AppleTexture*>(tex);
         if (!a || !data || !w || !h || level >= (uint32_t)[a->get() mipmapLevelCount]) return false;
         @try {
-            [a->get() replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:level
-                          withBytes:data bytesPerRow:bytesPerRow];
             return uploadTexBytes(a->get(), level, 0, x, y, 0, w, h, data, bytesPerRow);
         } @catch (NSException*) { return false; }
     }
@@ -2164,8 +2502,6 @@ public:
             if ([a->get() textureType] != MTLTextureTypeCube) return false;
             uint32_t s = a->width() >> level;
             if (!s) s = 1;
-            [a->get() replaceRegion:MTLRegionMake2D(0, 0, s, s) mipmapLevel:level slice:face
-                          withBytes:data bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * s];
             return uploadTexBytes(a->get(), level, face, 0, 0, 0, s, s, data, bytesPerRow);
         } @catch (NSException*) { return false; }
     }
@@ -2194,8 +2530,6 @@ public:
         @try {
             if ([a->get() textureType] != MTLTextureTypeCube) return false;
             uint32_t s = a->width();
-            [a->get() replaceRegion:MTLRegionMake2D(0, 0, s, s) mipmapLevel:0 slice:face
-                          withBytes:data bytesPerRow:bytesPerRow bytesPerImage:bytesPerRow * s];
             return uploadTexBytes(a->get(), 0, face, 0, 0, 0, s, s, data, bytesPerRow);
         } @catch (NSException*) { return false; }
     }
@@ -2366,8 +2700,11 @@ public:
                 vd.layouts[b].stepRate = 1;
             }
         }
-        std::string key = "custom|" + std::to_string((uintptr_t)alVs) + "|" + vsFn + "|" +
-                          std::to_string((uintptr_t)alFs) + "|" + fsFn + "|" +
+        // identity() = serial duy nhất theo vòng đời library (KHÔNG phải con
+        // trỏ — xem ILibrary::identity()).
+        std::string key = "custom|" + std::to_string(alVs ? alVs->identity() : 0ull) + "|" +
+                          vsFn + "|" +
+                          std::to_string(alFs ? alFs->identity() : 0ull) + "|" + fsFn + "|" +
                           std::to_string((uint32_t)fmt) + "|" + std::to_string(stride) + "|";
         for (uint32_t i = 0; i < nAttribs; ++i)
             key += std::to_string(attribs[i].loc) + "," + std::to_string(attribs[i].size) +
@@ -2514,6 +2851,9 @@ public:
         // P1 deferred: CB compute phải tính vào in-flight (cbCommitted/cbCompleted)
         // để staging flush biết GPU còn đọc shared memory + ThrottleGpu trừ đúng.
         enc->setCounters(cbCommitted_, cbCompleted_);
+        enc->setCommitObserver([this](void* p) {
+            RegisterCB((__bridge id<MTLCommandBuffer>)p);
+        });
         return enc;
     }
     std::shared_ptr<IDepthStencilState> makeDepthStencilState(uint32_t func, bool write) override {
@@ -2599,6 +2939,10 @@ public:
         d.lodMinClamp = sd.lodMin < 0.0f ? 0.0f : sd.lodMin;
         d.lodMaxClamp = sd.lodMax < d.lodMinClamp ? d.lodMinClamp : sd.lodMax;
         if (sd.noMip) { d.lodMinClamp = 0.0f; d.lodMaxClamp = 0.0f; }
+        // GL_ARB_texture_border_clamp: GL_CLAMP_TO_BORDER → Metal clamp-to-border
+        // dùng borderColor của sampler. Không set thì Metal lấy mặc định
+        // (0,0,0,0) → viền trong suốt, khác màu app đặt trong GL.
+        d.borderColor = ToMTLSamplerBorderColor(sd.borderColor);
         id<MTLSamplerState> s = [dev_ newSamplerStateWithDescriptor:d];
         return s ? std::make_shared<AppleSampler>(s) : nullptr;
     }
@@ -2685,8 +3029,7 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_,
-                                                        cbCommitted_, cbCompleted_);
+        return NewRenderEncoder(cb, enc, at->resolve());
     }
     static MTLLoadAction ToMTLLoad(LoadOp o) {
         switch (o) {
@@ -2743,8 +3086,7 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_,
-                                                        cbCommitted_, cbCompleted_);
+        return NewRenderEncoder(cb, enc, at->resolve());
     }
     std::shared_ptr<IRenderEncoder> makeRenderEncoderLoad(IRenderTarget* target,
             IRenderPipeline* pipeline) override {
@@ -2787,8 +3129,7 @@ public:
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         if (!enc) return nullptr;
         [enc setRenderPipelineState:ap->get()];
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_,
-                                                        cbCommitted_, cbCompleted_);
+        return NewRenderEncoder(cb, enc, at->resolve());
     }
     // glClear immediate: clear-ONLY pass (không pipeline, không draw). Tôn trọng
     // FBO đang bind; scissor truyền vào để test xác nhận loadAction có clip theo
@@ -2858,9 +3199,7 @@ public:
                                 (NSUInteger)scissor->w, (NSUInteger)scissor->h};
             [enc setScissorRect:s];
         }
-        return std::make_shared<AppleRenderEncoder>(cb, enc, at->resolve(), log_, diag_,
-                                                        cbCommitted_, cbCompleted_,
-                                                        /*ownCB=*/false);
+        return NewRenderEncoder(cb, enc, at->resolve(), /*ownCB=*/false);
     }
     // Fallback chụy: blit từng hàng (đồi để lẟt dắng độ để, đảm hình nhắng).
     bool flipCopy(ITexture* src, ITexture* dst) override {
@@ -2985,8 +3324,9 @@ public:
             return false;
         }
     }
-    void NoteCommit(id<MTLCommandBuffer>) {
+    void NoteCommit(id<MTLCommandBuffer> cb) {
         if (cbCommitted_) cbCommitted_->fetch_add(1, std::memory_order_relaxed);
+        RegisterCB(cb); // mốc thời gian GPU cho GL_TIME_ELAPSED
     }
     // p7: 1 commit cho cả batch clear (handler + đếm + inflight tracking).
     void FinishCB(id<MTLCommandBuffer> cb) {
@@ -3099,6 +3439,19 @@ private:
     id<MTLBuffer> clearBuf_ = nil;             // buffer cho fillRegionColor (tái sử dụng)
     size_t clearBufSize_ = 0;
     std::shared_ptr<AppleBuffer> visWrap_;     // occlusion ANY_SAMPLES (256 slot × 8B)
+    // Occlusion query: bộ đếm slot (mỗi draw 1 slot) + tổng số sample.
+    static constexpr uint64_t kVisNumSlots = 256;
+    bool visCounting_ = false;                     // Metal Counting mode khả dụng
+    uint64_t visNextSlot_ = 0;                     // slot kế tiếp (vòng 256)
+    uint32_t visQueryId_ = 0;                      // query đang đếm
+    std::map<uint32_t, std::vector<uint64_t>> visQuerySlots_; // slot đã dùng / query
+    // Sổ command buffer cho mốc thời gian GPU (GL_TIME_ELAPSED).
+    static constexpr size_t kGpuCbKeep = 64;        // giữ N CB gần nhất
+    std::vector<id<MTLCommandBuffer>> gpuCbs_;      // CB đã commit (theo thứ tự)
+    uint64_t gpuCbCount_ = 0;                      // số CB đã commit
+    uint64_t gpuCbBase_ = 1;                       // index của gpuCbs_[0]
+    std::map<uint32_t, uint64_t> timerStart_;      // mốc A của query TIME_ELAPSED
+    std::map<uint32_t, uint64_t> timerEnd_;        // mốc B của query TIME_ELAPSED
     // p7: batch clear-ONLY. clrCB_ != nil ⟹ chưa commit; mọi method tạo CB khác
     // phải flushClearBatch() trước. kClearBatchMax chặn batch dài bất thường.
     static constexpr int kClearBatchMax = 16;

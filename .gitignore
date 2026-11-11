@@ -29,6 +29,15 @@ crash-*.txt
 Testing/
 *.ipa
 /tests/corpus/mc-26.1.2-shaders
-docs/
+# docs/ KHÔNG bị ignore nữa: các báo cáo audit/coverage/benchmark là sản
+# phẩm bàn giao và phải nằm trong version control (trước đây `docs/` bị
+# ignore ⇒ toàn bộ dấu vết audit nằm ngoài git, không review được).
+# Chỉ ignore artifact sinh cục bộ trong docs/.
+docs/**/*.air
+docs/**/*.log
 __pycache__/
+# Cache text spec glspec46.core.pdf (tools/glref.py find) — sinh lại tự động.
+.cache/
+# Artifact của test metal -c (ghi .air cạnh CWD nếu chạy ngoài thư mục tạm).
+*.air
 *.pyc

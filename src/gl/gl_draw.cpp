@@ -5,6 +5,31 @@
 #include "tglmt/GLAppleDraw.h"
 using namespace tglmt;
 
+// GL 4.6 §10.1: các primitive type hợp lệ cho mode của Draw*.
+static bool IsValidPrimitiveMode(GLenum m) {
+    switch (m) {
+        case 0x0000: // POINTS
+        case 0x0001: // LINES
+        case 0x0002: // LINE_LOOP
+        case 0x0003: // LINE_STRIP
+        case 0x0004: // TRIANGLES
+        case 0x0005: // TRIANGLE_STRIP
+        case 0x0006: // TRIANGLE_FAN
+        case 0x000A: // LINES_ADJACENCY
+        case 0x000B: // LINE_STRIP_ADJACENCY
+        case 0x000C: // TRIANGLES_ADJACENCY
+        case 0x000D: // TRIANGLE_STRIP_ADJACENCY
+        case 0x000E: // PATCHES
+            return true;
+        default:
+            return false;
+    }
+}
+// GL 4.6 §10.4.2: type hợp lệ cho DrawElements.
+static bool IsValidIndexType(GLenum t) {
+    return t == 0x1401 /*UNSIGNED_BYTE*/ || t == 0x1403 /*UNSIGNED_SHORT*/ ||
+           t == 0x1405 /*UNSIGNED_INT*/;
+}
 static metal::PrimitiveType ToPrim(GLenum m, Context& c) {
     switch (m) {
         case 0x0000: return metal::PrimitiveType::Point;
@@ -107,6 +132,15 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
                      GLint baseVertex = 0, GLuint baseInstance = 0, GLint first = 0) {
     Context& c = Context::Current();
     if (count < 0 || inst < 1) { c.errors.Record(0x0501); return; }
+    // GL 4.6 §10.4: "An INVALID_ENUM error is generated if mode is not one of
+    // the primitive types defined in section 10.1" và (DrawElements) "if type is
+    // not UNSIGNED_BYTE, UNSIGNED_SHORT or UNSIGNED_INT".
+    // Validate TRƯỚC mọi thứ (kể cả count==0) và DỪNG draw — trước đây:
+    //  • mode lạ → ToPrim ghi INVALID_ENUM nhưng vẫn vẽ bằng Triangle;
+    //  • type lạ → ToIndex() chỉ được gọi trong `if (enc)` nên đường Metal
+    //    (đường dùng thật) KHÔNG hề sinh lỗi, draw bị bỏ âm thầm.
+    if (!IsValidPrimitiveMode(mode)) { c.errors.Record(0x0500); return; }
+    if (type != 0 && !IsValidIndexType(type)) { c.errors.Record(0x0500); return; }
     if (count == 0) return; // no-op đúng spec (không encode draw-0)
     // Spec §13.2: draw mode phải tương thích với primitive mode của
     // glBeginTransformFeedback khi XFB đang active và không pause.
@@ -336,8 +370,23 @@ void glDrawElementsBaseVertex(GLenum m, GLsizei c, GLenum t, const void* i, GLin
 void glDrawElementsInstancedBaseVertex(GLenum m, GLsizei c, GLenum t, const void* i, GLsizei n, GLint b) { EmitDraw(m, c, t, i, n, b); }
 void glDrawElementsInstancedBaseInstance(GLenum m, GLsizei c, GLenum t, const void* i, GLsizei n, GLuint b) { EmitDraw(m, c, t, i, n, 0, b); }
 void glDrawElementsInstancedBaseVertexBaseInstance(GLenum m, GLsizei c, GLenum t, const void* i, GLsizei n, GLint bv, GLuint bi) { EmitDraw(m, c, t, i, n, bv, bi); }
-void glDrawRangeElements(GLenum m, GLuint s, GLuint e, GLsizei c, GLenum t, const void* i) { (void)s;(void)e; EmitDraw(m, c, t, i); }
-void glDrawRangeElementsBaseVertex(GLenum m, GLuint s, GLuint e, GLsizei c, GLenum t, const void* i, GLint b) { (void)s;(void)e; EmitDraw(m, c, t, i, 1, b); }
+// GL 4.6 §10.4: DrawRangeElements là "restricted form of DrawElements" —
+// ràng buộc nằm ở PHÍA CALLER (mọi index phải nằm trong [start,end]); spec
+// nói rõ "implementations are not required to check for this". Nên KHÔNG được
+// lọc index (lọc sẽ vẽ sai hình so với GL thật).
+// Lỗi bắt buộc: INVALID_VALUE nếu end < start, hoặc count < 0.
+// (glDrawRangeElements chỉ còn ở EXT; glDrawRangeElementsBaseVertex là core 3.2+.)
+void glDrawRangeElements(GLenum m, GLuint s, GLuint e, GLsizei c, GLenum t, const void* i) {
+    Context& ctx = Context::Current();
+    if (e < s || c < 0) { ctx.errors.Record(0x0501); return; }
+    EmitDraw(m, c, t, i);
+}
+void glDrawRangeElementsBaseVertex(GLenum m, GLuint s, GLuint e, GLsizei c, GLenum t,
+                                   const void* i, GLint b) {
+    Context& ctx = Context::Current();
+    if (e < s || c < 0) { ctx.errors.Record(0x0501); return; }
+    EmitDraw(m, c, t, i, 1, b);
+}
 // Đọc indirect command: nếu DRAW_INDIRECT_BUFFER bound thì `ind` là byte-offset
 // vào buffer đó (spec §10.4), ngược lại là host pointer. Vanilla chunk multidraw
 // dùng buffer-bound; Sodium indirect-count dùng PARAMETER_BUFFER.

@@ -1,0 +1,70 @@
+=== A/B: baseline (trước phiên audit) vs optimized (sau phiên audit+tối ưu) ===
+
+LƯU Ý: 'baseline' là ảnh chụp TRƯỚC khi triển khai validation uniform + tối ưu;
+'optimized' là ảnh chụp SAU. Máy: Darwin 24.6.0 x86_64, macOS 15.7.7.
+Số đo phụ thuộc máy — đọc cột min (robust) và đối chiếu control metric.
+
+--- runtime ---
+metric                                             baseline    optimized    delta%    min-base  verdict
+----------------------------------------------------------------------------------------------------------------------
+control_glGetIntegerv_batched64.us                        -       0.0077         -              MISSING-BASELINE
+frame_100_draws.us                                 208.1995     140.2033   -32.66%     +18.57%  IMPROVED
+glBindBuffer.us                                      0.0620       0.0720    16.13%      +0.00%  REGRESSED
+glBufferSubData_64B.us                               0.0730       0.0720    -1.37%      -2.82%  SAME
+glClear.us                                          10.6130       7.6000   -28.39%     -10.27%  IMPROVED
+glDrawArrays_3.us                                    1.7270       1.0020   -41.98%      +1.61%  IMPROVED
+glDrawElements_3.us                                  2.0110       1.1480   -42.91%      -0.47%  IMPROVED
+glGetIntegerv.us                                     0.0420       0.0420     0.00%      -2.44%  SAME
+glTexImage2D_64x64_full_upload.us                   74.2870      59.7580   -19.56%     -55.61%  IMPROVED
+glTexSubImage2D_64x64_staged.us                      7.3340       7.7680     5.92%     -81.72%  REGRESSED
+glUniform1f.us                                       0.0500       0.0580    16.00%     +14.29%  REGRESSED
+glUniform1f_batched64.us                                  -       0.0407         -              MISSING-BASELINE
+----------------------------------------------------------------------------------------------------
+improved=5 regressed=3 total=12 (ngưỡng hồi quy 2.0%)
+
+CONTROL metrics (code path KHÔNG đổi) — dải nhiễu nền của phép đo:
+  glBindBuffer.us                                    0.0620       0.0720    16.13%
+  glGetIntegerv.us                                   0.0420       0.0420     0.00%
+  → nhiễu nền tối đa: 16.13%  (glBindBuffer.us)
+  → mọi metric vượt quá ngưỡng này phải được coi là chưa chứng minh.
+
+--- compilation ---
+metric                                             baseline    optimized    delta%    min-base  verdict
+----------------------------------------------------------------------------------------------------------------------
+cs_compute.glsl_to_msl.ms                            0.2690       0.2846     5.80%      +5.78%  REGRESSED
+cs_compute.msl_to_metal_library.ms                   0.0553       0.0550    -0.54%      +1.30%  SAME
+cs_compute.pipeline_creation.ms                      0.0042       0.0041    -2.38%      +0.00%  IMPROVED
+cs_compute.total.ms                                  0.3291       0.3445     4.68%      +6.00%  REGRESSED
+fs_complex.glsl_to_msl.ms                            0.7174       0.7718     7.58%      +5.89%  REGRESSED
+fs_complex.msl_to_metal_library.ms                   0.0639       0.0742    16.12%      +1.77%  REGRESSED
+fs_complex.pipeline_creation.ms                      0.0066       0.0086    30.30%      +0.00%  REGRESSED
+fs_complex.total.ms                                  0.7953       0.8467     6.46%      +5.52%  REGRESSED
+vs_complex.glsl_to_msl.ms                            0.2256       0.2357     4.48%      +5.50%  REGRESSED
+vs_complex.msl_to_metal_library.ms                   0.0581       0.0584     0.52%      +1.59%  SAME
+vs_complex.pipeline_creation.ms                      0.0064       0.0066     3.12%      +1.59%  REGRESSED
+vs_complex.total.ms                                  0.2907       0.3003     3.30%      +4.36%  REGRESSED
+----------------------------------------------------------------------------------------------------
+improved=1 regressed=9 total=12 (ngưỡng hồi quy 2.0%)
+
+CONTROL metrics (code path KHÔNG đổi) — dải nhiễu nền của phép đo:
+  cs_compute.pipeline_creation.ms                    0.0042       0.0041    -2.38%
+  → nhiễu nền tối đa: 2.38%  (cs_compute.pipeline_creation.ms)
+  → mọi metric vượt quá ngưỡng này phải được coi là chưa chứng minh.
+
+--- upload ---
+metric                                             baseline    optimized    delta%    min-base  verdict
+----------------------------------------------------------------------------------------------------------------------
+managed_staging_plus_blit_macos_path.us             34.2530      25.5210   -25.49%      -4.42%  IMPROVED
+newBufferWithBytes_16KB.us                          12.6570       8.5270   -32.63%      -2.15%  IMPROVED
+newTexture_64x64.us                                 10.4110      10.3390    -0.69%      +1.23%  SAME
+shared_replaceRegion_x1_ios_path.us                  0.5590       0.5860     4.83%      +0.19%  REGRESSED
+shared_replaceRegion_x2_old_buggy_path.us            1.4070       1.6640    18.27%      -0.08%  REGRESSED
+----------------------------------------------------------------------------------------------------
+improved=2 regressed=2 total=5 (ngưỡng hồi quy 2.0%)
+
+CONTROL metrics (code path KHÔNG đổi) — dải nhiễu nền của phép đo:
+  newBufferWithBytes_16KB.us                        12.6570       8.5270   -32.63%
+  newTexture_64x64.us                               10.4110      10.3390    -0.69%
+  → nhiễu nền tối đa: 32.63%  (newBufferWithBytes_16KB.us)
+  → mọi metric vượt quá ngưỡng này phải được coi là chưa chứng minh.
+
