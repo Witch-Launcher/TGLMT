@@ -1,172 +1,394 @@
-# Implementation Roadmap
+# IMPLEMENTATION ROADMAP — TGLMT
 
-Derived from the audit (`reports/AUDIT_REPORT.md`), the coverage report and
-the conformance report. Priorities reflect **risk to correctness**, not
-effort: a silent wrong answer is worse than a missing feature.
-
-Status legend: **DONE** (this session) · **OPEN** (not started) ·
-**PARTIAL** (started).
+> What to build next, in what order, with the measured entry-point counts.
+>
+> Derived from `other/prompt.md` §11.2 (tiers T0–T4), §12 (PHASE 6 priority)
+> and §14.1 (Definition of Done). Every number is **measured**, not written by
+> hand — the source of each is named in the table.
+>
+> Supersedes the previous version of this file (which described the older
+> GL-4.6-Core-only programme).
 
 ---
 
-## Phase 0 — Project discovery — **DONE**
+## 0. How to read this document
 
-Repository-wide investigation of the source, headers, generators, tools,
-tests, benchmarks and build system. Result: `docs/PROJECT_ARCHITECTURE.md`.
+### 0.1 Status vocabulary
 
-## Phase 1 — API audit — **DONE**
+The set mandated by `AGENTS.md` §6 and `other/prompt.md` §14.1:
 
-The catalog was verified against the Khronos registry and the "698" figure
-was found to be wrong (the real core surface is 657). The derivation was
-fixed and made single-sourced. Result:
-`docs/OPENGL_46_API_INVENTORY.md`, `docs/OPENGL_46_API_COVERAGE.md`.
+`FULLY_IMPLEMENTED` · `PARTIALLY_IMPLEMENTED` · `INCORRECT` · `STUB` ·
+`MISSING` · `EMULATED` · `HARDWARE_LIMITED` · `BLOCKED` · `NOT_VERIFIED` ·
+`NOT APPLICABLE`
 
-## Phase 2 — Metal feasibility — **DONE**
+### 0.2 Labels
 
-Every OpenGL 4.6 Core capability was classified A–E against Metal and the
-A11 feature set. Result: `docs/OPENGL_46_METAL_MAPPING.md`,
-`docs/METAL_A11_LIMITATIONS.md`.
-
-## Phase 3 — Baseline test & benchmark — **DONE**
-
-Baseline captured before any change: build times, CTest results, the number
-of tests that were silently inert, and the benchmark numbers. Result:
-`reports/BASELINE_TEST_REPORT.md`, `benchmarks/baseline/`.
-
-## Phase 4 — Implementation plan — **DONE**
-
-This document.
-
-## Phase 5 — Implementation — **DONE (correctness) / OPEN (features)**
-
-### 5.1 Correctness fixes — **DONE**
-
-21 defects fixed, each with a regression test:
-
-| Area | Fixes |
+| Label | Meaning |
 |---|---|
-| API catalog | 657 core / 42 compatibility-only; one shared derivation; generated artefacts regenerated |
-| Crash safety | `glShaderSource(NULL)`, `glUniform*fv(count<0)`, `glBufferData` of a mapped buffer (use-after-free) |
-| Error generation | `glGet*` INVALID_ENUM (965 accepted pnames), `glBindTexture` target, draw mode/type, the five `Invalidate*` entry points |
-| Object lifetime | buffers, programs, VAOs, samplers unbound on deletion; `glDeleteShader` respects attachment |
-| Shader semantics | texture bias, `flat`/`noperspective`/`centroid`, fragment output location, `textureQueryLod` |
-| Uniform data | `transpose` honoured; `mat3` packed into the MSL column layout |
-| Metal backend | pipeline-cache identity (`ILibrary::identity()` + `linkGen`); default-framebuffer depth test enabled |
-| Test system | `assert()` → always-on checks; CTest working directory; Metal-compiler gate; `docs/` tracked |
+| **SPEC** | What the OpenGL specification requires (section cited). |
+| **CURRENT** | What the code does today (`file:line`). |
+| **PLAN** | What this roadmap proposes. Not implemented. |
 
-### 5.2 Remaining correctness work — **OPEN**, ranked
+### 0.3 Environment label
 
-| # | Item | Severity | Effort | Notes |
-|---|---|---|---|---|
-| R1 | **Texture completeness model** (GL 4.6 §8.14) | HIGH | small | a mipmap-filtered 1-level texture must sample black, not level 0 |
-| R2 | `GL_MAX_TEXTURE_IMAGE_UNITS` 32 → **31**; `GL_MAX_UNIFORM_BUFFER_BINDINGS` 36 → **31** | HIGH | minutes | a 32-sampler shader currently aborts Metal validation |
-| R3 | Filter `GL_COMPRESSED_TEXTURE_FORMATS` by device capability | HIGH | small | BC is advertised on devices that have no BC decoder |
-| R4 | `glBeginQuery` must flush the pending render encoder for occlusion targets | HIGH | small | otherwise the visibility buffer is missing from the pass descriptor |
-| R5 | `INCOMPLETE_MULTISAMPLE` / `FRAMEBUFFER_UNSUPPORTED` | MED | small | a mixed-sample FBO currently produces a mismatched Metal pass |
-| R6 | Size-mismatched attachments must be **legal** (effective size = intersection) | MED | small | the current code returns `INCOMPLETE_DIMENSIONS`, a token removed in GL 3.0 |
-| R7 | `GL_TEXTURE_MIN_LOD`, `GL_TEXTURE_LOD_BIAS`, `GL_TEXTURE_COMPARE_MODE` on textures | MED | medium | silently ignored today |
-| R8 | `GL_UNPACK_IMAGE_HEIGHT`, `GL_UNPACK_SWAP_BYTES`, `GL_UNPACK_LSB_FIRST` | MED | medium | stored but never applied; 3D uploads read the wrong slices |
-| R9 | `glUniform*` with a non-existent location must raise `INVALID_OPERATION` | MED | small | currently writes into the uniform store |
-| R10 | `glMapBufferRange`: validate the access flags against the storage flags; reject `length == 0` and a concurrent mapping | MED | small | |
-| R11 | `glUnmapBuffer` must return `GL_FALSE` when the mapping was lost | MED | small | |
-| R12 | `glGetBufferSubData` must wait for non-compute GPU writers | MED | small | |
-| R13 | `glGetFramebufferAttachmentParameteriv` must use the dense attachment index | MED | small | every colour attachment query currently returns `OBJECT_TYPE = GL_NONE` |
-| R14 | `glGetQueryiv(GL_QUERY_COUNTER_BITS)` must return ≥ 8 | LOW | tiny | |
-| R15 | `glBindBufferRange` must check `offset + size <= bufferSize` | LOW | tiny | |
-| R16 | `glDeleteQueries` must end an active query | LOW | tiny | |
-| R17 | `glGetBufferParameteri64v` must not truncate through `GLint` | LOW | tiny | breaks sizes above 2 GiB |
-| R18 | Sampler-state cache is unbounded | MED | small | one `MTLSamplerState` per texture id, forever |
-| R19 | Wrap cache: key on a per-texture serial, not the raw `ITexture*` | MED | small | ABA hazard on in-place reallocation |
-| R20 | Index-rewrite cache must be per-context | MED | small | cross-context index corruption |
-| R21 | `gInflightCB` needs a mutex | MED | tiny | data race on the command-buffer deque |
-| R22 | Fallback context must be per-thread | MED | small | two threads share one `Context` today |
-| R23 | `glMemoryBarrier` should honour the individual barrier bits | LOW | medium | currently a full barrier for every bit |
-| R24 | `glTextureBarrierByRegion` is not implemented | LOW | small | |
-| R25 | The draw path must raise `INVALID_OPERATION` when no program is current | LOW | tiny | currently the draw is silently dropped |
-| R26 | `glUniform*fv` with `count > 0` and a NULL pointer must raise `INVALID_VALUE` | LOW | tiny | |
+Every test result in this repository so far was produced on the **Null
+backend** (`src/metal/NullMetalBackend.cpp`) → environment label
+`REFERENCE_ONLY`. **No test has yet been run on an Apple A11 device**
+(`NONE` for anything that requires the GPU). This is the single biggest
+constraint on the acceptance criteria (§14.1 item 4).
 
-### 5.3 Feature work — **OPEN**
+---
 
-| # | Item | Class | Notes |
+## 1. Definition of Done (applies to every stage)
+
+`other/prompt.md` §14.1. A stage may only be marked `FULLY_IMPLEMENTED` when
+**all four** hold:
+
+1. **A real code path** — `file:line`.
+2. **A test ID that passes** — the CTest test name.
+3. **Comparison against the expected result** — against the spec, or against a
+   reference implementation.
+4. **An environment label** — `A11_DEVICE` | `SIMULATOR` | `OTHER_GPU` |
+   `REFERENCE_ONLY` | `NONE`.
+
+Missing any one ⇒ at most `PARTIALLY_IMPLEMENTED` or `NOT_VERIFIED`.
+
+Additional rules that apply to every stage:
+
+* A **stub is not an implementation.** `src/gl/gl_stubs_gen.cpp` holds honest
+  stubs that log `UNIMPLEMENTED` and return a safe value. A stubbed entry
+  point is `STUB`, never `FULLY_IMPLEMENTED`.
+* **SKIP and NOT RUN are not PASS.**
+* `HARDWARE_LIMITED` requires a written analysis with (a) a capability query
+  or the relevant Metal documentation, and (b) the GPU/CPU/hybrid emulation
+  options that were considered and why they were rejected. *"Metal has no
+  equivalent API"* is **not** sufficient.
+* **Exception already locked:** geometry shaders **must** be emulated
+  (`AGENTS.md` A6). It may not be concluded `HARDWARE_LIMITED` on the grounds
+  that Metal has no geometry stage.
+
+---
+
+## 2. Measured baseline
+
+### 2.1 The command surface (source: `data/version_inventory.json`, `totals` and `self_check`)
+
+| Metric | Value |
+|---|---:|
+| GL 4.6 **Core** commands | **657** |
+| GL 4.6 **Compatibility** commands | **1048** |
+| In Compatibility but not in Core | **391** |
+| "Compatibility-only" (removed from Core by the registry) | **42** |
+| Of the 391: GL 1.0–2.1 fixed-function | **349** |
+| Of the 391: `gl*P*ui` (30) + `glGetn*` (12) | **42** |
+| Enums | **1808** |
+| Extensions | **863** |
+| Version slots | **19** |
+
+### 2.2 The implementation state of the 349 GL 1.0–2.1 fixed-function commands
+
+Source: `src/gl/gl_stubs_gen.cpp` (generated by `tools/gen_stubs.py`), joined
+against `data/version_inventory.json`.
+
+| Measurement | Value |
+|---|---:|
+| Stub functions in `src/gl/gl_stubs_gen.cpp` | **240** |
+| … introduced in GL 1.0 | 173 |
+| … GL 1.1 | 16 |
+| … GL 1.3 | 17 |
+| … GL 1.4 | 34 |
+| **… in the T1 tier (GL 1.0–2.1)** | **240 (100 %)** |
+| Implemented (349 − 240) | **109** |
+| — of which `glLineStipple` is an exported **no-op** | 1 (`src/gl/gl_raster.cpp:274`) |
+| — genuinely implemented | **108** |
+
+**Key consequence:** *every* remaining stub is a GL 1.0–2.1 fixed-function
+entry point. **No stub exists in the GL 2.0–4.6 Core surface** — all 657
+Core commands have a non-stub implementation. The remaining implementation
+work is entirely the **T1** tier.
+
+### 2.3 Where the 109 implemented legacy entry points live
+
+| File | Functions | Of which compatibility-only |
+|---|---:|---:|
+| `src/gl/gl_legacy_matrix.cpp` | 26 | 20 |
+| `src/gl/gl_legacy_vertex.cpp` | 98 (incl. 8 macro-generated) | 88 |
+| `src/gl/gl_raster.cpp` (`glLineStipple`, a no-op) | 1 | 1 |
+
+### 2.4 The public API surface
+
+| Measurement | Value | Source |
+|---|---:|---|
+| `extern "C"` prototypes in `include/tglmt/gl_c_api.h` | **1049** | counted in the generated header |
+| `getProcAddress` table entries (`src/gl/gl_c_exports.cpp:9585`) | **2115** | `kTglmtProcCount` |
+| … of which are extension entry points | **1066** | 2115 − 1049 |
+| CTest test files registered | **188** | `tests/{unit,integration,regression,api,conformance,shaders}/*.cpp` (CMake `file(GLOB … CONFIGURE_DEPENDS)`, `CMakeLists.txt:107-108`) |
+| Last recorded ctest result | **188 / 188 passed, 0 failed** | `build-work/Testing/Temporary/LastTest.log` (Null backend, Debug) |
+
+### 2.5 The Core surface by tier
+
+| Tier | Core commands introduced in that tier | Note |
+|---|---:|---|
+| T1 (GL 1.0–2.1) | 202 | also available in Compatibility |
+| T2 (GL 3.0–3.3) | 143 | |
+| T3 (GL 4.0–4.6) | 312 | |
+
+---
+
+## 3. Tier gates (from `other/prompt.md` §11.2)
+
+| Tier | Scope | Exit gate | Status |
 |---|---|---|---|
-| F1 | `glClientWaitSync` must actually block | C | needs `MTLSharedEvent` + `MTLCommandBufferEncoder signalEvent:`; currently always `ALREADY_SIGNALED` |
-| F2 | `std140` / `std430` / `packed` / `row_major` layout in the translator | B | the single biggest GLSL-conformance gap |
-| F3 | GPU-executed indirect draws | B | `MTLIndirectCommandBuffer`; the GL semantics (read at execution time) do not map directly |
-| F4 | `glReadPixels` from float / half-float / integer attachments | C | only RGBA8 is supported |
-| F5 | `glBlitFramebuffer` with `GL_LINEAR` + scaling | B | currently nearest ⇒ visible aliasing |
-| F6 | `GL_LINEAR` blit for non-matching format pairs | B | the spec restricts which pairs support LINEAR |
-| F7 | `glGenerateMipmap` must be a no-op with `INVALID_OPERATION` for a non-mipmapped texture | C | |
-| F8 | `glTexStorage*` must set the immutable flag | C | immutability is not enforced |
-| F9 | `glCopyTexSubImage3D` should be a GPU copy, not a CPU round-trip | B | |
-| F10 | `glDrawTransformFeedback` must re-bind the captured attributes | B | currently replays the vertex count only |
-| F11 | `IComputeEncoder::dispatchGroups3D` must be implemented (both backends) | B | the tessellation-control path needs it |
-| F12 | Compute limits (1024 invocations, 32 KB shared memory) must be enforced | C | |
-| F13 | Dual-source blending | D | **impossible on A11** — document, do not implement |
-| F14 | Geometry shaders | D | **impossible on A11** — currently rejected with a clear log |
-| F15 | Per-sample shading rate | D | **impossible on any Metal version** |
-| F16 | BC compressed textures | D | **impossible on A11** (ETC2/ASTC work) |
+| **T0** | window-system layer, context/state machine, error model, capability query, render-pass model, automated inventory, test harness | a context can be created for **every** version/profile in the matrix; the inventory is generated automatically; the harness runs | **MOSTLY MET** — the context matrix, the inventory and the harness are done; the *library-level* framebuffer/config API is missing (T0-5) |
+| **T1** | all of Part II (GL 1.0–2.1 + Compatibility) and GLSL 1.10/1.20 | a **real legacy program** reaches the differential-test threshold | **NOT MET** — 240 of 349 entry points are stubs, and the legacy *draw path* does not exist |
+| **T2** | GL 3.0–3.3 (Core+Compat): VAO/FBO/UBO/TF/instancing/sampler/sync, GLSL 1.30–3.30, geometry shader | the features work and are proven | **PARTIAL** — the surface exists; the geometry shader does not; several features have no pixel-level proof |
+| **T3** | GL 4.0–4.6: tessellation, compute, SSBO, image, atomic counters, DSA, buffer storage, indirect, texture views, SPIR-V, GLSL 4.00–4.60 | as T2 | **PARTIAL** — the surface exists; several features have no pixel-level proof |
+| **T4** | extensions | an extension is advertised **only** when its spec is actually implemented | **PARTIAL** — the aliases exist; the advertisement gate is missing (T4-2) |
 
-### 5.4 Architecture work — **OPEN**
+**Infrastructure for a later tier may be built in parallel with an earlier
+one** (§11.2, last paragraph). That is what T0-5 and T2-3 are.
 
-| # | Item | Rationale |
+---
+
+## 4. The stage table
+
+Legend for **Entry points**: *done* = already implemented and tested;
+*left* = still an honest stub, counted from `src/gl/gl_stubs_gen.cpp`.
+
+### 4.1 T0 — Foundation
+
+| Stage | Goal | Entry points | File | Test ID | Exit criteria | Status | Blocker |
+|---|---|---:|---|---|---|---|---|
+| **T0-1** | Context version + profile + version gate | 0 new (6 modified) | `include/tglmt/VersionGate.h`, `src/core/VersionGate.cpp`, `src/gl/gl_version_gate_gen.cpp`, `src/gl/gl_context_api.cpp:17` | `test_context_version` | a context for every valid (version, profile); an invalid entry point ⇒ `GL_INVALID_OPERATION` and **not executed**; `tglmtGetProcAddress` returns `NULL` for it | `FULLY_IMPLEMENTED` (4 items met; environment `REFERENCE_ONLY`) | — |
+| **T0-2** | Legacy state skeleton, separate from `StateTracker` | 0 new | `include/tglmt/LegacyState.h:126`, `include/tglmt/Context.h:685` | `test_legacy_matrix`, `test_legacy_immediate` | the fixed-function state lives in `Context::legacy` (D-004) | `FULLY_IMPLEMENTED` | — |
+| **T0-3** | Automated inventory + generators | 1048 commands / 1808 enums / 863 extensions | `tools/gen_version_inventory.py`, `tools/gen_version_gate.py`, `tools/gen_c_exports.py`, `tools/gen_stubs.py`, `data/version_inventory.json` | `test_core_registry`, `test_conformance_surface` | the generators are deterministic; `self_check` reports 657 / 42 / 1048 and `passed: true` | `FULLY_IMPLEMENTED` | — |
+| **T0-4** | Test harness | 188 tests | `CMakeLists.txt:107-133`, `tests/test_util.h` | (all 188) | 188 / 188 pass on the Null backend | `FULLY_IMPLEMENTED` (`REFERENCE_ONLY`) | needs an A11 re-run for `A11_DEVICE` |
+| **T0-5** | Library-level window-system / config API | 0 new (new API) | `include/tglmt/gl_context_api.h`, `src/gl/gl_context_api.cpp` | *(new)* `test_context_config` | a library-level framebuffer description: pixel format, depth/stencil bits, double-buffer, sample count | `MISSING` | today the config lives only in the app shell (`apps/aquarium/ios_shell.mm:79-89`) and `tglmtCreateContextAttribs` takes only version/profile/flags |
+
+### 4.2 T1 — GL 1.0–2.1 + Compatibility
+
+The ordering follows PHASE 6 of `other/prompt.md`:
+*state management → matrix stacks → immediate mode → vertex arrays →
+fixed-function transformations → lighting and materials → texture environment
+→ fog → legacy rasterisation → display lists → evaluators → pixel operations →
+selection and feedback → the rest by inventory.*
+
+| Stage | Goal | Entry points (done / left) | File | Test ID | Exit criteria | Status | Blocker |
+|---|---|---:|---|---|---|---|---|
+| **T1-1** | Matrix stack + transform state | 20 / 0 | `src/gl/gl_legacy_matrix.cpp` | `test_legacy_matrix` | column-major, `current = current * M`, transpose on load, `GL_PROJECTION`-only `glOrtho`/`glFrustum`, `GL_STACK_OVERFLOW`/`UNDERFLOW` | `FULLY_IMPLEMENTED` (`REFERENCE_ONLY`) | — |
+| **T1-2** | Current vertex state + the `glBegin`/`glEnd` guard | 0 / 0 | `src/gl/gl_legacy_vertex.cpp:79-95` | `test_legacy_immediate` | nested `glBegin` ⇒ `GL_INVALID_OPERATION`; a vertex outside `glBegin` ⇒ `GL_INVALID_OPERATION` | `PARTIALLY_IMPLEMENTED` — the **table of commands forbidden inside `glBegin`/`glEnd`** (GL 1.x §2.6, ~20 commands) is not implemented | the table itself |
+| **T1-3** | Immediate mode: the remaining vertex-specification forms | 88 / **72** | `src/gl/gl_legacy_vertex.cpp` | `test_legacy_immediate` | every `glVertex*` / `glColor*` / `glNormal*` / `glTexCoord*` / `glMultiTexCoord*` / `glSecondaryColor*` / `glIndex*` / `glEdgeFlag*` form exists; all 9 primitive modes assembled per spec (incl. `GL_QUAD_STRIP` = `(2i,2i+1,2i+3,2i+2)`) | `PARTIALLY_IMPLEMENTED` | — |
+| **T1-4** | **The legacy draw path** (generated fixed-function MSL + dispatch) | 0 new GL entry points | *new* `src/gl/gl_legacy_program.cpp`, *new* `src/gl/gl_legacy_draw.cpp`; `src/gl/gl_apple_draw.cpp:1799-1804` | *(new)* `test_legacy_draw`, `test_legacy_draw_apple` | a legacy `glBegin(GL_TRIANGLES)` block renders; the image matches a reference; the pipeline cache is not broken (the proof is in `docs/UNIFIED_GRAPHICS_ARCHITECTURE.md` §4.4) | `MISSING` | **blocks T1-5, T1-6, T1-7** |
+| **T1-5** | Lighting, materials, shade model, colour material | 0 / **18** | *new* `src/gl/gl_legacy_light.cpp` | *(new)* `test_legacy_light_state`, `test_legacy_lighting_apple` | per-vertex lighting per GL 2.1 §2.14.1; the light position is transformed by the modelview **at `glLightfv` time**; local vs infinite viewer; spotlight; attenuation; `GL_FLAT`; `glColorMaterial` resolved per vertex | `MISSING` | T1-4 |
+| **T1-6** | Fog | 0 / **9** | *new* `src/gl/gl_legacy_fog.cpp` | *(new)* `test_legacy_fog` | LINEAR / EXP / EXP2 per GL 2.1 §3.10; `f` clamped to `[0,1]`; alpha unchanged; fog applied **after** texturing | `MISSING` | T1-4 |
+| **T1-7** | Texture environment + texture generation | 0 / **15** | *new* `src/gl/gl_legacy_texenv.cpp` | *(new)* `test_legacy_texenv` | MODULATE / REPLACE / DECAL / BLEND / ADD / COMBINE per GL 2.1 tables 3.21–3.22; `GL_OBJECT_LINEAR`/`GL_EYE_LINEAR` on the CPU, sphere/reflection/normal map in the shader | `MISSING` | T1-4 |
+| **T1-8** | Legacy rasterisation (alpha test, stipple, clip planes, texture residency) | 1 / **11** | *new* `src/gl/gl_legacy_raster.cpp` | *(new)* `test_legacy_raster` | alpha test as a fragment discard; polygon stipple; user clip planes | `MISSING` | 6 user clip planes vs Metal's **one** `[[clip_distance]]` (`src/gl/glsl_to_msl.cpp:6024-6027` and `:6070-6072`) ⇒ 5 planes need emulation. `glLineStipple` is currently a no-op (`src/gl/gl_raster.cpp:274`) and must be re-implemented or honestly reported |
+| **T1-9** | Raster position + window position + rectangles | 0 / **48** | *new* `src/gl/gl_legacy_rasterpos.cpp` | *(new)* `test_legacy_rasterpos` | the raster position is tracked exactly (GL 2.1 §2.10); `glRect*` assembles a quad through the same path | `MISSING` | T1-3 |
+| **T1-10** | Pixel transfer modes, pixel drawing, accumulation buffer | 0 / **15** | *new* `src/gl/gl_legacy_pixel.cpp` | *(new)* `test_legacy_pixel` | `glDrawPixels`, `glBitmap`, `glCopyPixels`, the pixel maps, `glAccum`/`glClearAccum` | `MISSING` | the accumulation buffer needs an off-screen colour target |
+| **T1-11** | Display lists | 0 / **8** | *new* `src/gl/gl_legacy_displaylist.cpp` + the dispatcher in the **generated** `src/gl/gl_c_exports.cpp` | *(new)* `test_legacy_displaylist` | a recorded list replays with the **server** state evaluated at replay time and the **client** state captured at record time (GL 2.1 §5.4) | `MISSING` | the recording switch must live in a **generated** file ⇒ a `tools/gen_c_exports.py` change; the highest-risk item in the programme. Split into two stages (§5) |
+| **T1-12** | Evaluators (1D/2D maps and grids) | 0 / **20** | *new* `src/gl/gl_legacy_evaluator.cpp` | *(new)* `test_legacy_evaluator` | polynomial evaluation on the CPU; `glEvalMesh*` | `MISSING` | — |
+| **T1-13** | Selection + feedback + render mode | 0 / **8** | *new* `src/gl/gl_legacy_selection.cpp` | *(new)* `test_legacy_selection` | selection computed on the CPU; the "no framebuffer updates" rule honoured; `GL_RENDER`/`GL_SELECT`/`GL_FEEDBACK` | `MISSING` | T1-9 (needs the raster position) |
+| **T1-14** | Client-side vertex arrays | 0 / **12** | *new* `src/gl/gl_legacy_clientarray.cpp` | *(new)* `test_legacy_clientarray` | `glVertexPointer` and friends feed the same assembler as the immediate mode; `glArrayElement` | `MISSING` | T1-3 |
+| **T1-15** | Attribute stacks | 0 / **4** | *new* `src/gl/gl_legacy_attribstack.cpp` | *(new)* `test_legacy_attribstack` | `glPushAttrib`/`glPopAttrib` save and restore the server + client attribute state | `MISSING` | must be built **last** in T1: it snapshots the state that T1-3…T1-14 create |
+| **T1-16** | GLSL 1.10 / 1.20 | 0 GL entry points | `src/gl/glsl_to_msl.cpp:8480-8488` | `test_shader_corpus` | `#version 110` and `#version 120` are accepted | `MISSING` | the translator is a **token/string rewriter**, not a front end; the accept list currently has 100/120/130/140/150/330/400/410/430/440/450/460 but **not 110** |
+| **T1-17** | **GLU** (in scope per `AGENTS.md` A3) | not derivable — GLU is a separate library and is **not** in `docs/khronos/gl.xml`, so the count cannot come from the inventory | *new* `src/glu/` | *(new)* `test_glu_mipmap` | `gluBuild2DMipmaps`, the NURBS tessellator, the quadric | `MISSING` | no GLU source exists in the tree at all; the surface must be specified from the GLU registry separately |
+| **T1-18** | GL 1.x differential testing | 0 | *new* `tests/legacy/` | *(new)* `test_legacy_reference` | a real legacy program reaches the T1 exit gate | `MISSING` | needs T1-4 first; needs a reference (A9: a real OpenGL app, or a self-written spec test) |
+
+### 4.3 T2 — GL 3.0–3.3 (Core + Compatibility)
+
+| Stage | Goal | Entry points | File | Test ID | Exit criteria | Status | Blocker |
+|---|---|---:|---|---|---|---|---|
+| **T2-1** | VAO / FBO / UBO / transform feedback / instancing / sampler objects / sync | 143 core commands introduced in 3.0–3.3 | `src/gl/gl_vertex.cpp`, `gl_framebuffer.cpp`, `gl_uniform.cpp`, `gl_tess_xfb.cpp`, `gl_sync_query.cpp` | `test_core_vertex_attrib`, `test_fbo_completeness`, `test_ubo_layout_binding`, `test_xfb_capture_apple`, `test_shader_objects_p8` | all 143 have a non-stub implementation | `PARTIALLY_IMPLEMENTED` — the surface exists; several features have **no pixel-level proof** (§14.1 item 3 missing) | the missing proofs, not the code |
+| **T2-2** | GLSL 1.30–3.30 | 0 | `src/gl/glsl_to_msl.cpp` | `test_shader_corpus` | 130 / 140 / 150 / 330 accepted and translating | `PARTIALLY_IMPLEMENTED` (330 is in the accept list) | — |
+| **T2-3** | **Geometry shader — emulation is MANDATORY** (A6) | 0 | *new* `src/gl/gl_legacy_geometry.cpp` (emulation), `src/gl/gl_apple_draw.cpp:1901-1904` | `test_gs_mesh_apple` | a geometry-shader program executes and produces the right primitives | `MISSING` — the draw path currently logs *"GS trace-only"* and returns `false` (`src/gl/gl_apple_draw.cpp:1901-1904`) | **A6 forbids concluding `HARDWARE_LIMITED` here.** Emulation options to evaluate: a compute pre-pass writing to a vertex buffer (the same technique TGLMT already uses for the tessellation TCS/TES path, `src/gl/gl_tess_xfb.cpp`) or a CPU expansion. Metal 3 mesh shaders are **not** available on A11 (`IDevice::supportsMesh`, `include/tglmt/MetalInterface.h:712`) |
+| **T2-4** | Provoking vertex (GL's *last*-vertex convention) | 0 | `src/gl/gl_apple_draw.cpp`, `src/gl/gl_readpixels_dsa.cpp:260` | *(new)* `test_provoking_vertex_apple` | a `flat` varying takes the GL-provable vertex | `MISSING` | Metal's provoking vertex is the **first** vertex (`docs/HARDWARE_LIMITATIONS.md:122-131`), GL's default is the **last** ⇒ a CPU index rotation is required (the ANGLE technique). The modern path has the same gap |
+| **T2-5** | `GL_MAX_VIEWPORTS` over-report | 0 | `src/gl/gl_get.cpp:404-407`, `include/tglmt/StateTracker.h:19` | *(new)* `test_viewport_limit_apple` | the reported limit matches what Metal can actually do | `INCORRECT` — TGLMT reports 16; A11 supports **1** (`docs/METAL_FEATURE_MAPPING.md`) | — |
+
+### 4.4 T3 — GL 4.0–4.6
+
+| Stage | Goal | Entry points | File | Test ID | Exit criteria | Status | Blocker |
+|---|---|---:|---|---|---|---|---|
+| **T3-1** | Tessellation, compute, SSBO, image, atomic counters, DSA, buffer storage, indirect draws, texture views | 312 core commands introduced in 4.0–4.6 | `src/gl/gl_tess_xfb.cpp`, `gl_compute.cpp`, `gl_buffer.cpp`, `gl_texture.cpp`, `gl_ext_dsa_state.cpp`, `gl_ext_dsa_texture.cpp`, `gl_ext_state_uniform64.cpp` | `test_shader_tess`, `test_compute_dispatch`, `test_ssbo_graphics_apple`, `test_buffer_dsa_p5`, `test_core41_contract` | all 312 have a non-stub implementation | `PARTIALLY_IMPLEMENTED` — the surface exists; several features have no pixel-level proof | the missing proofs |
+| **T3-2** | GLSL 4.00–4.60 | 0 | `src/gl/glsl_to_msl.cpp` | `test_shader_corpus`, `test_converter_aquarium` | 400/410/430/440/450/460 translate | `FULLY_IMPLEMENTED` for the accepted subset (the accept list at `src/gl/glsl_to_msl.cpp:8480-8488` contains all six) | the `std140`/`std430` layout gap is a known limitation of the rewriter approach |
+| **T3-3** | `GL_ARB_gl_spirv` | 0 | *new* SPIR-V front end | *(new)* `test_spirv_chain` | a SPIR-V binary compiles to MSL | `PARTIALLY_IMPLEMENTED` — `tests/integration/test_spirv_chain_apple.cpp` exists but the path is not a general SPIR-V front end | — |
+
+### 4.5 T4 — Extensions
+
+| Stage | Goal | Entry points | File | Test ID | Exit criteria | Status | Blocker |
+|---|---|---:|---|---|---|---|---|
+| **T4-1** | Extension aliases + the extension inventory | 1066 extension entry points in the proc table | `src/gl/gl_ext_aliases_gen.cpp`, `src/gl/gl_error_string_debug.cpp` | `test_ext_aliases`, `test_enum_exts` | every advertised extension has a real implementation | `PARTIALLY_IMPLEMENTED` | — |
+| **T4-2** | `tglmtGetProcAddress` must return `NULL` for an extension that is **not advertised** | 0 | `src/gl/gl_context_api.cpp:78` | *(new)* `test_proc_address` | `NULL` for a non-advertised extension | `MISSING` — the proc table returns a pointer for every entry it contains | — |
+| **T4-3** | Per-extension conformance | 863 extensions | *new* `tests/extensions/` | *(new)* `test_extension_matrix` | each extension is classified against its own spec | `MISSING` | 863 extensions is a large surface; needs the inventory-driven harness |
+
+---
+
+## 5. What can be parallelised
+
+The dependency graph of the T1 stages (derived from
+`docs/COMPATIBILITY_IMPLEMENTATION_PLAN.md` §1.1 and re-checked against the
+measured entry-point groups):
+
+```
+        T1-4  legacy draw path  (generated MSL + dispatch)
+          │        │        │
+          ▼        ▼        ▼
+       T1-5     T1-6     T1-7
+    lighting     fog    texenv
+          │
+          ▼
+       T1-8  legacy rasterisation
+          │
+          ▼
+      T1-15  attribute stacks  (last: it snapshots what the others create)
+
+        T1-3  immediate mode
+          │
+          ├──────────────┬───────────────┐
+          ▼              ▼               ▼
+       T1-9           T1-12           T1-14
+   raster position   evaluators    client arrays
+          │
+          ▼
+       T1-10  pixel ops
+          │
+          ▼
+       T1-13  selection + feedback
+```
+
+**Three independent lanes** (the recommendation from
+`docs/COMPATIBILITY_IMPLEMENTATION_PLAN.md` §1.2, re-validated):
+
+| Lane | Sequence | Rationale |
 |---|---|---|
-| A1 | **A real GLSL front end** (lexer → parser → AST → semantic analysis) | the rewriter cannot diagnose an unknown identifier at compile time, cannot implement `std140`, and cannot report the errors the spec requires |
-| A2 | **A table-driven state machine** for the 341 state variables | per-entry-point validation is how 55 % of the entry points ended up with no error check |
-| A3 | **Make the null backend equivalent** to the Apple backend for MRT, uploads, mips and the compute grid | lets CI cover GPU semantics without a GPU |
-| A4 | **An offscreen EGL-like platform** + vendored `VK-GL-CTS` | the only way to obtain a real conformance number |
-| A5 | **Context-level locking** or an explicit "one context per thread" contract | the API is not thread-safe today |
-| A6 | **A shader binary cache** (Metal library archives) | the Metal compiler's cold path costs up to 175 ms per library |
+| **A** | T1-4 → T1-5 → T1-6 → T1-7 → T1-8 → T1-15 | owns the legacy state block and the generated program |
+| **B** | T1-3 → T1-12 → T1-14 | owns the vertex assembler; produces vertices only |
+| **C** | T1-9 → T1-10 → T1-13 | owns the framebuffer-facing semantics; needs T1-3 |
 
-## Phase 6 — Conformance & differential testing — **PARTIAL**
+**Independent of every lane** (may start at any time):
 
-Done: the API catalog, the accepted-pname list, 78 pixel-level integration
-tests, the differential converter test against `glslang` + `spirv-cross`, and
-the on-device suite.
+* **T1-16** (GLSL 1.10/1.20) — a different file, a different problem.
+* **T1-17** (GLU) — a new module.
+* **T2-3** (geometry-shader emulation) — the infrastructure for it (the
+  compute pre-pass pattern) already exists in `src/gl/gl_tess_xfb.cpp`.
+* **T2-4** (provoking-vertex index rotation) — needed by **both** T1 and T2;
+  it should be written **once**, as a shared helper.
+* **T4-2** (the `getProcAddress` advertisement gate).
+* **T0-5** (the library-level config API).
 
-Not done: the Khronos CTS, a reference-GL differential harness, and an A11
-device run. Result: `reports/CONFORMANCE_REPORT.md`.
+**Serialisation points:**
 
-## Phase 7 — Performance — **DONE (one optimisation)**
+* **T1-4 is the only hard serialisation point in the T1 lane A** — T1-5, T1-6
+  and T1-7 all need the generated program.
+* **T1-15 must be last** — an attribute stack that is built early saves
+  nothing.
+* **T1-11 (display lists) must not be started until the dispatcher change is
+  agreed**, because it touches a **generated** file.
 
-Delivered: the duplicate texture upload was removed (−31 % on the upload
-path, measured against a ~5 % noise floor; ~60 % on the iOS shared-storage
-path in isolation).
+---
 
-Rejected with reasons: shared storage on macOS, texture-allocation reuse,
-batched staging blits, a hashed pipeline key, and GLSL result caching.
+## 6. Recommended execution order
 
-Remaining bottlenecks are listed in `docs/PERFORMANCE_OPTIMIZATION.md` §5.
+The order below follows PHASE 6 of `other/prompt.md`, with the T1 draw path
+promoted to the front because everything else in the lane depends on it.
 
-## Phase 8 — Final validation — **DONE**
+| Order | Stage | Why now |
+|---:|---|---|
+| 1 | **T1-4** | the only stage that unblocks three others; without it the legacy pipeline cannot render at all |
+| 2 | **T1-5**, **T1-6**, **T1-7** in parallel | the three classic fixed-function stages; each is independent once T1-4 lands |
+| 3 | **T1-3** (72 entry points) | the largest single block of remaining entry points; independent of lane A |
+| 4 | **T1-9** → **T1-10** → **T1-13** | the framebuffer-facing chain |
+| 5 | **T1-12**, **T1-14** | parallel with 4 |
+| 6 | **T1-8** | after the lighting stage, because the alpha test lives in the generated fragment shader |
+| 7 | **T1-16**, **T1-17** | independent; any time |
+| 8 | **T1-11** | the highest-risk stage; do it once the rest is stable |
+| 9 | **T1-15** | last in T1 |
+| 10 | **T1-18** | the T1 exit gate |
+| 11 | **T2-3**, **T2-4**, **T2-5** | the T2 gaps; T2-4 is shared with the modern path |
+| 12 | **T3** proofs, **T4** | after the T1/T2 behaviour is proven |
 
-Clean builds (zero warnings), 185 / 185 tests pass in both configurations, the
-manifest and the API documents regenerated from the built library, and the
-benchmark A/B re-run. Result: `reports/FINAL_VALIDATION_REPORT.md`.
+---
 
-## Phase 9 — Documentation — **DONE**
+## 7. Known gaps and blockers (registry)
+
+Recorded so that no stage is silently skipped. Each is a real blocker for a
+specific stage.
+
+| # | Gap | Evidence | Blocks | Severity |
+|---|---|---|---|---|
+| G1 | The legacy draw path does not exist | `src/gl/gl_legacy_vertex.cpp:93` — `glEnd` only assembles | T1-4…T1-15, T1-18 | **CRITICAL** |
+| G2 | The "commands forbidden inside `glBegin`/`glEnd`" table (GL 1.x §2.6, ~20 commands) is not implemented | `src/gl/gl_legacy_vertex.cpp:82,91,167` — only three guards exist | T1-2 | MEDIUM |
+| G3 | The fixed-function pnames are not in `CompatOnlyPname` | `src/gl/gl_get.cpp:294` — the list covers only 12 pnames | T1-5…T1-8 | MEDIUM |
+| G4 | `glLineStipple` is an exported no-op | `src/gl/gl_raster.cpp:274` | T1-8 | LOW |
+| G5 | `tglmtGetProcAddress` returns a pointer for extensions that are not advertised | `src/gl/gl_context_api.cpp:78` | T4-2 | MEDIUM |
+| G6 | `GL_MAX_VIEWPORTS` is over-reported (16 vs 1 on A11) | `src/gl/gl_get.cpp:404-407`; `docs/METAL_FEATURE_MAPPING.md` | T2-5 | MEDIUM |
+| G7 | The geometry shader has no implementation | `src/gl/gl_apple_draw.cpp:1901-1904` | T2-3 | **CRITICAL** (A6) |
+| G8 | Metal's provoking vertex is the **first** vertex; GL's default is the **last** | `docs/HARDWARE_LIMITATIONS.md:122-131` vs `docs/LEGACY_TO_METAL_MAPPING.md:171` (**the two documents disagree**) | T2-4, T1-5 (flat shading) | MEDIUM |
+| G9 | The infinite-viewer specular vector is wrong in an existing document | `docs/LEGACY_TO_METAL_MAPPING.md:730` uses `normalize(P)` (the *light* position); the correct value is the constant `(0, 0, 1)` | T1-5 | MEDIUM |
+| G10 | GLSL 1.10 (`#version 110`) is rejected by the translator | `src/gl/glsl_to_msl.cpp:8480-8488` | T1-16 | LOW |
+| G11 | The library has no config/framebuffer-selection API | `src/gl/gl_context_api.cpp:17` | T0-5 | LOW |
+| G12 | No GLU source exists | the tree has no `src/glu/` | T1-17 | MEDIUM |
+| G13 | Nothing has been run on an Apple A11 device | `PROGRESS.md` "NOT_VERIFIED" | every `A11_DEVICE` label | **CRITICAL** for acceptance |
+
+---
+
+## 8. Summary counts
+
+| Quantity | Value | Source |
+|---|---:|---|
+| GL 4.6 Core commands | 657 | `data/version_inventory.json` |
+| GL 4.6 Compatibility commands | 1048 | " |
+| Compatibility-only (not in Core) | 391 | " |
+| — of which GL 1.0–2.1 fixed-function | 349 | " |
+| Legacy entry points still stubbed | **240** | `src/gl/gl_stubs_gen.cpp` |
+| Legacy entry points implemented | 109 (of which 1 is a no-op) | " |
+| **Remaining T1 entry points** | **240** | 349 − 109 |
+| T1 stages still `MISSING` | 14 of 18 | §4.2 |
+| Public C ABI prototypes | 1049 | `include/tglmt/gl_c_api.h` |
+| `getProcAddress` entries | 2115 (1066 extension) | `src/gl/gl_c_exports.cpp:9585` |
+| Registered CTest tests | 188 (188 passing on the Null backend) | `build-work/Testing/Temporary/LastTest.log` |
+| Enums / extensions in the inventory | 1808 / 863 | `data/version_inventory.json` |
+| Core commands introduced in T2 / T3 | 143 / 312 | " |
+
+---
+
+## 9. Not verified
+
+Recorded explicitly, because `AGENTS.md` §6 requires it.
+
+* **Nothing has been executed on Apple A11 hardware.** Every test result in
+  this repository is `REFERENCE_ONLY` (Null backend). The `*_apple.cpp`
+  integration tests require a real GPU and have not been re-run on the
+  device in this session.
+* The T1 stage *ordering* is derived from the dependency analysis in
+  `docs/COMPATIBILITY_IMPLEMENTATION_PLAN.md` §1.1 and re-checked against the
+  measured entry-point groups — it is a **plan**, not a measurement.
+* The exit criteria in §4 are written against the **specification**. Where a
+  criterion says "matches a reference image", the reference does not yet
+  exist in the repository; T1-18 is the stage that creates it.
+* The cost of the generated fixed-function program on A11 (8 texture units ×
+  `GL_COMBINE`, 8 lights) is **unmeasured**.
+* Whether the Metal compiler accepts the full generated legacy MSL — including
+  the `GL_COMBINE` helper and the 8-element light array — is **unverified**;
+  the Metal-side uniform limits on A11 are documented in
+  `docs/METAL_A11_CAPABILITIES.md` but the generated program has never been
+  compiled.
+* The A11 fragment-stage `[[stage_in]]` limit is still ambiguous between two
+  Apple editions (31 vs 96; 60 vs 124) — recorded in `PROGRESS.md`.
+
+---
+
+## 10. Cross-references
 
 | Document | Contents |
 |---|---|
-| `docs/PROJECT_ARCHITECTURE.md` | layering, data structures, build system, tooling, known limitations |
-| `docs/OPENGL_46_API_INVENTORY.md` | the canonical catalog, how it was derived, the per-function table |
-| `docs/OPENGL_46_API_COVERAGE.md` | status per API, generated from the manifest |
-| `docs/OPENGL_46_METAL_MAPPING.md` | A–E feasibility matrix, A11 capability check, cost of the emulated paths |
-| `docs/GLSL_460_COMPILER.md` | the translator's architecture, feature matrix, semantic divergences |
-| `docs/METAL_A11_LIMITATIONS.md` | what A11/Metal genuinely cannot do, and the consequences |
-| `docs/TESTING_STRATEGY.md` | what is proven, how, and what is not |
-| `docs/PERFORMANCE_OPTIMIZATION.md` | methodology, measurements, rejected optimisations |
-| `docs/IMPLEMENTATION_ROADMAP.md` | this document |
-| `reports/*.md` | audit, coverage, baseline, conformance, performance, final validation |
-| `benchmarks/README.md` | the measurement protocol |
-
----
-
-## Recommended order for the next session
-
-1. **R2, R3** (minutes; they prevent Metal aborts and a false advertisement).
-2. **R1** (texture completeness) — a whole class of conformance failures.
-3. **R4, R5, R6, R13** (small, high-value correctness fixes).
-4. **F1** (`glClientWaitSync`) — unblocks fence-based applications.
-5. **A4** (CTS platform) — the only way to know the real conformance level.
-6. **F2** (std140/std430) — the biggest GLSL-conformance gap.
-7. **A3** (null-backend parity) — improves CI coverage for everything above.
+| `docs/UNIFIED_GRAPHICS_ARCHITECTURE.md` | the legacy draw-path design, the pipeline-key proof, the risk matrix |
+| `docs/OPENGL_TO_METAL_ARCHITECTURE.md` | how a GL call flows through TGLMT |
+| `docs/COMPATIBILITY_IMPLEMENTATION_PLAN.md` | the per-stage entry-point plan and the dependency graph |
+| `docs/LEGACY_TO_METAL_MAPPING.md` | the per-mechanism Metal strategy and the MSL sketches |
+| `docs/LEGACY_PIPELINE_AUDIT.md` | the 20 fixed-function groups with their evidence |
+| `docs/METAL_FEATURE_MAPPING.md` | GL feature → Metal strategy, with the `HARDWARE_LIMITED` analyses |
+| `docs/METAL_A11_CAPABILITIES.md` | the A11 capability queries |
+| `docs/HARDWARE_LIMITATIONS.md` | real hardware limits vs missing implementation |
+| `docs/TESTING_STRATEGY.md`, `docs/CONFORMANCE_TESTING.md` | what is proven and how |
+| `docs/DECISIONS.md` | the locked architecture decisions |
+| `data/version_inventory.json` | the machine-readable inventory every count above comes from |

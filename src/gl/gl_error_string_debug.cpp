@@ -11,18 +11,35 @@ GLenum glGetError() { return Context::Current().errors.GetError(); }
 const GLubyte* glGetString(GLenum n) {
     static const GLubyte kVendor[] = "TGLMT";
     static const GLubyte kRenderer[] = "Apple GPU (Metal)";
-    // Số bản dựng nhét vào GL_VERSION: F3 (DebugEntrySystemSpecs → GpuDevice.getVersion)
-    // hiện nguyên chuỗi "OpenGL: 4.6 (TGLMT Metal port, build <N>.<hash>)" — đủ để
-    // biết dylib nào đang chạy trên máy. LWJGL chỉ parse tiền tố "4.6" nên an toàn.
-    static const GLubyte kVersion[] = "4.6 (TGLMT Metal port, build " TGLMT_BUILD_STRING ")";
-    static const GLubyte kSL[] = "4.60 (TGLMT MSL)";
     static const GLubyte kEmpty[] = "";
+    Context& c = Context::Current();
     switch (n) {
         case 0x1F00: return kVendor;    // VENDOR
         case 0x1F01: return kRenderer;  // RENDERER
-        case 0x1F02: return kVersion;   // VERSION
-        case 0x8B8C: return kSL;        // SHADING_LANGUAGE_VERSION
-        default: Context::Current().errors.Record(0x0500); return kEmpty;
+        case 0x1F02: {
+            // GL_VERSION phải phản ánh version THẬT của context (spec §22.2):
+            // "<major>.<minor> <vendor specific>". Số bản dựng chèn vào phần
+            // vendor-specific để launcher biết dylib nào đang chạy trên máy
+            // (F3 → DebugEntrySystemSpecs → GpuDevice.getVersion).
+            static thread_local std::string s;
+            s.clear();
+            s.append(std::to_string(c.glMajor).c_str());
+            s.push_back('.');
+            s.append(std::to_string(c.glMinor).c_str());
+            s.append(" (TGLMT Metal port, build " TGLMT_BUILD_STRING ")");
+            return reinterpret_cast<const GLubyte*>(s.c_str());
+        }
+        case 0x8B8C: {
+            // SHADING_LANGUAGE_VERSION: version GLSL của context. Context < 2.0
+            // không có GLSL ⇒ pname này không tồn tại → INVALID_ENUM.
+            if (c.glMajor < 2) { c.errors.Record(0x0500); return kEmpty; }
+            const char* sl = c.ShadingLanguageVersion();
+            static thread_local std::string s2;
+            s2.assign(sl);
+            if (c.glMajor >= 2) s2.append(" (TGLMT MSL)");
+            return reinterpret_cast<const GLubyte*>(s2.c_str());
+        }
+        default: c.errors.Record(0x0500); return kEmpty;
     }
 }
 // Danh sách extension: CỐ TÌNH giữ nguyên các mục cũ.

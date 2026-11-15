@@ -8,6 +8,7 @@ diffed and aggregated automatically.
 | `bench_compile` | `benchmarks/compilation/bench_compile.cpp` | GLSL → MSL → Metal library → pipeline, per stage |
 | `bench_upload` | `benchmarks/compilation/bench_upload.mm` | Raw Metal upload costs — **including the iOS/A11 shared-storage path**, so an A11-relevant number can be obtained on any host |
 | `bench_runtime` | `benchmarks/runtime/bench_runtime.cpp` | Per-call API overhead, uploads, draw calls, frame cost |
+| `bench_translate` | `benchmarks/compilation/bench_translate.cpp` | **GLSL → MSL translation only** (no Metal) — isolates the converter; `--dump <dir>` writes each shader's MSL for byte-identical diffing |
 
 ## Building
 
@@ -22,6 +23,7 @@ The benchmarks are **not** CTest gates: their numbers depend on the machine.
 
 ```sh
 ./build-bench/bench_compile --repeats 30 --warmup 5
+./build-bench/bench_translate --repeats 9 --warmup 2
 ./build-bench/bench_runtime  --iters 2000 --warmup 300
 ./build-bench/bench_upload   --iters 300
 ```

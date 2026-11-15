@@ -2,8 +2,18 @@
 // Spec §10.4. Metal NDC z 0..1 (convert trong shader), y-flip ở viewport.
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
+#include "tglmt/LegacyBeginEnd.h"
 #include "tglmt/GLAppleDraw.h"
 using namespace tglmt;
+
+// Client-side vertex arrays (Compatibility Profile) — định nghĩa ở
+// src/gl/gl_legacy_clientarrays.cpp (spec GL 4.2C §2.8, PDF p.58–75).
+namespace tglmt { namespace gl {
+bool LegacyClientArrayDrawApplies(const Context& c);
+bool LegacyDrawClientArrays(Context& c, GLenum mode, GLint first, GLsizei count,
+                             GLenum indexType, const void* indexData,
+                             GLint baseVertex);
+} }
 
 // GL 4.6 §10.1: các primitive type hợp lệ cho mode của Draw*.
 static bool IsValidPrimitiveMode(GLenum m) {
@@ -131,6 +141,8 @@ static bool XfbDrawModeCompatible(GLenum beginMode, GLenum drawMode) {
 static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, GLsizei inst = 1,
                      GLint baseVertex = 0, GLuint baseInstance = 0, GLint first = 0) {
     Context& c = Context::Current();
+    // Spec GL 2.1 §2.6.3: lệnh draw KHÔNG được phép trong glBegin/glEnd.
+    if (LegacyCheckBeginEndAllowed(c, "glDrawArrays")) return;
     if (count < 0 || inst < 1) { c.errors.Record(0x0501); return; }
     // GL 4.6 §10.4: "An INVALID_ENUM error is generated if mode is not one of
     // the primitive types defined in section 10.1" và (DrawElements) "if type is
@@ -162,6 +174,20 @@ static void EmitDraw(GLenum mode, GLsizei count, GLenum type, const void* idx, G
         // BY_REGION is conservatively treated as whole-query (no scissor-region query).
         tglmt::gl::glGetQueryObjectiv(c.conditionalRender.query, 0x8866 /*QUERY_RESULT*/, &ok);
         if (!ok) return;
+    }
+    // ---- Compatibility Profile: CLIENT-SIDE VERTEX ARRAYS (GL 4.2C §2.8) ----
+    // Khi KHÔNG có program object trong use + profile cho phép fixed-function
+    // + client array (GL_VERTEX_ARRAY) đang bật ⇒ đỉnh lấy từ client array
+    // (spec 4.2C p.66: DrawArrays tương đương Begin(mode); ArrayElement(i);
+    // End(); p.67: DrawElements tương đương Begin(mode);
+    // ArrayElement(indices[i]); End()).
+    // Đường draw legacy dựng vertex buffer + index buffer (layout 6×float4)
+    // rồi gọi AppleDrawGL ⇒ có lighting/fog/texenv như immediate mode.
+    // Instanced draw KHÔNG đi đường này (client array không có divisor).
+    if (inst == 1 && tglmt::gl::LegacyClientArrayDrawApplies(c)) {
+        tglmt::gl::LegacyDrawClientArrays(c, mode, first, count, type, idx,
+                                          baseVertex);
+        return;
     }
     // Software pipeline-statistics (spec §18.4.2): đếm draw hợp lệ đã submit
     // (qua gate count/inst). VS invocations = input vertices — CHƯA nhân expansion

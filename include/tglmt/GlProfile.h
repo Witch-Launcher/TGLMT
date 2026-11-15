@@ -8,8 +8,9 @@
 #include <cstdint>
 
 namespace tglmt {
-// Phải >= số hàm sinh được (hiện 701). tools/gen_c_exports.py báo nếu vượt.
-constexpr int kGlProfileMax = 768;
+// Phải >= số hàm sinh được (hiện 1048 = 657 core + 42 compat-only + 349 legacy
+// fixed-function + bonus). tools/gen_c_exports.py báo nếu vượt.
+constexpr int kGlProfileMax = 2048;
 
 struct GlCallStat {
     uint64_t n = 0;  // số lần gọi

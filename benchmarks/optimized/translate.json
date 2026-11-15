@@ -1,0 +1,78 @@
+{
+  "benchmark": "translate",
+  "scope": "GLSL->MSL only (no Metal)",
+  "shaders": 86,
+  "shaders_ok": 86,
+  "repeats": 9,
+  "warmup": 2,
+  "total_us_median": 53347.703,
+  "total_us_min": 52602.875,
+  "total_us_max": 54220.451,
+  "per_shader_us_median": 620.322,
+  "source_bytes": 131264,
+  "msl_bytes": 827826,
+  "src_mb_per_sec": 2.38,
+  "top_slowest": [
+    {
+      "name": "rendertype_clouds.vsh",
+      "us": 2307.632,
+      "stage": "vertex",
+      "ok": true
+    },
+    {
+      "name": "terrain.fsh",
+      "us": 2242.804,
+      "stage": "fragment",
+      "ok": true
+    },
+    {
+      "name": "rendertype_end_portal.fsh",
+      "us": 1697.914,
+      "stage": "fragment",
+      "ok": true
+    },
+    {
+      "name": "rendertype_text.vsh",
+      "us": 1696.483,
+      "stage": "vertex",
+      "ok": true
+    },
+    {
+      "name": "entity.vsh",
+      "us": 1696.012,
+      "stage": "vertex",
+      "ok": true
+    },
+    {
+      "name": "rendertype_lines.vsh",
+      "us": 1590.927,
+      "stage": "vertex",
+      "ok": true
+    },
+    {
+      "name": "item.vsh",
+      "us": 1553.497,
+      "stage": "vertex",
+      "ok": true
+    },
+    {
+      "name": "rendertype_text_background.vsh",
+      "us": 1467.636,
+      "stage": "vertex",
+      "ok": true
+    },
+    {
+      "name": "rendertype_text_intensity.vsh",
+      "us": 1452.922,
+      "stage": "vertex",
+      "ok": true
+    },
+    {
+      "name": "transparency.fsh",
+      "us": 1356.99,
+      "stage": "fragment",
+      "ok": true
+    }
+  ],
+  "phase": "optimized"
+}

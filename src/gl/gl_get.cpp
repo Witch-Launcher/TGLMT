@@ -1,11 +1,14 @@
 // gl_get.cpp — Mọi glGet* đọc shadow CPU (Metal không cho query GPU đồng bộ).
 // Nguyên tắc: Set* đã lưu shadow → Get* trả shadow; chưa Set → giá trị mặc định spec.
 #include "tglmt/gl46.h"
+#include "tglmt/GeometryEmulation.h"
+#include "tglmt/LegacyState.h"
 #include "tglmt/Context.h"
 #include "tglmt/glsl_type.h"
 #include "tglmt/UniformQuery.h"
 #include "tglmt/limits.h"
 #include "tglmt/gl46_pnames.h"
+#include "tglmt/VersionGate.h"
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -123,9 +126,17 @@ static void OutI(Context& c, GLenum p, GLint* v, GLuint idx = 0) {
             *v = (idx < fmts.size()) ? (GLint)fmts[idx] : 0;
             break;
         }
-        // GL_LOGIC_OP mặc định = GL_COPY (0x1503) (spec §17.4.3). GetShadow ở
-        // trên đã trả giá trị nếu glLogicOp đã gọi; chưa gọi ⇒ COPY.
-        case 0x0BF1: *v = 0x1503; break;
+        // GL_LOGIC_OP_MODE (0x0BF0) mặc định = GL_COPY (0x1503) (spec
+        // glspec46.core.pdf §17.3.9 + bảng state p.625). GL_LOGIC_OP (0x0BF1)
+        // là alias CŨ của GL 1.x — compat-only, đã bị gỡ khỏi Core 3.2 —
+        // nhưng vẫn được trả trong Compatibility Profile.
+        // Shadow dùng khoá 0x0BF0 (tên Core) để cả 2 pname đọc cùng state.
+        case 0x0BF0: {
+            GLint op = 0x1503 /*GL_COPY*/;
+            c.state.GetShadow(0x0BF0, &op, 4);
+            *v = op;
+            break;
+        }
         // GL_SAMPLE_ALPHA_TO_COVERAGE không indexed; nhưng glGetBooleani_v
         // cũng đi qua đây cho các pname indexed khác.
         default: *v = 0; break;
@@ -136,16 +147,22 @@ static void OutI(Context& c, GLenum p, GLint* v, GLuint idx = 0) {
 // Mỗi entry 0 đều là crash-tiềm-năng kiểu DynamicUniformStorage (/ by zero
 // khi UNIFORM_BUFFER_OFFSET_ALIGNMENT = 0) nên bảng này phải đầy đủ.
 static bool StaticLimit(GLenum p, GLint* v) {
+    Context& c = Context::Current();
     switch (p) {
-        case 0x821B: *v = 4; break;      // MAJOR_VERSION
-        case 0x821C: *v = 6; break;      // MINOR_VERSION
+        // Version/profile phải phản ánh context THẬT, không hardcode 4.6.
+        case 0x821B: *v = c.glMajor; break;      // MAJOR_VERSION
+        case 0x821C: *v = c.glMinor; break;      // MINOR_VERSION
         case 0x821D: *v = (GLint)tglmt_num_extensions(); break; // khớp glGetStringi
-        // CONTEXT_FLAGS (0x821E): không debug bit → 0. CONTEXT_PROFILE_MASK (0x9126):
-        // TGLMT là GL 4.6 CORE (không compatibility) → bắt buộc trả CORE_PROFILE_BIT
-        // (0x1). Trả 0 là nói dối: app check mask để chọn core/compat path sẽ thấy
-        // "không phải core" rồi rơi vào nhánh compat không kiểm chứng.
-        case 0x821E: *v = 0; break;      // CONTEXT_FLAGS (không debug bit)
-        case 0x9126: *v = 0x00000001; break; // CONTEXT_PROFILE_MASK → CORE_PROFILE_BIT
+        // CONTEXT_FLAGS (0x821E): bit DEBUG 0x2 | FORWARD_COMPATIBLE 0x1 |
+        // ROBUST_ACCESS 0x4 | NO_ERROR 0x8 (spec Table 22.1).
+        case 0x821E: *v = (GLint)c.glContextFlags; break;
+        // CONTEXT_PROFILE_MASK (0x9126): bit CORE 0x1 / COMPATIBILITY 0x2.
+        // GL < 3.2 không có profile ⇒ mask = 0 (và pname này không hợp lệ →
+        // glGetIntegerv phải sinh INVALID_ENUM, xem PnameIntroducedVersion).
+        case 0x9126:
+            *v = (c.glProfile == GlProfile::Core) ? 0x1
+                   : (c.glProfile == GlProfile::Compatibility) ? 0x2 : 0;
+            break;
         case 0x0D33: *v = 8192; break;   // MAX_TEXTURE_SIZE
         case 0x8073: *v = 2048; break;   // MAX_3D_TEXTURE_SIZE
         case 0x851C: *v = 8192; break;   // MAX_CUBE_MAP_TEXTURE_SIZE
@@ -230,8 +247,139 @@ static bool StaticLimit(GLenum p, GLint* v) {
 }
 
 namespace tglmt::gl {
+// ---- Pname fixed-function (Compatibility Profile) --------------------------
+// Trả về true nếu đã ghi giá trị vào out.
+static bool LegacyPnameI(Context& c, GLenum p, GLint* v) {
+    switch (p) {
+        case 0x0BA3: *v = (GLint)c.legacy.modelview.depth(); return true;   // MODELVIEW_STACK_DEPTH
+        case 0x0BA4: *v = (GLint)c.legacy.projection.depth(); return true;  // PROJECTION_STACK_DEPTH
+        case 0x0BA5: *v = (GLint)c.legacy.texture.depth(); return true;     // TEXTURE_STACK_DEPTH
+        case 0x0D36: *v = (GLint)kMatrixStackDepth; return true;             // MAX_MODELVIEW_STACK_DEPTH
+        // Registry (docs/khronos/gl.xml): 0x0D37 = MAX_NAME_STACK_DEPTH,
+        // 0x0D38 = MAX_PROJECTION_STACK_DEPTH, 0x0D39 = MAX_TEXTURE_STACK_DEPTH.
+        case 0x0D37: *v = (GLint)kNameStackDepth; return true;                // MAX_NAME_STACK_DEPTH
+        case 0x0D38: *v = (GLint)kMatrixStackDepth; return true;             // MAX_PROJECTION_STACK_DEPTH
+        case 0x0D39: *v = (GLint)kMatrixStackDepth; return true;             // MAX_TEXTURE_STACK_DEPTH
+        case 0x0B01: *v = (GLint)c.legacy.currentIndex; return true;         // CURRENT_INDEX
+        // --- Render mode / name stack / select & feedback buffer ----------
+        // Spec GL 4.2C §5.2 (PDF p.457–459), §5.3 (PDF p.460).
+        case 0x0C40: *v = (GLint)c.legacy.selection.renderMode; return true; // RENDER_MODE
+        case 0x0D70: *v = (GLint)c.legacy.selection.nameStack.size(); return true; // NAME_STACK_DEPTH
+        case 0x0DF0: *v = (GLint)(intptr_t)c.legacy.selection.feedbackBuffer; return true; // FEEDBACK_BUFFER_POINTER
+        case 0x0DF1: *v = (GLint)c.legacy.selection.feedbackCapacity; return true; // FEEDBACK_BUFFER_SIZE
+        case 0x0DF2: *v = (GLint)c.legacy.selection.feedbackType; return true; // FEEDBACK_BUFFER_TYPE
+        case 0x0DF3: *v = (GLint)(intptr_t)c.legacy.selection.selectBuffer; return true; // SELECTION_BUFFER_POINTER
+        case 0x0DF4: *v = (GLint)c.legacy.selection.selectCapacity; return true; // SELECTION_BUFFER_SIZE
+        // --- Lighting & materials (spec 4.2C bảng state 6.16/6.17) ---
+        case 0x0B50: *v = c.legacy.lightingEnabled ? 1 : 0; return true;   // LIGHTING
+        case 0x0B57: *v = c.legacy.colorMaterialEnabled ? 1 : 0; return true; // COLOR_MATERIAL
+        case 0x0B51: *v = c.legacy.lightModel.localViewer ? 1 : 0; return true; // LOCAL_VIEWER
+        case 0x0B52: *v = c.legacy.lightModel.twoSide ? 1 : 0; return true;  // TWO_SIDE
+        case 0x0B54: *v = (GLint)c.legacy.shadeModel; return true;          // SHADE_MODEL
+        case 0x0B55: *v = (GLint)c.legacy.colorMaterial.face; return true;  // COLOR_MATERIAL_FACE
+        case 0x0B56: *v = (GLint)c.legacy.colorMaterial.mode; return true;  // COLOR_MATERIAL_PARAMETER
+        case 0x81F8: *v = (GLint)c.legacy.lightModel.colorControl; return true; // LIGHT_MODEL_COLOR_CONTROL
+        case 0x0D31: *v = kMaxLights; return true;                          // MAX_LIGHTS (=8)
+        // --- Fog (spec 4.2C bảng state 6.16) ---
+        case 0x0B60: *v = c.state.IsEnabled(0x0B60) ? 1 : 0; return true;   // FOG
+        case 0x0B61: *v = 0; return true;                                  // FOG_INDEX (color-index mode)
+        case 0x0B65: *v = (GLint)c.legacy.fog.mode; return true;           // FOG_MODE
+        case 0x8450: *v = (GLint)c.legacy.fog.coordSrc; return true;        // FOG_COORD_SRC
+        case 0x0C60: case 0x0C61: case 0x0C62: case 0x0C63:                // TEXTURE_GEN_S/T/R/Q
+            *v = c.state.IsEnabled(p) ? 1 : 0;
+            return true;
+        default: return false;
+    }
+}
+
+// Ma trận hiện tại theo pname (GL_MODELVIEW_MATRIX / PROJECTION / TEXTURE).
+static bool LegacyMatrixPname(Context& c, GLenum p, const GLMatrix*& out) {
+    switch (p) {
+        case 0x0BA6: out = &c.legacy.modelview.top(); return true;
+        case 0x0BA7: out = &c.legacy.projection.top(); return true;
+        case 0x0BA8: case 0x8849: out = &c.legacy.texture.top(); return true;
+        default: return false;
+    }
+}
+
+static bool LegacyPnameF(Context& c, GLenum p, GLfloat* v) {
+    const GLMatrix* mx = nullptr;
+    if (LegacyMatrixPname(c, p, mx)) {
+        for (int i = 0; i < 16; ++i) v[i] = mx->m[i];
+        return true;
+    }
+    switch (p) {
+        case 0x0B00:  // CURRENT_COLOR
+            for (int i = 0; i < 4; ++i) v[i] = c.legacy.currentColor[i];
+            return true;
+        case 0x0B02:  // CURRENT_NORMAL
+            for (int i = 0; i < 3; ++i) v[i] = c.legacy.currentNormal[i];
+            return true;
+        case 0x0B03:  // CURRENT_SECONDARY_COLOR
+            for (int i = 0; i < 3; ++i) v[i] = c.legacy.currentSecondaryColor[i];
+            return true;
+        case 0x0B04: {  // CURRENT_TEXTURE_COORDS
+            const float* tc = c.legacy.currentTexCoord[c.legacy.activeTextureUnit & 7u];
+            for (int i = 0; i < 4; ++i) v[i] = tc[i];
+            return true;
+        }
+        // --- Lighting model ambient (spec 4.2C bảng state 6.17) ---
+        case 0x0B53:  // LIGHT_MODEL_AMBIENT
+            for (int i = 0; i < 4; ++i) v[i] = c.legacy.lightModel.ambient[i];
+            return true;
+        // --- Fog (spec 4.2C bảng state 6.16) ---
+        case 0x0B62: *v = c.legacy.fog.density; return true;   // FOG_DENSITY
+        case 0x0B63: *v = c.legacy.fog.start; return true;     // FOG_START
+        case 0x0B64: *v = c.legacy.fog.end; return true;       // FOG_END
+        case 0x0B66:                                          // FOG_COLOR
+            for (int i = 0; i < 4; ++i) v[i] = c.legacy.fog.color[i];
+            return true;
+        default: return false;
+    }
+}
+
+// Pname chỉ tồn tại ở COMPATIBILITY Profile (fixed-function legacy).
+// Ở Core Profile 3.2+ các pname này KHÔNG tồn tại ⇒ glGetIntegerv /
+// glGetFloatv phải sinh GL_INVALID_ENUM (GL 4.6 Core spec §22.1 + App. E.2.2).
+//
+// Bảng SINH TỰ ĐỘNG từ docs/khronos/gl.xml (nhóm "GetPName"), xem
+// tools/gen_compat_tables.py. Bảng tay cũ chỉ phủ 12 pname và có thể SAI
+// khi registry đổi — nay dùng registry làm nguồn chân lý.
+//
+// LƯU Ý: bảng này CHỈ gồm pname mà glGet chấp nhận. GL_TEXTURE_ENV_MODE và
+// GL_TEXTURE_GEN_MODE thuộc nhóm khác (TextureEnvParameter/TextureGenParameter)
+// và được truy vấn bằng glGetTexEnvfv / glGetTexGenfv, KHÔNG phải glGet.
+static bool CompatOnlyPname(GLenum p) {
+    return IsCompatOnlyGetPName((unsigned int)p);
+}
+
+// Pname chỉ tồn tại từ version nào đó (spec §22.1).
+static bool PnameTooNewForContext(const Context& c, GLenum p) {
+    switch (p) {
+        case 0x821B: case 0x821C: case 0x821D: case 0x821E:
+            return !c.VersionAtLeast(3, 0);   // GL 3.0
+        case 0x9126:
+            return !c.VersionAtLeast(3, 2);   // GL 3.2
+        default: return false;
+    }
+}
+
 void glGetIntegerv(GLenum p, GLint* v) {
     Context& c = Context::Current();
+    // Pname chỉ tồn tại từ version nào đó: dùng sai version ⇒ INVALID_ENUM
+    // (spec §22.1: "INVALID_ENUM if pname is not one of the accepted values").
+    // Ví dụ GL_MAJOR_VERSION (3.0), GL_CONTEXT_FLAGS (3.0),
+    // GL_CONTEXT_PROFILE_MASK (3.2) — GL 1.x không có chúng.
+    if (PnameTooNewForContext(c, p)) {
+        c.errors.Record(0x0500);  // GL_INVALID_ENUM
+        return;
+    }
+    // Pname fixed-function chỉ có ở Compatibility Profile.
+    if (CompatOnlyPname(p) && c.glProfile == GlProfile::Core) {
+        c.errors.Record(0x0500);
+        return;
+    }
+    if (LegacyPnameI(c, p, v)) return;
     // một số pname đặc biệt trả trực tiếp từ object/state
     switch (p) {
         case 0x85B5: *v = (GLint)c.state.BoundVAO(); return;      // VERTEX_ARRAY_BINDING
@@ -514,6 +662,11 @@ void glGetBooleanv(GLenum p, GLboolean* v) { GLint t=0; glGetIntegerv(p,&t); *v=
 void glGetBooleani_v(GLenum p, GLuint i, GLboolean* v) { GLint t=0; glGetIntegeri_v(p,i,&t); *v=t?1:0; }
 void glGetFloatv(GLenum p, GLfloat* v) {
     Context& c = Context::Current();
+    if (PnameTooNewForContext(c, p)) { c.errors.Record(0x0500); return; }
+    if (CompatOnlyPname(p) && c.glProfile == GlProfile::Core) {
+        c.errors.Record(0x0500); return;
+    }
+    if (LegacyPnameF(c, p, v)) return;
     GLfloat t = 0;
     if (p == 0x0B73) { // DEPTH_CLEAR_VALUE (trước đây dùng nhầm 0x0B66 = GL_FOG_COLOR)
         *v = (GLfloat)c.clearDepth; return;
@@ -528,7 +681,7 @@ void glGetFloatv(GLenum p, GLfloat* v) {
     if (p == 0x0B12) { v[0] = 1; v[1] = 1; return; } // POINT_SIZE_RANGE (cap 1, an toàn)
     if (p == 0x0BF0 || p == 0x0BF1) {                // LOGIC_OP_MODE / LOGIC_OP
         GLint op = 0x1503 /*GL_COPY*/;
-        c.state.GetShadow(0x0BF1, &op, 4);
+        c.state.GetShadow(0x0BF0, &op, 4);
         *v = (GLfloat)op; return;
     }
     if (p == 0x8C37) {                                // MIN_SAMPLE_SHADING_VALUE
@@ -733,6 +886,21 @@ void glGetProgramiv(GLuint p, GLenum q, GLint* v) {
     // không chạy → Globals KHÔNG BAO GIỜ ĐƯỢC BIND cho prog ngoài pipeline
     // desc (terrain/blur) → CameraBlockPos rác, MenuBlurRadius rác.
     else if (q == 0x8A36) *v = (GLint)it->second.uniformBlocks.size();
+    // ---- Geometry shader (GL 3.2 §7.12 / GL 4.2C §6.1.13) ----
+    // 0x8916 GEOMETRY_VERTICES_OUT, 0x8917 GEOMETRY_INPUT_TYPE,
+    // 0x8918 GEOMETRY_OUTPUT_TYPE. Giá trị lấy từ GS đã dịch lúc link.
+    else if (q == 0x8916 || q == 0x8917 || q == 0x8918) {
+        GsProgramInfo gi;
+        if (!GetGeometryProgramInfo(p, it->second.linkGen, &gi)) {
+            *v = 0;
+        } else if (q == 0x8916) {
+            *v = (GLint)gi.gs.maxVertices;
+        } else if (q == 0x8917) {
+            *v = (GLint)GsPrimTypeToGL(gi.gs.inPrim);
+        } else {
+            *v = (GLint)GsPrimTypeToGL(gi.gs.outPrim);
+        }
+    }
     // GL_COMPUTE_WORK_GROUP_SIZE (0x8267, GL 4.3 §7.12.3): trả 3 int
     // local_size_x/y/z (Iris ComputeProgram đọc int[3] ngay sau link để tính
     // số workgroup). Chưa có CS → 0 cả 3 (giống Mesa — query vô nghĩa ngoài CS).

@@ -491,7 +491,20 @@ void TestPipelineContract(Suite& t) {
     glLinkProgram(p);
     GLint ok = 0;
     glGetProgramiv(p, 0x8B82, &ok);
-    t.Check(ok == 0, "geometry shader link rejected", ok ? "linked unexpectedly" : "link failed");
+    // GS được EMULATE (A6): Metal không có stage geometry nên TGLMT dịch GS
+    // thành MSL compute kernel + draw mở rộng (docs/GEOMETRY_SHADER_EMULATION.md).
+    // ⇒ link phải THÀNH CÔNG, không phải "link OK rồi vẽ câm".
+    t.Check(ok == 1, "geometry shader linked (emulated)", ok ? "" : "link failed");
+    GLint vertsOut = 0, inType = 0, outType = 0;
+    glGetProgramiv(p, 0x8916, &vertsOut);   // GEOMETRY_VERTICES_OUT
+    glGetProgramiv(p, 0x8917, &inType);     // GEOMETRY_INPUT_TYPE
+    glGetProgramiv(p, 0x8918, &outType);    // GEOMETRY_OUTPUT_TYPE
+    t.Check(vertsOut == 3, "GEOMETRY_VERTICES_OUT == max_vertices (3)",
+            std::to_string(vertsOut));
+    // GL_TRIANGLES = 0x0004, GL_TRIANGLE_STRIP = 0x0005 (docs/khronos/gl.xml).
+    t.Check(inType == 0x0004 && outType == 0x0005,
+            "GEOMETRY_INPUT_TYPE == GL_TRIANGLES && GEOMETRY_OUTPUT_TYPE == GL_TRIANGLE_STRIP",
+            std::to_string(inType) + "/" + std::to_string(outType));
     glDeleteProgram(p);
     if (v) glDeleteShader(v);
     if (f) glDeleteShader(f);

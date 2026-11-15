@@ -598,6 +598,9 @@ void glActiveTexture(GLenum tex) {
     if (tex < 0x84C0 || tex >= 0x84C0 + 32) { c.errors.Record(0x0500); return; }
     c.RecordTexBind('A', tex - 0x84C0, 0, 0);
     c.state.SetActiveTexture(tex - 0x84C0);
+    // Fixed-function (Compatibility Profile) giữ unit hiện tại riêng để
+    // glTexCoord* ghi đúng current texcoord (spec GL 1.3 §2.8.1).
+    c.legacy.activeTextureUnit = tex - 0x84C0;
 }
 // Spec §8.1: mọi lệnh Tex* (không DSA) tác động lên texture đang bind tại
 // active unit. Kiểm tra target khớp; sai → INVALID_OPERATION (core profile).

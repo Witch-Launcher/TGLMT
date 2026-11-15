@@ -2,6 +2,7 @@
 // Spec: GLSLangSpec.4.60.pdf + MSL spec. Ngoài subset → COMPILE_STATUS false + infoLog
 // rõ ràng (trung thực, không sinh code đoán mò).
 #include "tglmt/gl46.h"
+#include "tglmt/GeometryEmulation.h"
 #include "tglmt/Context.h"
 #include "tglmt/GLSLConverter.h"
 using namespace tglmt;
@@ -61,6 +62,18 @@ void glCompileShader(GLuint s) {
     uint32_t stage = it->second.type;
     // P6f: compute (0x91B9) → kernel. P-Tess T1: TCS (0x8E88) → kernel.
     // P-Tess T2: TES (0x8E87) → post-tessellation vertex. GS vẫn fail trung thực.
+    if (stage == 0x8DD9) {
+        // GS: Metal không có stage geometry ⇒ dịch riêng thành MSL compute
+        // kernel LÚC LINK (docs/GEOMETRY_SHADER_EMULATION.md). Compile-time chỉ
+        // kiểm tra CÚ PHÁP/ĐỊNH DẠNG của GS; lỗi phụ thuộc interface (VS
+        // output, uniform dùng chung) chỉ biết lúc link nên bỏ qua ở đây.
+        GsTranslation gt = TranslateGeometryShader(it->second.source, "", {}, false);
+        it->second.conv = GLSLConvertResult{};
+        it->second.msl.clear();
+        it->second.compiled = gt.ok;
+        it->second.infoLog = gt.ok ? "" : ("error: " + gt.log);
+        return;
+    }
     if (stage != 0x8B31 && stage != 0x8B30 && stage != 0x91B9 &&
         stage != 0x8E88 && stage != 0x8E87) {
         // GS: Metal không có stage — đồng thuận MoltenVK/Unity/Apple/SPIRV-Cross

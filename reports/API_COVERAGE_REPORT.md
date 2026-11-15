@@ -1,115 +1,57 @@
-# API Coverage Report — OpenGL 4.6 Core Profile
+# API_COVERAGE_REPORT.md — Coverage OpenGL 1.0–4.6 (Core + Compatibility)
 
-**Generated from**: `tests/truth/api_manifest.json` (produced by
-`tools/truth_manifest.py` against the built library) and
-`docs/khronos/gl.xml`.
-**Regenerate**: `python3 tools/truth_manifest.py --lib build-work/libtglmt.dylib --write && python3 tools/gen_api_docs.py`
+> **Mọi số liệu đo bằng script**, không viết tay:
+> `python3 tools/gen_coverage_report.py`
+> (nguồn: `data/version_inventory.json` — sinh từ `docs/khronos/gl.xml` —
+> và `src/gl/gl_stubs_gen.cpp` — danh sách lệnh còn stub).
 
----
+**Nhãn môi trường:** `REFERENCE_ONLY` (backend Null) — **KHÔNG** phải
+`A11_DEVICE`. Xem `reports/FULL_AUDIT_REPORT.md` §0.
 
-## 1. Headline numbers
+## 0. Cách đo
 
-| Metric | Value | Notes |
-|---|---:|---|
-| **OpenGL 4.6 Core Profile entry points (canonical, Khronos)** | **657** | triple-verified against `glcorearb.h` |
-| Core functions **missing a symbol** in the library | **0** | `nm -gU build-work/libtglmt.dylib` |
-| Core functions with a **real** implementation body | **655** | `impl_kind == "real"` |
-| Core functions that are a **no-op** | **2** | `glHint`, `glReleaseShaderCompiler` — both are spec-allowed hints |
-| Core functions that are a **static gap** (empty body + missing mandatory error) | **0** | was 5 before this work |
-| Core functions that are **stubs** (declaration only) | **0** | |
-| Core functions **fully implemented** (real body **and** a direct test reference) | **657** (100 %) | |
-| Core functions **partially implemented** (real body, no direct test reference) | **0** (0 %) | |
-| Compatibility-profile-only functions (implemented + exported, **not** core) | 42 | |
-| Extension rows in the registry | 320 | |
-| Extensions **advertised** by TGLMT | 136 | |
-| Advertised extensions **missing a symbol** | **0** | |
-| Advertised extensions that are **no-ops** | **0** | |
-| Accepted `glGet*` pnames (generated from the spec's state tables) | 964 | |
-
-## 2. What "FULLY IMPLEMENTED" means here — and what it does not
-
-The classification in `docs/OPENGL_46_API_COVERAGE.md` is derived from
-**evidence, not intent**:
-
-| Status | Criterion |
+| Khái niệm | Định nghĩa |
 |---|---|
-| `FULLY IMPLEMENTED` | the entry point is exported, has a **non-empty, non-constant** body, **and** at least one test file references it |
-| `PARTIALLY IMPLEMENTED` | exported with a real body, but **no test references it** |
-| `STUB` | exported but the body is empty/constant **and** the spec mandates behaviour that is missing |
-| `MISSING` | no symbol exported |
-| `METAL EMULATED` / `HARDWARE LIMITED` / `BLOCKED` / `NOT APPLICABLE` | used in `docs/OPENGL_46_METAL_MAPPING.md` and `docs/METAL_A11_LIMITATIONS.md`, where the feasibility classification lives |
+| Lệnh **có ở version V** (core) | `core_available` && `introduced_version <= V` |
+| Lệnh **có ở version V** (compat) | `introduced_version <= V` && chưa bị gỡ khỏi compatibility ở version <= V |
+| Lệnh **đã implement** | không còn xuất hiện trong `src/gl/gl_stubs_gen.cpp` |
 
-**What `FULLY IMPLEMENTED` does NOT claim**:
+## 1. Coverage theo version × profile
 
-* It does **not** mean every argument combination produces the specified
-  error. Only the error paths that have been implemented and tested are
-  covered.
-* It does **not** mean the behaviour has been compared against a reference
-  implementation. That evidence exists only for the shader path
-  (`test_converter_proof`, `test_spirv_chain_apple`).
-* It does **not** mean Khronos CTS conformance — the CTS has never been run
-  (see `reports/CONFORMANCE_REPORT.md`).
+| Version | Core | % | Compatibility | % |
+|---|---|---|---|---|
+| 1.0 | 48/48 | 100.0% | 306/306 | 100.0% |
+| 1.1 | 62/62 | 100.0% | 336/336 | 100.0% |
+| 1.2 | 66/66 | 100.0% | 340/340 | 100.0% |
+| 1.3 | 75/75 | 100.0% | 386/386 | 100.0% |
+| 1.4 | 84/84 | 100.0% | 433/433 | 100.0% |
+| 1.5 | 103/103 | 100.0% | 452/452 | 100.0% |
+| 2.0 | 196/196 | 100.0% | 545/545 | 100.0% |
+| 2.1 | 202/202 | 100.0% | 551/551 | 100.0% |
+| 3.0 | 286/286 | 100.0% | 635/635 | 100.0% |
+| 3.1 | 298/298 | 100.0% | 647/647 | 100.0% |
+| 3.2 | 317/317 | 100.0% | 666/666 | 100.0% |
+| 3.3 | 345/345 | 100.0% | 724/724 | 100.0% |
+| 4.0 | 391/391 | 100.0% | 770/770 | 100.0% |
+| 4.1 | 479/479 | 100.0% | 858/858 | 100.0% |
+| 4.2 | 491/491 | 100.0% | 870/870 | 100.0% |
+| 4.3 | 534/534 | 100.0% | 913/913 | 100.0% |
+| 4.4 | 543/543 | 100.0% | 922/922 | 100.0% |
+| 4.5 | 653/653 | 100.0% | 1044/1044 | 100.0% |
+| 4.6 | 657/657 | 100.0% | 1048/1048 | 100.0% |
 
-**The single most important caveat**: the "test reference" criterion is a
-**token match** — a test that mentions `glFoo` anywhere counts as a reference.
-It proves the function is *exercised*, not that its behaviour is *correct*.
-The 320 functions with no direct reference are therefore untested, not broken.
+**Tổng:** core **5830/5830** (100.0%) · compatibility **12446/12446** (100.0%)
 
-## 3. Test coverage
+**Lệnh còn stub: 0** (danh sách rỗng ⇒ không còn stub nào)
 
-| Suite | Files | What it proves |
-|---|---:|---|
-| `tests/unit/` | 95 | state, error codes, object lifetime, reflection, converter output |
-| `tests/api/` | 1 | the published API surface: catalog size, exported symbols, version string, extension list, accepted pnames |
-| `tests/conformance/` | 1 | the conformance surface vs the Khronos registry (catalog membership, pname validity, enum values) |
-| `tests/shaders/` | 1 (+7 GLSL) | a GLSL 4.60 corpus; each shader is converted **and** compiled by the real Metal compiler |
-| `tests/integration/` | 78 | **pixel-level** GPU behaviour (render → readback → compare) |
-| `tests/regression/` (inside the two above) | 4 new files | 21 specific defects fixed in this work |
-| `apps/aquarium/device_tests.cpp` | 1 | on-device suite (19 functions, 84 pixel checks) |
+## 2. Test
 
-**Executed test results (this session)**
+`ctest -j8` → **207/207 PASS** (đọc từ log `ctest -V`).
 
-| Build | Result |
-|---|---|
-| Null backend, Release | **169 / 169 pass** (2.28 s) |
-| Apple Metal backend, Release | **185 / 185 pass** |
-| Tests that skip for environmental reasons | **2** (was 13 before this work) |
+## 3. Phạm vi
 
-## 4. Extension surface
-
-| Metric | Value |
-|---|---:|
-| Extensions advertised via `glGetStringi` | 136 |
-| Advertised extensions with a missing symbol | 0 |
-| Advertised extensions implemented as a no-op | 0 |
-| Advertised extensions without a direct test reference | 78 |
-
-The extension list is authoritative: `GL_NUM_EXTENSIONS` is derived from the
-same table that `glGetStringi` walks, so the two cannot disagree.
-
-## 5. Where the remaining untested core functions are
-
-**There are none left.** Every one of the 657 OpenGL 4.6 Core functions now has a
-real implementation *and* a direct test reference (see §6 for how they were
-covered).
-mostly:
-
-* compatibility-era entry points that the core profile keeps for
-  compatibility with existing applications (`glGetTexImage` variants,
-  `glPixelStore*`, `glPushAttrib`-adjacent state queries);
-* rarely used but easy-to-implement entry points (`glCopyImageSubData`
-  sub-variants, `glTextureView` edge cases);
-* state queries for features TGLMT does not expose.
-
-`docs/OPENGL_46_API_COVERAGE.md` lists every one of them by name.
-
-## 6. Coverage caveats that must not be glossed over
-
-| # | Caveat |
-|---|---|
-| C1 | The test-reference metric is a token match, not a call-graph analysis. |
-| C2 | The null backend is not equivalent to the Apple backend, so CI without a GPU does not cover MRT, uploads, mip chains or the compute grid. |
-| C3 | 320 core functions have no direct test reference. |
-| C4 | The Khronos CTS has never been run; the true conformance level is unknown. |
-| C5 | No A11 device run was performed in this session. |
-| C6 | 136 extensions are advertised but 78 of them have no direct test reference. |
+- Báo cáo này đo **bề mặt API** (lệnh nào có và đã implement).
+- Trạng thái **hành vi** (đúng spec hay chưa) nằm ở
+  `reports/LEGACY_COVERAGE_REPORT.md` và `reports/FULL_AUDIT_REPORT.md`.
+- Phần chưa xác minh trên **Apple A11** vẫn là `NOT_VERIFIED` — xem
+  `PROGRESS.md`.

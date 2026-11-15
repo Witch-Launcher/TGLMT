@@ -4,6 +4,7 @@
 #include "tglmt/Context.h"
 #include "tglmt/GlProfile.h"
 #include "tglmt/gl46.h"
+#include "tglmt/gl_context_api.h"
 #include "tglmt_buildinfo.h"
 
 #include <algorithm>
@@ -402,7 +403,10 @@ void* GLFWShim::GetProcAddress(const char* name) {
 #undef TGLMT_PROC
     };
     auto it = kProc.find(name);
-    return it == kProc.end() ? nullptr : it->second;
+    if (it != kProc.end()) return it->second;
+    // Bảng đầy đủ (core 1.0–4.6 + legacy fixed-function + extension) — có
+    // version-gate theo (version, profile) của context hiện tại.
+    return tglmtGetProcAddress(name);
 }
 
 extern "C" {

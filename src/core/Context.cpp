@@ -118,6 +118,67 @@ Context& Context::Current() {
     return *sFallback_;
 }
 void Context::MakeCurrent(Context* ctx) { tCurrent_ = ctx; }
+
+// Đặt version/profile cho context.
+// Quy tắc (theo GL 4.6 Core spec App. K §K.3.3.66 + App. E + §22.2):
+//  - version phải nằm trong 1.0..4.6.
+//  - Core Profile và Compatibility Profile chỉ hợp lệ từ 3.2 trở lên.
+//  - Dưới 3.2 không có khái niệm profile ⇒ ép về Legacy (một bộ API duy nhất).
+//  - Compatibility Profile không được là forward-compatible (spec: forward
+//    compatible đòi core profile; compat + forward là mâu thuẫn).
+//  - Cờ NO_ERROR chỉ hợp lệ với Debug context (KHR_no_error).
+bool Context::SetVersionProfile(int major, int minor, GlProfile profile, uint32_t flags) {
+    const int slot = GlVersionSlotIndex(major, minor);
+    if (slot < 0) return false;
+    if (major < 3 && (flags & 0x1u /*FORWARD_COMPATIBLE*/)) return false;
+    // Profile chỉ tồn tại từ GL 3.2. Yêu cầu Core/Compatibility cho version
+    // < 3.2 là yêu cầu MÂU THUẪN ⇒ từ chối (không tự ý ép về Legacy, vì
+    // như vậy app nghĩ mình có core profile mà thực ra không có). Ngược lại,
+    // "Legacy" (mô hình không-profile) ở version >= 3.2 cũng mâu thuẫn.
+    const int kSplitSlot = 10;  // index của GL 3.2 trong danh sách version slot
+    if (profile == GlProfile::Legacy && slot >= kSplitSlot) return false;
+    if (profile != GlProfile::Legacy) {
+        if (slot < kSplitSlot) return false;
+        if (profile == GlProfile::Compatibility && (flags & 0x1u)) return false;
+    }
+    if ((flags & 0x8u /*NO_ERROR*/) && !(flags & 0x2u /*DEBUG*/)) return false;
+    glMajor = major;
+    glMinor = minor;
+    glProfile = profile;
+    glContextFlags = flags;
+    glVersionSlot = slot;
+    // Dựng bitmap "entry point nào được phép gọi" cho context này — version-gate
+    // sau đó chỉ tốn 1 load + 1 bit-test (không tra bảng mỗi lời gọi).
+    for (int i = 0; i < Context::kGateWords; ++i) glGateMask[i] = 0;
+    for (int i = 0; i < kVersionGateCount && i < kVersionGateTableCapacity; ++i) {
+        if (!VersionGateAllows(i, slot, profile)) continue;
+        glGateMask[i >> 6] |= (1ULL << (i & 63));
+    }
+    if (flags & 0x8u) errors.SetNoError(true);
+    return true;
+}
+
+const char* Context::ShadingLanguageVersion() const {
+    // GL 4.6 spec §22.2: SHADING_LANGUAGE_VERSION trả version GLSL của context.
+    // Context < 2.0 không có GLSL ⇒ "none" (ARB_shading_language_100).
+    if (glMajor < 2) return "none";
+    if (glMajor == 2) return glMinor >= 1 ? "1.20" : "1.10";
+    if (glMajor == 3) {
+        if (glMinor == 0) return "1.30";
+        if (glMinor == 1) return "1.40";
+        if (glMinor == 2) return "1.50";
+        return "3.30";
+    }
+    switch (glMinor) {
+        case 0: return "4.00";
+        case 1: return "4.10";
+        case 2: return "4.20";
+        case 3: return "4.30";
+        case 4: return "4.40";
+        case 5: return "4.50";
+        default: return "4.60";
+    }
+}
 void Context::LogDebug(GLenum src, GLenum type, GLuint id, GLenum sev, const std::string& msg) {
     if (debugCb) debugCb(src, type, id, sev, (GLsizei)msg.size(), msg.c_str(), debugUser);
 }

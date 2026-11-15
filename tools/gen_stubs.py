@@ -8,6 +8,7 @@ import re, pathlib, xml.etree.ElementTree as ET, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import gl46_catalog
+import gen_version_inventory as gvi
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GLXML = ROOT / "docs/khronos/gl.xml"
@@ -15,10 +16,17 @@ OUT = ROOT / "src/gl/gl_stubs_gen.cpp"
 
 impl = set()
 for f in (ROOT / "src/gl").glob("*.cpp"):
-    if f.name == "gl_stubs_gen.cpp":
+    # gl_c_exports.cpp chỉ là wrapper forward 1:1 (không phải implementation)
+    # nên KHÔNG được coi là "đã implement" — nếu không, generator sẽ bỏ sót stub.
+    if f.name in ("gl_stubs_gen.cpp", "gl_c_exports.cpp"):
         continue
     txt = f.read_text()
-    for m in re.finditer(r"\b(gl[A-Za-z0-9_]+)\s*\(", txt):
+    # CHỈ nhận ĐỊNH NGHĨA hàm (dạng "RET glXxx(...) {"), KHÔNG nhận lời gọi
+    # ("glXxx(...)" ở giữa biểu thức). Nếu không phân biệt, một file
+    # implementation gọi glXxx() sẽ khiến generator tưởng đã implement và
+    # bỏ sót stub ⇒ link fail.
+    for m in re.finditer(r"^[A-Za-z_][\w\s\*:<>,]*?\b(gl[A-Za-z0-9_]+)\s*\([^;{}]*\)\s*\{",
+                         txt, re.M):
         impl.add(m.group(1))
     # macro định nghĩa hàm: PK2/3/4(glXxx,...), PU1(glXxx,...) — mọi MACRO(glXxx
     for m in re.finditer(r"\b[A-Z][A-Z0-9_]+\s*\(\s*(gl[A-Za-z0-9_]+)", txt):
@@ -37,6 +45,14 @@ compat = gl46_catalog.parse_compat_only_commands(GLXML)
 core = dict(core)
 for _k, _v in compat.items():
     core.setdefault(_k, _v)
+
+# Legacy fixed-function (Compatibility-only): khai báo trong gl_legacy.h ⇒ cũng
+# phải có định nghĩa để link. Chưa implement tay ⇒ stub TRUNG THỰC.
+_inv = gvi.build_inventory()
+_v46 = _inv["versions"]["4.6"]["commands"]
+_legacy = sorted(set(_v46["compatibility"]) - set(_v46["core"]) - set(compat.keys()))
+for _k in _legacy:
+    core.setdefault(_k, _inv["commands"].get(_k, {}).get("introduced_version", "1.0"))
 
 missing = sorted([k for k in core if k not in impl])
 print(f"[stubs] implemented tay: {len(impl)}, thiếu: {len(missing)}")
@@ -61,7 +77,7 @@ def default_return(ret):
 with open(OUT, "w") as f:
     f.write("// AUTO-GENERATED bởi tools/gen_stubs.py — stub TRUNG THỰC cho hàm chưa port tay.\n")
     f.write("// Mỗi stub ghi debug UNIMPLEMENTED + trả giá trị an toàn. Không giả pass.\n")
-    f.write('#include "tglmt/gl46.h"\n#include "tglmt/Context.h"\nnamespace tglmt::gl {\n')
+    f.write('#include "tglmt/gl46.h"\n#include "tglmt/gl_legacy.h"\n#include "tglmt/Context.h"\nnamespace tglmt::gl {\n')
     for name in missing:
         ret, params = proto_of[name]
         plist = ", ".join(params) if params else "void"

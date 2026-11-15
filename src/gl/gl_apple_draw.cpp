@@ -8,6 +8,8 @@
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include "tglmt/GLConvert.h"
+#include "tglmt/GeometryEmulation.h"
+#include "tglmt/LegacyDraw.h"
 #include "tglmt/uniform_pack.h"
 #include <algorithm>
 #include <chrono>
@@ -629,9 +631,14 @@ static bool AppleClearNowCore(GLbitfield m, GLuint fbo, GLint slotOnly,
     return true;
 }
 bool AppleClearNow(GLbitfield m) {
+    // Thứ tự GL: glEnd đã sinh pixel ⇒ glClear sau đó phải XOÁ chúng. Batch
+    // immediate-mode đang chờ phải được VẼ TRƯỚC clear, nếu không thì clear
+    // sẽ xoá mất hình vừa vẽ (hoặc hình bị vẽ đè lên clear → sai thứ tự).
+    gl::LegacyFlushPendingImmediate(Context::Current());
     return AppleClearNowCore(m, Context::Current().state.BoundDrawFBO(), -1, nullptr);
 }
 bool AppleClearBufferImage(GLuint fbo, GLint slot, const float rgba[4]) {
+    gl::LegacyFlushPendingImmediate(Context::Current());
     return AppleClearNowCore(0x00004000u, fbo, slot, rgba);
 }
 
@@ -1775,9 +1782,29 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
                  bool indexed, size_t indexByteOff, GLuint eboId, GLsizei inst,
                  GLint baseVertex, GLuint baseInstance, GLint first) {
     Context& c = Context::Current();
+    // Fixed-function (Compatibility Profile): batch immediate-mode đang chờ phải
+    // được vẽ TRƯỚC draw này (đúng thứ tự GL: glEnd sinh pixels trước lệnh
+    // draw kế tiếp). Ngoài chỗ này, batch còn được flush trước glClear
+    // (AppleClearNow). Lưu ý: glEnd() trong src/gl/gl_legacy_vertex.cpp nên
+    // gọi trực tiếp gl::LegacyDrawImmediate — xem docs/LEGACY_DRAW_PATH.md
+    // §"Follow-up bắt buộc" (file đó ngoài write-scope của task này).
+    if (!c.legacy.drawActive) gl::LegacyFlushPendingImmediate(c);
     Context::PhaseTimer pt(c.appleStats, &Context::AppleStats::nsDraw);
+    if (count <= 0) return true;   // no-op (EmitDraw đã lọc count==0)
+    // ---- GEOMETRY SHADER (emulation compute kernel, A6) --------------------
+    // Program có GS: KHÔNG được vẽ bằng VS trực tiếp — VS chạy trong compute
+    // prepass (capture), GS mở rộng primitive ra buffer, rồi passthrough vertex
+    // + FS vẽ phần đã mở rộng. Đặt TRƯỚC check isNull() để counter query
+    // (GS_INVOCATIONS / GS_PRIMITIVES_EMITTED) cập nhật kể cả trên backend
+    // không có GPU (Null) — và để chặn draw thường.
+    if (gl::GeometryStageActive(c)) {
+        bool gsOk = gl::GeometryStageDraw(c, mode, count, inst, indexed, indexType,
+                                          indexData, indexByteOff, eboId, baseVertex,
+                                          baseInstance, first);
+        if (!gsOk) c.appleStats.miscFail++;
+        return gsOk;
+    }
     if (c.device->isNull()) return false;
-    if (count <= 0) return true; // no-op đã lọc ở EmitDraw, giữ an toàn
     c.appleStats.drawsAttempted++;
     const bool dgPhase = c.DiagOn(); // phase timers chỉ đo khi diag (release 0 cost)
     // gl_BaseInstance: Metal base_instance áp lên instance_id; Voxy MDIC đặt
@@ -1787,6 +1814,8 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     GLuint prog = c.state.BoundProgram();
     ProgramObject* prp = nullptr;
     GLuint pipeBound = 0;
+    // true khi draw này đi qua đường fixed-function (chương trình SINH).
+    bool legacyActive = false;
     c.state.GetShadow(0x825A /*PROGRAM_PIPELINE_BINDING*/, &pipeBound, 4);
     if (pipeBound) {
         if (!BuildPipelineProgram(c, pipeBound, pipelineProg, prog)) {
@@ -1798,14 +1827,34 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     } else {
         auto pit = c.programs.find(prog);
         if (pit == c.programs.end() || !pit->second.linked) {
-            c.appleStats.noProgram++; return false;
+            // Fixed-function (Compatibility Profile): KHÔNG có program object
+            // trong use ⇒ dùng chương trình SINH của legacy.
+            // GL 2.1 §2.15: "if no program object is currently in use, the
+            // fixed-function method for processing vertices is used instead";
+            // GL 4.6 Core §1.2.4 (Compatibility Profile giữ fixed-function).
+            //
+            // CHỈ áp dụng cho draw fixed-function THẬT (batch immediate-mode do
+            // gl::LegacyDrawImmediate phát ⇒ c.legacy.drawActive). Một draw
+            // modern (glDrawArrays/glDrawElements) KHÔNG có program vẫn phải
+            // đi qua layout attribute modern + vertex buffer của app; nếu ta
+            // đổi sang chương trình legacy thì vertex data sẽ bị đọc từ buffer
+            // legacy (stale) với layout 6×float4 ⇒ hình sai. Đường
+            // fixed-function kiểu vertex-array (glVertexPointer) chưa được
+            // triển khai ⇒ draw đó vẫn bị bỏ như trước (noProgram++).
+            if (gl::LegacySelectProgram(c, prog, prp)) {
+                legacyActive = true;
+            } else {
+                c.appleStats.noProgram++;
+                return false;
+            }
+        } else {
+            prp = &pit->second;
         }
-        prp = &pit->second;
     }
     ProgramObject& pr = *prp;
     // Vertex-only + XFB: capture rồi bỏ rasterization. GL chỉ cho phép chương
     // trình không FS khi rasterizer discard bật; nếu không, draw là lỗi.
-    if (!pr.appleFS && !pr.separable) {
+    if (!legacyActive && !pr.appleFS && !pr.separable) {
         if (!c.state.IsEnabled(0x8C89 /*RASTERIZER_DISCARD*/)) {
             c.errors.Record(0x0502);
             return false;
@@ -1899,7 +1948,10 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
         return ok;
     }
     if (pr.hasGeometryStage) {
-        c.LogDebug(0, 0, 0, 0, "AppleDrawGL: GS trace-only (M5b-future)");
+        // An toàn: nhánh GS đã được xử lý ở đầu AppleDrawGL (compute prepass +
+        // draw buffer mở rộng). Tới đây nghĩa là thiếu thông tin link (side-table)
+        // ⇒ không vẽ (trung thực, không vẽ sai).
+        c.LogDebug(0, 0, 0, 0, "AppleDrawGL: GS không có thông tin link (side-table)");
         return false;
     }
     if (pr.hasTessStages && mode != 0x000E /*PATCHES*/) {
@@ -2050,6 +2102,30 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     struct BindSlot { GLuint id = 0; size_t off = 0; };
     BindSlot bindMap[16];
     uint32_t bindMask = 0;
+    if (legacyActive) {
+        // Fixed-function: layout vertex RIÊNG (docs §3.1) — 6 × float4, stride
+        // cố định 96 byte ⇒ PipelineKey::stride ổn định, không phân mảnh
+        // pipeline cache. Buffer đỉnh do gl_legacy_draw.cpp dựng.
+        static const uint32_t kLegacyOff[6] = {
+            gl::LegacyVertexLayout::kPos,    gl::LegacyVertexLayout::kNormal,
+            gl::LegacyVertexLayout::kColor,  gl::LegacyVertexLayout::kTex0,
+            gl::LegacyVertexLayout::kTex1,   gl::LegacyVertexLayout::kSecColor};
+        for (uint32_t i = 0; i < 6; ++i) {
+            metal::CustomAttrib ca;
+            ca.loc = i;
+            ca.size = 4;
+            ca.type = 0x1406;  // GL_FLOAT
+            ca.normalized = false;
+            ca.offset = kLegacyOff[i];
+            ca.bufferIndex = 0;
+            ca.stride = gl::LegacyVertexLayout::kStride;
+            ca.divisor = 0;
+            cas[casN++] = ca;
+        }
+        bindMask = 1u;
+        bindMap[0].id = 0xFFFFFFFFu;  // đánh dấu "buffer legacy" (không phải GL buffer)
+        bindMap[0].off = 0;
+    } else
     for (int i = 0; i < 16; ++i) {
         const VertexAttrib& a = v.attribs[i];
         if (!a.enabled) continue;
@@ -2803,6 +2879,14 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     // Giải shared_ptr ĐỘT NÀY (sau mọi flush) để bind đúng buffer vừa ghi.
     for (int bi = 0; bi < 16; ++bi) {
         if (!(bindMask & (1u << bi))) continue;
+        if (legacyActive) {
+            // Fixed-function: buffer đỉnh do gl_legacy_draw.cpp dựng (ring
+            // allocator hoặc buffer tạm), offset nằm trong đó.
+            if (!c.legacy.vertexBuffer) { c.appleStats.miscFail++; return false; }
+            enc->setVertexBuffer(c.legacy.vertexBuffer.get(), c.legacy.vertexOffset,
+                                 (uint32_t)bi);
+            continue;
+        }
         if (bindMap[bi].id == 0) { // slot fill zero (attribute shader đọc, GL array tắt)
             auto zb = VertexFillZeroBuf(c);
             if (!zb) { c.appleStats.miscFail++; return false; }
@@ -4645,5 +4729,201 @@ bool AppleDrawGL(GLenum mode, GLsizei count, GLenum indexType, const void* index
     }
     return true;
 }
+
+// ===== GEOMETRY SHADER (GS) — LƯỢT VẼ CUỐI (passthrough vertex + FS) =====
+// Được gọi từ gl::GeometryStageDraw (src/gl/gl_geometry_emulation.cpp) sau khi
+// compute pass đã mở rộng primitive. Vertex shader = passthrough (đọc buffer
+// output mở rộng qua [[buffer(n)]]), fragment shader = FS của program.
+// State (target, blend, depth, viewport, scissor, sampler) theo draw path thường.
+namespace gl {
+bool AppleDrawGeometryExpanded(Context& c, GLuint program, const GsProgramInfo& info,
+                                const GsDrawBuffers& bufs) {
+    if (!c.device || c.device->isNull()) return false;
+    if (!info.passLib || !info.fsLib) return false;
+    if (!bufs.idx || bufs.indexCount == 0) return false;
+    auto pit = c.programs.find(program);
+    if (pit == c.programs.end()) return false;
+    ProgramObject& pr = pit->second;
+    // 1. Target: FBO 0 → default; khác → wrap các slot glDrawBuffers (+depth).
+    std::shared_ptr<metal::IRenderTarget> target;
+    bool hasDepthTex = false;
+    bool anyColor = false;
+    metal::ITexture* colPtrs[8] = {};
+    metal::PixelFormat slotFmts[8] = {};
+    uint32_t nSlots = 1;
+    if (c.state.BoundDrawFBO() == 0) {
+        target = c.device->defaultRenderTarget();
+        if (!target) { c.appleStats.noTarget++; return false; }
+    } else {
+        auto fit = c.fbos.find(c.state.BoundDrawFBO());
+        if (fit == c.fbos.end()) { c.appleStats.miscFail++; return false; }
+        const auto& dbs = fit->second.drawBuffers;
+        nSlots = (uint32_t)std::min<size_t>(dbs.size(), 8);
+        for (uint32_t s = 0; s < nSlots; ++s) {
+            GLint a = DrawBufferAttachmentIndex(dbs[s]);
+            if (a < 0) continue;   // GL_NONE
+            auto cit = fit->second.colorTex.find(a);
+            if (cit == fit->second.colorTex.end()) continue;
+            auto tit = c.textures.find(cit->second);
+            if (tit == c.textures.end() || !tit->second.gpu) continue;
+            auto lit = fit->second.colorLevel.find(a);
+            GLint fboLevel = (lit == fit->second.colorLevel.end()) ? 0 : lit->second;
+            auto layit = fit->second.colorLayer.find(a);
+            GLint fboLayer = (layit == fit->second.colorLayer.end()) ? -1 : layit->second;
+            metal::ITexture* dstTex = LevelView(tit->second, fboLevel, fboLayer);
+            if (!dstTex) continue;
+            colPtrs[s] = dstTex;
+            slotFmts[s] = dstTex->pixelFormat();
+        }
+        metal::ITexture* dep = nullptr;
+        if (fit->second.depthTex) {
+            auto dit = c.textures.find(fit->second.depthTex);
+            if (dit != c.textures.end() && dit->second.gpu) {
+                dep = LevelView(dit->second, fit->second.depthLevel, fit->second.depthLayer);
+                hasDepthTex = dep != nullptr;
+            }
+        }
+        for (uint32_t s = 0; s < nSlots; ++s) if (colPtrs[s]) { anyColor = true; break; }
+        if (!anyColor && !dep) { c.appleStats.miscFail++; return false; }
+        target = c.WrapTarget(c.state.BoundDrawFBO(), colPtrs, nSlots, dep);
+        if (!target) { c.appleStats.noTarget++; return false; }
+    }
+    // 2. Pipeline opts (depth / stencil / blend / color count) — cùng quy tắc với
+    //    draw path thường (AppleDrawGL).
+    metal::PipelineOpts opts;
+    opts.samples = target->sampleCount();
+    opts.depth = c.state.IsEnabled(0x0B71) &&
+                 (c.state.BoundDrawFBO() == 0 ? target->hasDepth() : hasDepthTex);
+    opts.stencil = target->hasStencil();
+    opts.depthFmt = (opts.depth || opts.stencil) ? target->depthFormat()
+                                                : metal::PixelFormat::Invalid;
+    if (opts.stencil) {
+        const auto& sf = c.state.StencilFront();
+        const auto& sb = c.state.StencilBack();
+        auto fillFace = [](metal::StencilFaceDesc& d, const StencilFace& g) {
+            d.func = g.func; d.ref = g.ref; d.readMask = g.valueMask;
+            d.writeMask = g.writeMask; d.sfail = g.sfail; d.dpfail = g.dpfail;
+            d.dppass = g.dppass;
+        };
+        fillFace(opts.stencilDesc.front, sf);
+        fillFace(opts.stencilDesc.back, sb);
+        opts.stencilDesc.enabled = c.state.IsEnabled(0x0B90);
+    }
+    const bool defaultFB = (c.state.BoundDrawFBO() == 0);
+    opts.colorCount = defaultFB ? 1u : (anyColor ? nSlots : 0u);
+    for (uint32_t s = 0; s < opts.colorCount && s < 8; ++s) {
+        opts.colorFmts[s] = colPtrs[s] ? slotFmts[s] : metal::PixelFormat::Invalid;
+        const BlendState& b = c.state.Blend()[s];
+        metal::AttachmentBlend& ab = opts.blends[s];
+        ab.enabled = c.state.IsEnabled(0x0BE2, s) && !c.state.IsEnabled(0x0BF2) &&
+                     (defaultFB ? s == 0 : colPtrs[s] != nullptr);
+        ab.srcRGB = b.srcRGB; ab.dstRGB = b.dstRGB;
+        ab.srcAlpha = b.srcAlpha; ab.dstAlpha = b.dstAlpha;
+        ab.rgbOp = b.rgbEq; ab.alphaOp = b.alphaEq;
+        ab.writeMask = defaultFB ? c.state.ColorMask(0) : c.state.ColorMask(s);
+    }
+    // 3. Pipeline: passthrough vertex (không có stage_in attribute) + FS.
+    auto fsLib = (opts.samples > 1 && pr.appleFSMasked) ? pr.appleFSMasked : info.fsLib;
+    metal::PixelFormat pipeFmt = target->pixelFormat();
+    auto pipe = c.device->makeCustomPipeline(info.passLib.get(), "TGLMT_gs_vs",
+                                             fsLib.get(), "TGLMT_fs", pipeFmt,
+                                             nullptr, 0, 0, &opts);
+    if (!pipe) { c.appleStats.noPipeline++; return false; }
+    metal::ClearColor cc{(double)c.clearColor[0], (double)c.clearColor[1],
+                         (double)c.clearColor[2], (double)c.clearColor[3]};
+    auto enc = c.device->makeRenderEncoderActions(target.get(), pipe.get(), cc, 1.0,
+                                                   metal::LoadOp::Load, metal::LoadOp::Load);
+    if (!enc) { c.appleStats.miscFail++; return false; }
+    // 4. Viewport + scissor (như draw path thường).
+    {
+        ViewportState vp0 = c.state.GetViewport(0);
+        bool upper = c.state.ClipOrigin() == 0x8CA2;
+        bool z10 = c.state.ClipDepth() == 0x935F;
+        metal::Viewport mvp = GLViewportToMetal(vp0.x, vp0.y, vp0.w, vp0.h, vp0.n, vp0.f,
+                                               (int)target->height(), upper, z10);
+        if (vp0.w <= 0 || vp0.h <= 0) {
+            double H = (double)target->height();
+            double W = (double)target->width();
+            mvp = upper ? metal::Viewport{0, 0, W, H, 0, 1}
+                        : metal::Viewport{0, H, W, -H, 0, 1};
+        }
+        enc->setViewport(mvp);
+        bool scissorOn = c.state.IsEnabled(0x0C11);
+        if (scissorOn) {
+            auto sc = c.state.GetScissor(0);
+            metal::ScissorRect mr = GLScissorToMetal(sc.x, sc.y, sc.w, sc.h,
+                                                    (int)target->height(), upper);
+            if (mr.x < target->width() && mr.y < target->height()) {
+                if (mr.x + mr.w > target->width()) mr.w = target->width() - mr.x;
+                if (mr.y + mr.h > target->height()) mr.h = target->height() - mr.y;
+                enc->setScissorRect(mr);
+            }
+        } else {
+            metal::ScissorRect full{0, 0, (uint32_t)target->width(),
+                                    (uint32_t)target->height()};
+            enc->setScissorRect(full);
+        }
+    }
+    // 5. Cull.
+    {
+        bool cullOn = c.state.IsEnabled(0x0B44);
+        uint32_t frontF = c.state.FrontFace();
+        if (c.state.ClipOrigin() != 0x8CA2)
+            frontF = (frontF == 0x0900) ? 0x0901u : 0x0900u;
+        enc->setCullMode(cullOn, c.state.CullMode(), frontF);
+    }
+    // 6. Buffer output mở rộng → vertex buffer slot 0..n-1 (passthrough VS đọc
+    //    qua [[buffer(n)]]).
+    for (size_t i = 0; i < bufs.outBufs.size(); ++i) {
+        if (!bufs.outBufs[i]) { c.appleStats.miscFail++; return false; }
+        enc->setVertexBuffer(bufs.outBufs[i], 0, (uint32_t)i);
+    }
+    // 7. Uniform của FS (buffer(16)).
+    if (bufs.fsUniform) enc->setFragmentBuffer(bufs.fsUniform, 0, 16);
+    // 8. Sampler của FS.
+    for (size_t k = 0; k < pr.fsSamplers.size(); ++k) {
+        const std::string& name = pr.fsSamplers[k];
+        auto uit = pr.samplerUnits.find(name);
+        GLuint unit = (uit == pr.samplerUnits.end()) ? 0 : uit->second;
+        auto kit = pr.samplerKind.find(name);
+        char kind = (kit == pr.samplerKind.end()) ? '2' : kit->second;
+        const TextureObject* txp = nullptr;
+        metal::ITexture* gpu = nullptr;
+        if (unit < 32) {
+            GLuint texId = c.state.BoundTexture(unit, KindTarget(kind));
+            auto tit = c.textures.find(texId);
+            if (tit != c.textures.end() && tit->second.gpu) {
+                txp = &tit->second;
+                gpu = tit->second.gpu.get();
+                c.NoteTextureUsed(texId);
+            }
+        }
+        std::shared_ptr<metal::ISamplerState> ss;
+        std::shared_ptr<metal::ITexture> swzKeep;
+        if (!gpu) {
+            gpu = FallbackForKind(c, kind).get();
+            if (!gpu) continue;
+            static thread_local TextureObject dummyTex;
+            ss = SamplerForUnit(c, 0, dummyTex, kind == 'S');
+        } else {
+            ss = SamplerForUnit(c, unit, *txp, kind == 'S');
+            if (txp) {
+                auto* s = SwzOrBase(*txp, swzKeep);
+                if (s) gpu = s;
+            }
+        }
+        enc->setFragmentTexture(gpu, (uint32_t)k);
+        if (ss) {
+            auto sk = pr.samplerSlots.find(name);
+            enc->setFragmentSamplerState(
+                ss.get(), (uint32_t)(sk == pr.samplerSlots.end() ? k : sk->second));
+        }
+    }
+    // 9. Draw phần đã mở rộng.
+    enc->drawIndexed(bufs.prim, bufs.indexCount, metal::IndexType::UInt32, bufs.idx, 0, 1);
+    if (!enc->endAndCommit()) return false;
+    return true;
+}
+} // namespace gl
 
 } // namespace tglmt

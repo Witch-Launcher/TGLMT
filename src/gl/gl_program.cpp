@@ -3,6 +3,7 @@
 #include "tglmt/gl46.h"
 #include "tglmt/Context.h"
 #include "tglmt/glsl_type.h"
+#include "tglmt/GeometryEmulation.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -167,6 +168,8 @@ void glDeleteProgram(GLuint p) {
     if (c.state.BoundProgram() == p) c.state.BindProgram(0);
     for (auto& kv : c.pipelines)
         if (kv.second.activeProgram == p) kv.second.activeProgram = 0;
+    // Side-table thông tin GS của program này (rò rỉ nếu không xoá).
+    DropGeometryProgramInfo(p);
     c.programs.erase(p);
 }
 GLboolean glIsProgram(GLuint p) {
@@ -390,6 +393,254 @@ static void RefreshSubroutines(Context& c, ProgramObject& pr) {
     }
 }
 
+// ===== GEOMETRY SHADER (GS) — emulation compute kernel (quyết định A6) =====
+// Metal không có stage geometry. GS → MSL compute kernel + draw buffer mở rộng
+// (docs/GEOMETRY_SHADER_EMULATION.md). Fail RÕ tại link khi GS nằm ngoài
+// subset — đúng nếp P6f (không "link OK rồi vẽ câm").
+
+// Trích "struct TGLMTUniforms { ... };" từ MSL của stage (VS/FS).
+static bool ExtractUniformStruct(const std::string& msl, std::string* out) {
+    size_t p = msl.find("struct TGLMTUniforms");
+    if (p == std::string::npos) return false;
+    size_t b = msl.find('{', p);
+    if (b == std::string::npos) return false;
+    int depth = 0;
+    size_t e = b;
+    for (; e < msl.size(); ++e) {
+        if (msl[e] == '{') ++depth;
+        else if (msl[e] == '}') { --depth; if (depth == 0) { ++e; break; } }
+    }
+    if (depth != 0 || e > msl.size()) return false;
+    *out = msl.substr(p, e - p) + "\n";
+    return true;
+}
+
+// Chuẩn bị link GS: dịch GS, khớp input↔VS output, thay output của VS bằng
+// output của GS (để đường link chung khớp FS input với GS output).
+static bool PrepareGeometryProgram(Context& c, ProgramObject& pr, ShaderObject* vs,
+                                   ShaderObject* fs, ShaderObject* gs, GsProgramInfo* info,
+                                   GLSLConvertResult* vsC, GLSLConvertResult* fsC) {
+    if (!vs || !fs || !gs) {
+        pr.infoLog = "error: program có geometry shader cần đủ VS + GS + FS";
+        return false;
+    }
+    // Uniform struct: GS dùng CHUNG uniform của VS (cùng tên ⇒ cùng location).
+    // Chỉ cần khi GS thật sự dùng uniform (VS không có uniform ⇒ không có struct).
+    std::string uniformStruct;
+    if (!ExtractUniformStruct(vs->msl, &uniformStruct)) {
+        uniformStruct.clear();
+    }
+    // VS output → GsVar (tên + kiểu) cho translator.
+    std::vector<GsVar> vsOuts;
+    for (const auto& o : vsC->outputs) {
+        GsVar v;
+        v.name = o.name;
+        v.glslType = o.glslType;
+        v.mslType = o.mslType;
+        vsOuts.push_back(v);
+    }
+    GsTranslation t = TranslateGeometryShader(gs->source, uniformStruct, vsOuts);
+    if (!t.ok) {
+        pr.infoLog = "error: geometry shader emulation: " + t.log;
+        return false;
+    }
+    // Uniform của GS phải có trong VS (cùng tên + cùng kiểu): emulation dùng
+    // chung buffer uniform của VS nên GS không có uniform riêng.
+    for (const auto& u : t.uniforms) {
+        bool found = false;
+        for (const auto& uv : vs->conv.uniforms) {
+            if (uv.name != u.name) continue;
+            found = true;
+            if (uv.mslType != u.mslType) {
+                pr.infoLog = "error: GS uniform `" + u.name + "` khác kiểu với VS (" +
+                             u.glslType + " vs " + uv.glslType + ")";
+                return false;
+            }
+            break;
+        }
+        if (!found) {
+            pr.infoLog = "error: GS uniform `" + u.name +
+                         "` phải khai báo giống vertex shader (emulation GS dùng chung "
+                         "buffer uniform của VS)";
+            return false;
+        }
+        // Uniform phải CÓ THẬT trong struct uniform của VS (nếu VS không dùng
+        // uniform đó, converter có thể không sinh member ⇒ kernel GS không
+        // biên dịch được ⇒ báo lỗi link rõ thay vì để Metal báo lỗi mơ hồ).
+        if (uniformStruct.find(u.name) == std::string::npos) {
+            pr.infoLog = "error: GS uniform `" + u.name +
+                         "` không có trong uniform buffer của vertex shader "
+                         "(vertex shader phải dùng uniform này để emulation GS "
+                         "dùng chung được)";
+            return false;
+        }
+    }
+    // FS input phải có GS output tương ứng (GL: FS đọc output của GS).
+    for (const auto& fi : fsC->inputs) {
+        bool found = false;
+        for (const auto& go : t.outputs) {
+            if (go.name != fi.name) continue;
+            found = true;
+            if (go.mslType != fi.mslType) {
+                pr.infoLog = "error: varying type mismatch GS→FS: " + fi.name;
+                return false;
+            }
+            // Qualifier nội suy phải khớp giữa GS output và FS input
+            // (GLSL 4.60 §4.3.9) — passthrough vertex kế thừa giá trị này.
+            auto norm = [](const std::string& s) {
+                return (s == "smooth" || s.empty()) ? std::string() : s;
+            };
+            if (norm(go.interp) != norm(fi.interpolation)) {
+                pr.infoLog = "error: interpolation qualifier mismatch GS→FS: " + fi.name +
+                             " (GS='" + go.interp + "', FS='" + fi.interpolation + "')";
+                return false;
+            }
+            break;
+        }
+        if (!found) {
+            pr.infoLog = "error: fragment input không do geometry shader ghi: " + fi.name;
+            return false;
+        }
+        if (fi.arraySize > 0) {
+            pr.infoLog = "error: fragment input dạng mảng chưa hỗ trợ với geometry "
+                         "shader: " + fi.name;
+            return false;
+        }
+    }
+    // Thay output của VS bằng output của GS (đường link chung sẽ khớp FS).
+    std::vector<GLSLVar> gsOuts;
+    for (size_t i = 0; i < t.outputs.size(); ++i) {
+        GLSLVar v;
+        v.name = t.outputs[i].name;
+        v.glslType = t.outputs[i].glslType;
+        v.mslType = t.outputs[i].mslType;
+        v.location = kTempLocBase + (int)i;   // location tạm: link path gán thật
+        gsOuts.push_back(v);
+    }
+    vsC->outputs = gsOuts;
+    // Uniform stage-local (buffer uniform cho capture GS + FS ở draw path).
+    pr.vsUniforms.clear();
+    pr.fsUniforms.clear();
+    for (auto& u : vs->conv.uniforms) {
+        if (u.isSampler) continue;
+        pr.vsUniforms.push_back({u.name, u.uniformOffset, u.uniformSize, u.glslType,
+                                  u.arraySize});
+    }
+    pr.vsUniformBytes = vs->conv.uniformBufferSize;
+    for (auto& u : fs->conv.uniforms) {
+        if (u.isSampler) continue;
+        pr.fsUniforms.push_back({u.name, u.uniformOffset, u.uniformSize, u.glslType,
+                                  u.arraySize});
+    }
+    pr.fsUniformBytes = fs->conv.uniformBufferSize;
+    // Lưu thông tin GS.
+    info->gs = t;
+    // GS đã dịch được ⇒ đánh dấu COMPILE_STATUS=true (glCompileShader không
+    // biết stage geometry — xem docs/GEOMETRY_SHADER_EMULATION.md "Giới hạn").
+    gs->compiled = true;
+    gs->infoLog.clear();
+    return true;
+}
+
+// Hoàn tất link GS: sinh passthrough vertex, biên dịch MSL, lưu side-table.
+static bool FinishGeometryProgram(Context& c, ProgramObject& pr, ShaderObject* vs,
+                                  ShaderObject* fs, GsProgramInfo* info,
+                                  const GLSLConvertResult& fsC) {
+    // Field FS cần (location đã được đường link chung gán thật).
+    info->fsFields.clear();
+    for (const auto& fi : fsC.inputs) {
+        if (fi.location < 0) continue;
+        GsFsField f;
+        f.name = fi.name;
+        f.mslType = fi.mslType;
+        f.interp = fi.interpolation;
+        f.location = fi.location;
+        info->fsFields.push_back(f);
+    }
+    std::string passMsl = BuildGeometryPassthroughMsl(info->gs, info->fsFields);
+    if (c.device && !c.device->isNull()) {
+        std::string err;
+        // 1) VS capture prepass (compute) — converter capture có sẵn.
+        GLSLConvertResult capConv = ConvertGLSLtoMSL(vs->source, 0x8B31, true);
+        if (!capConv.ok) {
+            pr.linked = false;
+            pr.infoLog = "error: GS emulation: MSL VS capture convert: " + capConv.log;
+            return false;
+        }
+        pr.vertexCaptureMSL = capConv.msl;
+        pr.vsCaptureIndexSlot = capConv.captureIndexSlot;
+        pr.vsCaptureDrawSlot = capConv.captureDrawSlot;
+        pr.vsCaptureDescSlot = capConv.captureDescSlot;
+        pr.vsCaptureSlots.clear();
+        for (auto& s : capConv.captureSlots)
+            pr.vsCaptureSlots.push_back({s.name, s.slot, s.mslType, s.isGlIn, s.arraySize});
+        // Capture kernel đọc attribute qua tglmt_desc[<location GLSL>] — desc[]
+        // đánh chỉ mục theo location GL ⇒ phải gán lại location đã link.
+        for (auto& a : vs->conv.inputs) {
+            auto it = pr.attribLoc.find(a.name);
+            if (it == pr.attribLoc.end()) continue;
+            int to = it->second;
+            if (to < 0 || to > 15) {
+                pr.linked = false;
+                pr.infoLog = "error: GS emulation: attribute `" + a.name +
+                             "` có location " + std::to_string(to) +
+                             " ngoài 0..15 (descriptor capture chỉ có 16 slot)";
+                return false;
+            }
+            int from = a.location;
+            if (from == to || from < 0) continue;
+            std::string pat = "tglmt_desc[" + std::to_string(from) + "]";
+            std::string rep = "tglmt_desc[" + std::to_string(to) + "]";
+            size_t p = 0;
+            while ((p = pr.vertexCaptureMSL.find(pat, p)) != std::string::npos) {
+                pr.vertexCaptureMSL.replace(p, pat.size(), rep);
+                p += rep.size();
+            }
+        }
+        info->capLib = c.device->compileLibrary(pr.vertexCaptureMSL, err);
+        if (!info->capLib) {
+            pr.linked = false;
+            pr.infoLog = "error: GS emulation: MSL VS capture compile: " + err +
+                         "\n--- MSL head ---\n" + pr.vertexCaptureMSL.substr(0, 1200);
+            return false;
+        }
+        info->capPipe = c.device->makeComputePipeline(info->capLib.get(), "TGLMT_vs_capture");
+        if (!info->capPipe) {
+            pr.linked = false;
+            pr.infoLog = "error: GS emulation: VS capture compute pipeline create failed";
+            return false;
+        }
+        // 2) GS kernel (compute).
+        info->gsLib = c.device->compileLibrary(info->gs.msl, err);
+        if (!info->gsLib) {
+            pr.linked = false;
+            pr.infoLog = "error: GS emulation: MSL GS kernel compile: " + err +
+                         "\n--- MSL head ---\n" + info->gs.msl.substr(0, 1200);
+            return false;
+        }
+        info->gsPipe = c.device->makeComputePipeline(info->gsLib.get(), "TGLMT_gs");
+        if (!info->gsPipe) {
+            pr.linked = false;
+            pr.infoLog = "error: GS emulation: GS compute pipeline create failed (TGLMT_gs)";
+            return false;
+        }
+        // 3) Passthrough vertex (đọc buffer GS output → varying cho FS).
+        info->passLib = c.device->compileLibrary(passMsl, err);
+        if (!info->passLib) {
+            pr.linked = false;
+            pr.infoLog = "error: GS emulation: MSL passthrough vertex compile: " + err +
+                         "\n--- MSL head ---\n" + passMsl.substr(0, 1200);
+            return false;
+        }
+        // 4) Fragment shader: library đã compile ở đường link chung.
+        info->fsLib = pr.appleFS;
+    }
+    info->program = pr.id;
+    info->linkGen = pr.linkGen;
+    StoreGeometryProgramInfo(*info);
+    return true;
+}
+
 void glLinkProgram(GLuint p) {
     Context& c = Context::Current();
     auto itp = c.programs.find(p);
@@ -427,12 +678,21 @@ void glLinkProgram(GLuint p) {
     pr.tessVertexOrder = 0;
     pr.tessFactorSlot = -1; pr.tesFactorSlot = -1;
     pr.tessControlMSL.clear(); pr.tessEvalMSL.clear(); pr.tessSlots.clear();
-    ShaderObject *vs = nullptr, *fs = nullptr, *tcs = nullptr, *tes = nullptr;
+    ShaderObject *vs = nullptr, *fs = nullptr, *tcs = nullptr, *tes = nullptr, *gsh = nullptr;
     bool hasV = false, hasF = false, hasTC = false, hasTE = false;
     pr.hasTessStages = false; pr.hasGeometryStage = false;
     for (GLuint s : pr.shaders) {
         auto its = c.shaders.find(s);
         if (its == c.shaders.end()) { pr.infoLog = "error: missing shader"; return; }
+        if (its->second.type == 0x8DD9) {
+            // GS: Metal không có stage geometry ⇒ dịch riêng thành MSL compute
+            // kernel LÚC LINK (xem PrepareGeometryProgram). Converter VS/FS không
+            // dùng cho GS; `compiled` của GS luôn false (glCompileShader chặn
+            // stage này — xem docs/GEOMETRY_SHADER_EMULATION.md "Giới hạn").
+            gsh = &its->second;
+            pr.hasGeometryStage = true;
+            continue;
+        }
         if (!its->second.compiled) { pr.infoLog = "error: shader not compiled"; return; }
         if (its->second.type == 0x8B31) { hasV = true; vs = &its->second; pr.vertexMSL = vs->msl; }
         if (its->second.type == 0x8B30) { hasF = true; fs = &its->second; pr.fragmentMSL = fs->msl; }
@@ -492,8 +752,6 @@ void glLinkProgram(GLuint p) {
         }
         if (its->second.type == 0x8E88 || its->second.type == 0x8E87) // TCS/TES
             pr.hasTessStages = true;
-        if (its->second.type == 0x8DD9) // GEOMETRY_SHADER: Metal không native → cờ fallback
-            pr.hasGeometryStage = true;
     }
     if (pr.shaders.empty()) { pr.infoLog = "error: no shaders attached"; return; }
     // P-Tess T1: TCS compile được (kernel MSL hợp lệ) nhưng link/draw cần T3/T4
@@ -889,6 +1147,29 @@ void glLinkProgram(GLuint p) {
     // Từ đây chỉ làm việc trên bản copy, link idempotent, shader gốc giữ nguyên.
     GLSLConvertResult vsC = vs ? vs->conv : GLSLConvertResult{};
     GLSLConvertResult fsC = fs ? fs->conv : GLSLConvertResult{};
+    // ===== GEOMETRY SHADER (GS) — emulation compute kernel (quyết định A6) ====
+    // Metal không có stage geometry. GS được dịch thành MSL compute kernel lúc
+    // LINK (docs/GEOMETRY_SHADER_EMULATION.md). Ở đây: dịch GS, khớp input GS
+    // với output VS, và THAY output của VS bằng output của GS — để đường link
+    // chung (bước 1/2 bên dưới) khớp FS input với GS output đúng như GL
+    // (FS đọc output của GS, không phải của VS).
+    bool hasGeometry = false;
+    GsProgramInfo gsInfo;
+    if (pr.hasGeometryStage) {
+        // Xoá side-table của lần link trước (nếu có): link fail phải KHÔNG
+        // dùng lại thông tin GS cũ (cùng linkGen ⇒ stale match).
+        DropGeometryProgramInfo(p);
+        if (!pr.xfbVaryings.empty()) {
+            pr.infoLog = "error: XFB + geometry shader chưa hỗ trợ capture";
+            return;
+        }
+        if (!gsh->compiled) {
+            pr.infoLog = "error: geometry shader chưa compile được: " + gsh->infoLog;
+            return;
+        }
+        if (!PrepareGeometryProgram(c, pr, vs, fs, gsh, &gsInfo, &vsC, &fsC)) return;
+        hasGeometry = true;
+    }
     // Không có fragment: GL cho phép (chỉ depth/raster discard)? — yêu cầu FS để đơn giản
     // và trung thực với M5b (pipeline cần fragment fn). Ghi rõ thay vì im lặng.
     if (vs && !fs && !pr.separable && pr.xfbVaryings.empty()) {
@@ -1501,6 +1782,11 @@ void glLinkProgram(GLuint p) {
             pr.appleFSMasked = c.device->compileLibrary(
                 InjectSampleMask(pr.fragmentMSL), maskErr);
         }
+    }
+    // GS: sinh passthrough vertex + biên dịch kernel/capture + lưu side-table.
+    if (hasGeometry) {
+        if (!pr.linked) return;   // link đã fail ở block Apple phía trên
+        if (!FinishGeometryProgram(c, pr, vs, fs, &gsInfo, fsC)) return;
     }
     // Msluse (diag): số lần MSL tham chiếu `ubo_<Block>.` — trả lời trực tiếp
     // "shader có ĐỌC block này không?". fs=0/vs=0 → block chết (vanilla strip

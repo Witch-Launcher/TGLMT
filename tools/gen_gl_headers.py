@@ -12,12 +12,16 @@ import sys, pathlib, xml.etree.ElementTree as ET, re
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import gl46_catalog
+import gen_version_inventory as gvi
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GLXML = ROOT / "docs/khronos/gl.xml"
 OUT_TYPES = ROOT / "include/tglmt/gl46_types.h"
 OUT_H = ROOT / "include/tglmt/gl46.h"
 OUT_DISPATCH = ROOT / "src/gl/gl_dispatch_gen.cpp"
+# Header/enum riêng cho legacy fixed-function (chỉ có ở Compatibility Profile).
+OUT_LEGACY_TYPES = ROOT / "include/tglmt/gl_legacy_types.h"
+OUT_LEGACY_H = ROOT / "include/tglmt/gl_legacy.h"
 
 def parse():
     t = ET.parse(str(GLXML)); r = t.getroot()
@@ -36,28 +40,58 @@ def parse():
             nm, val = e.get("name"), e.get("value")
             if nm and val and nm not in value_of:
                 value_of[nm] = val
-    # enums core 4.6 = tên được require bởi GL_VERSION_<=4.6
-    removed_enums = set()
-    for f in r.findall("feature"):
-        for rm in f.findall("remove"):
-            for e in rm.findall("enum"):
-                removed_enums.add(e.get("name"))
-    core_enums = {}  # name -> (value, introduced)
-    for f in r.findall("feature"):
-        n = f.get("name")
-        if n.startswith("GL_VERSION_") and "ES" not in n:
+    # enums core 4.6 — last-write-wins theo version tăng dần, giống hệt
+    # semantics của lệnh (xem docs/DECISIONS.md D-001). Heuristic cũ ("enum
+    # nào từng bị <remove> là compat-only") SAI vì GL 4.0 đã <require> lại
+    # GL_QUADS / GL_POLYGON / GL_LINES_ADJACENCY … vào Core Profile ⇒ các
+    # enum đó vốn phải có trong core.
+    def _enum_features():
+        feats = []
+        for f in r.findall("feature"):
+            n = f.get("name")
+            if not n or not n.startswith("GL_VERSION_") or "ES" in n:
+                continue
             ver = tuple(map(int, n.replace("GL_VERSION_", "").split("_")))
             if ver <= (4, 6):
-                for req in f.findall("require"):
-                    for e in req.findall("enum"):
-                        nm = e.get("name")
-                        if nm in removed_enums:
-                            continue  # compat-only, không thuộc core profile
-                        v = e.get("value") or value_of.get(nm, "")
-                        if not v:
-                            v = "/*alias*/"
-                        if nm not in core_enums:
-                            core_enums[nm] = (v, n)
+                feats.append((ver, n, f))
+        feats.sort(key=lambda t: t[0])
+        return feats
+
+    def _apply_enum_set(feats, compat_profile):
+        """True nếu enum thuộc profile yêu cầu (core hay compatibility)."""
+        keep = set()
+        for _ver, _n, f in feats:
+            for req in f.findall("require"):
+                prof = req.get("profile")
+                if prof is None:
+                    keep |= {e.get("name") for e in req.findall("enum")}
+                elif (prof == "compatibility") == compat_profile:
+                    keep |= {e.get("name") for e in req.findall("enum")}
+            for rm in f.findall("remove"):
+                prof = rm.get("profile")
+                if prof is None:
+                    keep -= {e.get("name") for e in rm.findall("enum")}
+                elif (prof == "compatibility") == compat_profile:
+                    keep -= {e.get("name") for e in rm.findall("enum")}
+        return keep
+
+    _feats = _enum_features()
+    core_enum_names = _apply_enum_set(_feats, compat_profile=False)
+    compat_enum_names = _apply_enum_set(_feats, compat_profile=True)
+    core_enums = {}  # name -> (value, introduced)
+    for _ver, n, f in _feats:
+        for req in f.findall("require"):
+            if req.get("profile") is not None:
+                continue
+            for e in req.findall("enum"):
+                nm = e.get("name")
+                if nm not in core_enum_names or nm in core_enums:
+                    continue
+                v = e.get("value") or value_of.get(nm, "")
+                if not v:
+                    v = "/*alias*/"
+                if nm not in core_enums:
+                    core_enums[nm] = (v, n)
     # enums của extension: name -> ext name (chỉ emit cho ext đang advertise,
     # xem advertised_exts() — nếu không, generator sẽ xoá mất ext enum mỗi lần gen).
     ext_enums = {}
@@ -190,6 +224,78 @@ def main():
         f.write("};\nint GetCompatOnlyFunctionTableSize(){return (int)(sizeof(kCompatOnlyFunctions)/sizeof(kCompatOnlyFunctions[0]));}\n")
         f.write("} // namespace tglmt\n")
     print(f"[gen] wrote {OUT_TYPES}, {OUT_H}, {OUT_DISPATCH}")
+
+    # --- legacy (Compatibility-only) headers -------------------------------
+    # TGLMT phải hỗ trợ Desktop OpenGL 1.0–4.6 gồm cả Compatibility Profile.
+    # Các entry point/enum chỉ có ở Compatibility (fixed-function legacy) được
+    # tách riêng để include/tglmt/gl46.h vẫn = "Core 4.6" đúng nghĩa.
+    inv = gvi.build_inventory()
+    v46 = inv["versions"]["4.6"]["commands"]
+    core_set = set(v46["core"])
+    compat_set = set(v46["compatibility"])
+    legacy_cmds = sorted(compat_set - core_set - set(compat46.keys()))
+    print(f"[gen] legacy compatibility-only commands: {len(legacy_cmds)}")
+
+    # enums: compat(4.6) - core(4.6); core enum đã có trong gl46_types.h
+    inv_enums = inv["enums"]
+    core_enum_names = set(inv["versions"]["4.6"]["enums"]["core"])
+    compat_enum_names = set(inv["versions"]["4.6"]["enums"]["compatibility"])
+    legacy_enum_names = sorted(compat_enum_names - core_enum_names)
+    print(f"[gen] legacy compatibility-only enums: {len(legacy_enum_names)}")
+
+    with open(OUT_LEGACY_TYPES, "w") as f:
+        f.write("// AUTO-GENERATED từ docs/khronos/gl.xml — KHÔNG SỬA TAY.\n")
+        f.write("// Enum chỉ có ở OpenGL 4.6 COMPATIBILITY Profile (fixed-function legacy:\n")
+        f.write("// GL_QUADS, GL_ACCUM, GL_COMPILE, GL_LIGHT0, GL_MODULATE, GL_SHADE_MODEL ...).\n")
+        f.write("// Core Profile KHÔNG có các enum này ⇒ gọi glGetIntegerv chúng ở core\n")
+        f.write("// phải sinh GL_INVALID_ENUM (xem gl_get.cpp).\n")
+        f.write("#pragma once\n#include \"tglmt/gl46_types.h\"\n\nnamespace tglmt {\n")
+        # Giá trị enum lấy thẳng từ <enums> của gl.xml (bảng value).
+        _root = ET.parse(str(GLXML)).getroot()
+        _value_of = {}
+        for _es in _root.findall("enums"):
+            if _es.get("namespace") != "GL":
+                continue
+            for _e in _es.findall("enum"):
+                _nm, _v = _e.get("name"), _e.get("value")
+                if _nm and _v and _nm not in _value_of:
+                    _value_of[_nm] = _v
+        written = 0
+        # Bỏ enum đã có trong gl46_types.h (core 4.6 + enum của extension đang
+        # advertise) để tránh redefinition.
+        already = set()
+        if OUT_TYPES.exists():
+            for ln in OUT_TYPES.read_text().splitlines():
+                mm = re.match(r"\s*constexpr GLenum\s+([A-Za-z0-9_]+)\s*=", ln)
+                if mm:
+                    already.add(mm.group(1))
+        for nm in legacy_enum_names:
+            if nm in already:
+                continue
+            val = _value_of.get(nm)
+            if not val or val == "/*alias*/":
+                continue
+            f.write(f"constexpr GLenum {nm} = {val}; // COMPAT-ONLY\n")
+            written += 1
+        f.write("} // namespace tglmt\n")
+        print(f"[gen] legacy enums written: {written}/{len(legacy_enum_names)}")
+
+    with open(OUT_LEGACY_H, "w") as f:
+        f.write("// AUTO-GENERATED từ docs/khronos/gl.xml — KHÔNG SỬA TAY.\n")
+        f.write(f"// {len(legacy_cmds)} entry point OpenGL 1.0–2.1 chỉ có ở COMPATIBILITY Profile\n")
+        f.write("// (fixed-function: immediate mode, matrix stack, lighting, fog, texenv,\n")
+        f.write("// display lists, evaluators, selection/feedback, pixel ops).\n")
+        f.write("// Core Profile KHÔNG có các entry point này ⇒ version-gate chặn ở 4.6 Core.\n")
+        f.write("#pragma once\n#include \"tglmt/gl46.h\"\n#include \"tglmt/gl_legacy_types.h\"\n\n")
+        f.write("namespace tglmt { namespace gl {\n")
+        for name in legacy_cmds:
+            ret, params = proto_of[name]
+            plist = ", ".join(params) if params else "void"
+            intro = inv["commands"].get(name, {}).get("introduced_version", "?")
+            f.write(f"{ret} {name}({plist}); // COMPAT-ONLY, introduced {intro}\n")
+        f.write("} // namespace gl\n")
+        f.write("} // namespace tglmt\n")
+    print(f"[gen] wrote {OUT_LEGACY_TYPES}, {OUT_LEGACY_H}")
 
 if __name__ == "__main__":
     main()

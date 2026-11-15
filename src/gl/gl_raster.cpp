@@ -2,16 +2,76 @@
 // scissor, polygon offset/clamp (GL 4.6), clip control, line/point.
 // Metal: bake vào MTLRenderPipelineDescriptor.colorAttachments / MTLDepthStencilDescriptor.
 #include "tglmt/gl46.h"
+#include "tglmt/LegacyDisplayList.h"
 #include "tglmt/Context.h"
+#include "tglmt/LegacyBeginEnd.h"
+#include "tglmt/VersionGate.h"
+#include "tglmt/LegacyState.h"
 #include <vector>
 using namespace tglmt;
 
 namespace tglmt::gl {
-void glEnable(GLenum cap) { Context::Current().state.SetEnabled(cap, true); }
-void glDisable(GLenum cap) { Context::Current().state.SetEnabled(cap, false); }
+
+// T0.9 — cap enable chỉ tồn tại ở Compatibility Profile (GL_LIGHTING, GL_FOG,
+// GL_ALPHA_TEST, GL_LIGHT0..7, GL_COLOR_MATERIAL, GL_TEXTURE_GEN_*, ...).
+// Ở Core Profile, GL 4.6 Core spec §17.1 yêu cầu:
+//   "An INVALID_ENUM error is generated if cap is not one of the listed values."
+// Trước đây TGLMT chấp nhận im lặng ⇒ state nói dối app (app tưởng lighting
+// đang bật trong khi không có gì được bật).
+//
+// Bảng cap sinh tự động từ docs/khronos/gl.xml (tools/gen_compat_caps.py).
+static bool RejectCompatOnlyCapInCore(Context& c, GLenum cap) {
+    if (c.glProfile != GlProfile::Core) return false;
+    if (!IsCompatOnlyEnableCap((unsigned int)cap)) return false;
+    c.errors.Record(0x0500);  // GL_INVALID_ENUM
+    const char* nm = CompatOnlyEnableCapName((unsigned int)cap);
+    c.LogDebug(0, 0, 0, 0, nm ? (std::string("glEnable/disable cap không tồn tại ở Core Profile: ") + nm).c_str()
+                               : "glEnable/disable cap không tồn tại ở Core Profile");
+    return true;
+}
+
+// GL_LIGHTi bật/tắt cần cập nhật CẢ state chung (để glIsEnabled trả về đúng)
+// VÀ legacy light state (để shader fixed-function biết light nào được bật).
+// StateTracker giữ caps_ theo enum ⇒ glIsEnabled(GL_LIGHTi) đã đúng; legacy
+// giữ cờ riêng để đường fixed-function đọc nhanh.
+static void SyncLegacyLightEnable(Context& c, GLenum cap, bool on) {
+    if (cap < 0x4000 || cap > 0x4007) return;  // GL_LIGHT0..GL_LIGHT7
+    int i = (int)(cap - 0x4000);
+    if (i < 0 || i >= kMaxLights) return;
+    c.legacy.lights[i].enabled = on;
+}
+
+void glEnable(GLenum cap) {
+    Context& c = Context::Current();
+    if (LegacyCheckBeginEndAllowed(c, "glEnable")) return;
+    if (RejectCompatOnlyCapInCore(c, cap)) return;
+    if (LegacyRecordEnable(cap)) return;
+    c.state.SetEnabled(cap, true);
+    if (cap == 0x0B50 /*GL_LIGHTING*/) c.legacy.lightingEnabled = true;
+    if (cap == 0x0B57 /*GL_COLOR_MATERIAL*/) c.legacy.colorMaterialEnabled = true;
+    SyncLegacyLightEnable(c, cap, true);
+}
+void glDisable(GLenum cap) {
+    Context& c = Context::Current();
+    if (LegacyCheckBeginEndAllowed(c, "glDisable")) return;
+    if (RejectCompatOnlyCapInCore(c, cap)) return;
+    if (LegacyRecordDisable(cap)) return;
+    c.state.SetEnabled(cap, false);
+    if (cap == 0x0B50 /*GL_LIGHTING*/) c.legacy.lightingEnabled = false;
+    if (cap == 0x0B57 /*GL_COLOR_MATERIAL*/) c.legacy.colorMaterialEnabled = false;
+    SyncLegacyLightEnable(c, cap, false);
+}
 void glEnablei(GLenum t, GLuint i) { Context::Current().state.SetEnabledI(t, true, i); }
 void glDisablei(GLenum t, GLuint i) { Context::Current().state.SetEnabledI(t, false, i); }
-GLboolean glIsEnabled(GLenum cap) { return Context::Current().state.IsEnabled(cap) ? 1 : 0; }
+GLboolean glIsEnabled(GLenum cap) {
+    Context& c = Context::Current();
+    // glIsEnabled với cap không hợp lệ: GL 4.6 Core §17.1 yêu cầu
+    // GL_INVALID_ENUM — kể cả ở Compatibility Profile (cap không có trong
+    // danh sách của profile hiện tại).
+    if (RejectCompatOnlyCapInCore(c, cap)) return 0;
+    return c.state.IsEnabled(cap) ? 1 : 0;
+}
+
 GLboolean glIsEnabledi(GLenum t, GLuint i) { return Context::Current().state.IsEnabled(t, i) ? 1 : 0; }
 void glBlendColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { Context::Current().state.SetBlendColor(r, g, b, a); }
 void glBlendEquation(GLenum m) {
@@ -31,6 +91,7 @@ void glBlendEquationSeparatei(GLuint i, GLenum r, GLenum a) {
     if (i < B.size()) { B[i].rgbEq = r; B[i].alphaEq = a; }
 }
 void glBlendFunc(GLenum s, GLenum d) {
+    if (LegacyRecordBlendFunc(s, d)) return;
     auto& B = Context::Current().state.Blend();
     for (auto& b : B) { b.srcRGB = s; b.dstRGB = d; b.srcAlpha = s; b.dstAlpha = d; }
 }
@@ -47,8 +108,15 @@ void glBlendFuncSeparatei(GLuint i, GLenum srgb, GLenum drgb, GLenum sa, GLenum 
     if (i < B.size()) { B[i].srcRGB = srgb; B[i].dstRGB = drgb; B[i].srcAlpha = sa; B[i].dstAlpha = da; }
 }
 void glDepthFunc(GLenum f) { Context::Current().state.Depth().func = f; }
-void glDepthMask(GLboolean m) { Context::Current().state.Depth().writeMask = m ? true : false; }
-void glDepthRange(GLdouble n, GLdouble f) { Context::Current().state.SetDepthRange(n, f); }
+void glDepthMask(GLboolean m) {
+    if (LegacyRecordDepthMask(m)) return;
+    Context::Current().state.Depth().writeMask = m ? true : false;
+}
+void glDepthRange(GLdouble n, GLdouble f) {
+    Context& c = Context::Current();
+    if (LegacyCheckBeginEndAllowed(c, "glDepthRange")) return;
+    c.state.SetDepthRange(n, f);
+}
 void glDepthRangef(GLfloat n, GLfloat f) {
     // glDepthRangef và glDepthRange set CÙNG một state → giá trị phải đọc lại
     // được bằng glGetFloatv/glGetDoublev(GL_DEPTH_RANGE). Trước đây hàm inline
@@ -130,20 +198,44 @@ void glActiveStencilFaceEXT(GLenum face) {
     }
     c.state.SetActiveStencilFace(face);
 }
-void glCullFace(GLenum m) { Context::Current().state.SetCullFace(m); }
-void glFrontFace(GLenum m) { Context::Current().state.SetFrontFace(m); }
-void glPolygonMode(GLenum f, GLenum m) { Context::Current().state.SetPolygonMode(f, m); }
+void glCullFace(GLenum m) {
+    if (LegacyRecordCullFace(m)) return;
+    Context::Current().state.SetCullFace(m);
+}
+void glFrontFace(GLenum m) {
+    if (LegacyRecordFrontFace(m)) return;
+    Context::Current().state.SetFrontFace(m);
+}
+void glPolygonMode(GLenum f, GLenum m) {
+    Context& c = Context::Current();
+    if (LegacyCheckBeginEndAllowed(c, "glPolygonMode")) return;
+    c.state.SetPolygonMode(f, m);
+}
 // glPolygonOffset không có tham số clamp: theo convention Vulkan/Metal, clamp==0
 // nghĩa là KHÔNG clamp bias. (Trước đây truyền 1e30f → giá trị rác trong shadow
 // glGet + không bao giờ tới Metal vì depth bias chẳng được encode.)
-void glPolygonOffset(GLfloat f, GLfloat u) { Context::Current().state.SetPolygonOffset(f, u, 0.0f); }
-void glPolygonOffsetClamp(GLfloat f, GLfloat u, GLfloat c) { Context::Current().state.SetPolygonOffset(f, u, c); }
-void glLineWidth(GLfloat w) { Context::Current().state.SetLineWidth(w); }
+void glPolygonOffset(GLfloat f, GLfloat u) {
+    Context& c = Context::Current();
+    if (LegacyCheckBeginEndAllowed(c, "glPolygonOffset")) return;
+    if (LegacyRecordPolygonOffset(f, u)) return;
+    c.state.SetPolygonOffset(f, u, 0.0f);
+}
+void glPolygonOffsetClamp(GLfloat f, GLfloat u, GLfloat cl) {
+    Context& c = Context::Current();
+    if (LegacyCheckBeginEndAllowed(c, "glPolygonOffsetClamp")) return;
+    c.state.SetPolygonOffset(f, u, cl);
+}
+void glLineWidth(GLfloat w) {
+    if (LegacyRecordLineWidth(w)) return;
+    Context::Current().state.SetLineWidth(w);
+}
 void glPointSize(GLfloat s) {
     Context& c = Context::Current();
+    if (LegacyCheckBeginEndAllowed(c, "glPointSize")) return;
     // GL 4.6 §14.4: "An INVALID_VALUE error is generated if size is less than
     // or equal to zero."
     if (s <= 0.0f) { c.errors.Record(0x0501); return; }
+    if (LegacyRecordPointSize(s)) return;
     c.state.SetShadow(0x0B11 /*POINT_SIZE*/, &s, 4);
 }
 // POINT_FADE_THRESHOLD_SIZE (0x8128) — float; POINT_SPRITE_COORD_ORIGIN
@@ -182,7 +274,12 @@ void glPointParameteriv(GLenum p, const GLint* v) {
     if (v[0] != 0x8CA1 && v[0] != 0x8CA2) { c.errors.Record(0x0501); return; }
     c.state.SetShadow(p, v, 4);
 }
-void glViewport(GLint x, GLint y, GLsizei w, GLsizei h) { Context::Current().state.SetViewport(0, (float)x, (float)y, (float)w, (float)h); }
+void glViewport(GLint x, GLint y, GLsizei w, GLsizei h) {
+    Context& c = Context::Current();
+    if (LegacyCheckBeginEndAllowed(c, "glViewport")) return;
+    if (LegacyRecordViewport(x, y, w, h)) return;
+    c.state.SetViewport(0, (float)x, (float)y, (float)w, (float)h);
+}
 void glViewportArrayv(GLuint f, GLsizei n, const GLfloat* v) {
     Context& c = Context::Current();
     // INVALID_VALUE nếu count âm hoặc con trỏ NULL (trước đây deref NULL).
@@ -202,6 +299,7 @@ void glViewportIndexedfv(GLuint i, const GLfloat* v) {
 void glScissor(GLint x, GLint y, GLsizei w, GLsizei h) {
     Context& c = Context::Current();
     if (w < 0 || h < 0) { c.errors.Record(0x0501); return; } // INVALID_VALUE
+    if (LegacyRecordScissor(x, y, w, h)) return;
     // glScissor đặt box cho TẤT CẢ viewport (spec §14.9.2).
     c.state.SetScissorAll(x, y, w, h);
 }
@@ -245,7 +343,9 @@ void glLogicOp(GLenum o) {
     // GL 4.6 §17.3.9: "An INVALID_VALUE error is generated if op is not one of
     // the logicop modes in table 17.3" (0x1500..0x150F liên tục).
     if (o < 0x1500 || o > 0x150F) { c.errors.Record(0x0501); return; }
-    c.state.SetShadow(0x0BF1, &o, 4);
+    // Shadow khoá theo pname Core (GL_LOGIC_OP_MODE = 0x0BF0) để cả
+    // GL_LOGIC_OP_MODE (Core) và GL_LOGIC_OP (compat-only) đọc cùng state.
+    c.state.SetShadow(0x0BF0, &o, 4);
 }
 void glSampleCoverage(GLfloat v, GLboolean inv) {
     Context& c = Context::Current();

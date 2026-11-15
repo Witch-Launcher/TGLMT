@@ -9,6 +9,8 @@
 #include "tglmt/StateTracker.h"
 #include "tglmt/MetalInterface.h"
 #include "tglmt/GLSLConverter.h"
+#include "tglmt/VersionGate.h"
+#include "tglmt/LegacyState.h"
 #include <array>
 #include <deque>
 #include <map>
@@ -633,10 +635,30 @@ class Context {
 public:
     static Context& Current();      // thread_local current
     static void MakeCurrent(Context* ctx);
+    // Fast path cho version-gate: trả con trỏ context hiện tại (có thể null).
+    // Không tạo fallback — dùng để gate nhanh trong extern "C" wrapper.
+    static Context* CurrentPtr() { return tCurrent_; }
 
     ErrorTracker errors;
     StateTracker state;
     ObjectRegistry registry;
+
+    // ---- Version / Profile của context -------------------------------------
+    // TGLMT hỗ trợ mọi version Desktop OpenGL 1.0..4.6. Context được tạo với
+    // (major, minor, profile, flags) qua tglmtCreateContextAttribs(). Mặc định
+    // (không dùng API tạo context nào) = 4.6 Core Profile, giữ hành vi cũ.
+    int glMajor = 4;
+    int glMinor = 6;
+    GlProfile glProfile = GlProfile::Core;
+    // GL_CONTEXT_FLAGS bit: DEBUG 0x2 | FORWARD_COMPATIBLE 0x1 | ROBUST 0x4 | NO_ERROR 0x8
+    uint32_t glContextFlags = 0;
+    // Slot version trong bảng gate (0..18). -1 = ngoài 1.0..4.6.
+    int glVersionSlot = 18;
+    // Bitmap "entry point nào được phép gọi" của context này, dựng sẵn 1 lần
+    // lúc SetVersionProfile. Index = index trong kVersionGateTable. Nhờ vậy
+    // version-gate chỉ tốn 1 load + 1 bit-test mỗi lời gọi GL.
+    static constexpr int kGateWords = (kVersionGateTableCapacity + 63) / 64;
+    uint64_t glGateMask[kGateWords] = {0};
 
     std::shared_ptr<metal::IDevice> device;
     std::string backendName = "null";
@@ -657,6 +679,15 @@ public:
     struct ConditionalRender { GLuint query = 0; GLenum mode = 0; bool active = false; };
     ConditionalRender conditionalRender;
     ExtState ext;
+    // Fixed-function state (Compatibility Profile): matrix stack, current vertex
+    // attributes, immediate mode. Tách riêng khỏi StateTracker để đường
+    // modern programmable pipeline không bị ảnh hưởng.
+    LegacyState legacy;
+    // Chương trình fixed-function SINH RA (VS+FS) — bản sao do Context sở hữu,
+    // LegacyState::program trỏ tới đây. NGOÀI Context::programs ⇒ KHÔNG phải
+    // GL program object (không xuất hiện trong glGetProgramiv, glUseProgram
+    // không chọn được) — docs/LEGACY_TO_METAL_MAPPING.md §2.5.
+    ProgramObject legacyProgram;
     std::map<GLuint, std::array<GLint64, 4>> attrib64; // NV_vertex_attrib_integer_64bit current values
     std::unordered_map<GLuint, XfbObject> xfbs;
     // UBO/SSBO bind points (glBindBufferBase/Range): binding → buffer range.
@@ -1289,6 +1320,15 @@ public:
     void LogDebug(GLenum src, GLenum type, GLuint id, GLenum sev, const std::string& msg);
 
     Context(const std::string& backend = "null");
+    // Đặt version/profile/flags của context. Dùng bởi tglmtCreateContextAttribs.
+    // Trả false nếu (major, minor, profile) không hợp lệ (xem ValidateAttribs).
+    bool SetVersionProfile(int major, int minor, GlProfile profile, uint32_t flags);
+    // Version >= (major, minor)?
+    bool VersionAtLeast(int major, int minor) const {
+        return glMajor > major || (glMajor == major && glMinor >= minor);
+    }
+    // GLSL version đi kèm context ("" nếu context < 2.0 ⇒ không có GLSL).
+    const char* ShadingLanguageVersion() const;
     // End any open Metal encoder before members die. Without this, a caller that
     // draws but never reaches Renderer::EndFrame aborts in Metal with
     // "Command encoder released without endEncoding" during Context destruction.
