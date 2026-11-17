@@ -259,3 +259,53 @@ chạy tập trung** ở main agent. Benchmark dùng chung `build-bench` (Releas
 
 **Bằng chứng:** `tools/agent_syntax_check.sh` (script trong repo),
 `docs/SHADER_TRANSLATION_PERFORMANCE.md` §1 (ghi chú đĩa).
+
+
+## D-011 — Kiến trúc "built-in pass tự đăng ký" cho GLSL (và mọi converter viết lại text)
+
+**Ngày:** 2026-11-16. **Trạng thái:** chốt.
+
+**Bối cảnh.** `src/gl/glsl_to_msl.cpp` là file đơn ~13k dòng. Nhiều nhóm built-in
+GLSL (§7 built-in variables, §8 built-in functions) cần được implement song song.
+Sửa chung một file ⇒ xung đột (và 12 tool tạo ~13 build dir làm đầy đĩa — xem D-010).
+
+**Quyết định.**
+1. Mỗi nhóm built-in nằm ở **file riêng** `src/gl/glsl_builtins_<group>.cpp`,
+   **tự đăng ký** qua static initializer (`RegisterGLSLBuiltinPass` / `RegisterGLSLSourcePass`).
+   Registry (`src/gl/glsl_builtins_registry.cpp`) sort theo id ⇒ thứ tự chạy ỔN ĐỊNH.
+2. `glsl_to_msl.cpp` có **một điểm gắn duy nhất** cho body rewrite (đoạn "PASS DỊCH
+   BUILT-IN GLSL", sau §"ConvertGLSLtoMSL") và một điểm cho source-level pass
+   (`src = RunGLSLSourcePasses(...)`).
+3. Pass có thể **thêm** biến input/output/uniform vào `ctx` (`inputs`/`outputs`/
+   `uniforms` + `nextTempLocation`); converter tự sinh lại layout (uniformBufferSize)
+   sau khi pass chạy.
+4. Tín hiệu của pass: sửa `*ctx.body` / `*ctx.helpers` / `*ctx.mslExtra`.
+
+**Cấm:** không rewrite text của nhóm khác; không đoán mò — phải chứng minh được
+bằng biên dịch Metal thật (cổng `tests/shaders/test_glsl_coverage.cpp`).
+- PASS = converter ok **và** MSL **biên dịch được** bằng `xcrun -sdk macosx metal -c` —
+  convert "không lỗi" mà MSL không biên dịch được = hỏng âm thầm (bug thật phát hiện
+  nhờ cổng này).
+- Cổng này là **bộ lọc** về Metal `xcrun -sdk macosx metal -c`; mọi case GLSL phải giữ
+  được.
+
+**Bằng chứng:** `include/tglmt/GLSLBuiltins.h`, `include/tglmt/GLSLTextUtil.h`,
+`src/gl/glsl_builtins_registry.cpp`, `tests/shaders/glsl_coverage_cases.h`,
+`tests/shaders/test_glsl_coverage.cpp`, `docs/GLSL_VERSION_MATRIX.md` (pending update).
+
+---
+
+## D-012 — CMakeLists: test phải link OBJECT library, không phải archive tĩnh
+
+**Ngày:** 2026-11-16. **Trạng thái:** chốt.
+
+**Bối cảnh.** Test link `tglmt` (archive tĩnh) + lld ⇒ các object chỉ chứa
+static-init registration của builtin pass (`src/gl/glsl_builtins_*.cpp`) bị lld
+LOẠI (không symbol nào được tham chiếu) ⇒ mọi pass là NO-OP trong binary test ⇒
+test đỏ oan / xanh giả.
+
+**Quyết định.** Test link `tglmt_objs` (OBJECT library) + `-framework Metal
+Foundation QuartzCore`. Runtime shared library không bị ảnh hưởng.
+
+**Bằng chứng:** CMakeLists.txt thay đổi; test `test_glsl_coverage` chuyển từ
+"đỏ oan" sang PASS thật sau sửa.

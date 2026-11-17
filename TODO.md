@@ -129,7 +129,8 @@ ngưỡng differential test)
 - [x] **T1-S16** Attribute stack (4 lệnh) — `glPushAttrib`/`glPopAttrib`/
   `glPushClientAttrib`/`glPopClientAttrib`.
   → `src/gl/gl_legacy_attribstack.cpp`. *Test:* `test_legacy_attribstack` PASS.
-- [ ] **T1-S17** GLU (tessellator, quadrics, `gluBuild2DMipmaps`) — A3 nói CÓ.
+- [ ] **T1-S17** GLU (tessellator, quadrics, `gluBuild2DMipmaps`, GLU matrix
+  stack, `gluErrorString`, `gluLookAt`…) — A3 nói CÓ. Chưa có `glu*` nào.
 
 ---
 
@@ -147,6 +148,15 @@ ngưỡng differential test)
   *Cổng:* corpus 86/86 **byte-identical** + `ctest` 207/207 PASS.
   *Tài liệu:* `docs/SHADER_TRANSLATION_PERFORMANCE.md`,
   `reports/SHADER_TRANSLATION_BENCHMARK.md`.
+- [x] **T1.9.3** GLSL đầy đủ (110→460): `attribute`/`varying`, built-in
+  variable + function theo spec 4.60, legacy 1.20 built-ins.
+  → kiến trúc **builtin pass tự đăng ký** (`include/tglmt/GLSLBuiltins.h`,
+  `src/gl/glsl_builtins_{registry,fn_math,fn_texture,modern_io,legacy,lang,final}.cpp`,
+  `include/tglmt/GLSLTextUtil.h`).
+  *Coverage:* **324/324** feature GLSL (convert + Metal-compile), 4 N/A
+  (3 GS + 1 giới hạn phần cứng `gl_ClipDistance[1]`).
+  *Gate:* `tools/glsl_probe.cpp` + `tests/shaders/test_glsl_coverage.cpp`
+  (CTest) — còn test `test_glsl_coverage` PASS (324/324).
 
 ---
 

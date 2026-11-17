@@ -171,10 +171,14 @@ int main() {
         }
     }
 
-    // --- Negative:_builtin ngoài subset phải fail TRUNG THỰG (ok=false) ---
+    // --- Negative: builtin ngoài subset phải fail TRUNG THỰG (ok=false) ---
+    // gl_DrawID: GLSL 4.60 §7.1.1 hop le ⇒ converter dich OK qua CPU uniform
+    //  tglmt_DrawID (xem src/gl/glsl_builtins_final.cpp; gia tri do backend
+    // dien theo MultiDraw ordinal — xem AppleDrawGL).
+    // gl_SampleMask[N] N≠0: converter chi ho tro index 0 (Metal chi co mot
+    // [[sample_mask]]) ⇒ index khac fail trung thuc la ĐÚNG.
     struct Neg { const char* name; uint32_t stage; const char* glsl; };
     std::vector<Neg> negs = {
-        {"gl_DrawID", 0x8B31, "#version 460 core\nvoid main(){ gl_Position = vec4(gl_DrawID);}"},
         {"gl_SampleMask_N1", 0x8B30,
          "#version 460 core\nout vec4 c;\nvoid main(){ gl_SampleMask[1] = 1; c = vec4(1);}"},
         // Lưu ý: compute/image/atomic/subroutine CHƯA nằm đây vì P6f/P6g sắp

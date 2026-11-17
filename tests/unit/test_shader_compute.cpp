@@ -55,9 +55,10 @@ int main() {
         {"ssbo_with_uniform", CMP,
          CS("layout(local_size_x=8) in;\nuniform float f;\nlayout(std430,binding=0) buffer B{float v[];};\n"
             "void main(){ v[0]=f; }"), true},
-        // --- negative: SSBO unsized có instance → fail trung thực ---
-        {"ssbo_instance_unsized_neg", CMP,
-         CS("layout(std430) buffer B{float v[];} buf;\nvoid main(){ }"), false},
+        // --- SSBO unsized có instance: hợp lệ theo GLSL 4.60 §7.5 (unsized array
+        //    cuối cùng của block) ⇒ pass "lang" chuẩn hoá nguồn (xem glsl_builtins_lang.cpp) ---
+        {"ssbo_instance_unsized_ok", CMP,
+         CS("layout(std430) buffer B{float v[];} buf;\nvoid main(){ }"), true},
         // P4: graphics SSBO giờ ĐƯỢC hỗ trợ (slot 17+k chung UBO) → convert OK.
         {"ssbo_graphics_ok", FS,
          CS("out vec4 c;\nlayout(std430) buffer B{float v[];};\nvoid main(){ c=vec4(1);}"), true},

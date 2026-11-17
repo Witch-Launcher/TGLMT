@@ -1,6 +1,8 @@
 // GLSLConverter.cpp — xem GLSLConverter.h về subset được hỗ trợ.
 // Mọi thứ ngoài subset → ok=false + log rõ ràng (không đoán mò sinh code sai).
 #include "tglmt/GLSLConverter.h"
+#include "tglmt/GLSLTextUtil.h"
+#include "tglmt/GLSLBuiltins.h"
 #include "tglmt/uniform_pack.h"
 #include <algorithm>
 #include <cctype>
@@ -17,83 +19,6 @@ namespace tglmt {
 namespace {
 
 // ---- tiện ích chuỗi ----
-static std::string Trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && isspace((unsigned char)s[a])) ++a;
-    while (b > a && isspace((unsigned char)s[b - 1])) --b;
-    return s.substr(a, b - a);
-}
-static bool IsIdentChar(char c, bool first) {
-    return c == '_' || isalpha((unsigned char)c) || (!first && isdigit((unsigned char)c));
-}
-// ---- so sánh nhanh với literal ----
-// `s.compare(pos, count, "lit")` gọi strlen(literal) MỖI LẦN gọi ⇒ strlen +
-// memcmp chiếm ~28% thời gian dịch GLSL→MSL (đo bằng `sample`). Với literal,
-// độ dài biết lúc compile ⇒ so trực tiếp bằng memcmp.
-// Nếu count != strlen(lit) → fallback sang compare() để giữ ĐÚNG semantics
-// (compare() so substring với TOÀN BỘ literal, nên "ive" khớp "ivec").
-template <size_t N>
-static inline bool LitEq(const std::string& s, size_t pos, size_t count, const char (&lit)[N]) {
-    if (count == N - 1 && pos <= s.size())
-        return pos + count <= s.size() && __builtin_memcmp(s.data() + pos, lit, count) == 0;
-    return s.compare(pos, count, lit) == 0;
-}
-// Từ khoá đứng RIÊNG tại pos (không dính ident char trước/sau).
-// Tương đương: s.compare(pos, n, w) == 0 && (pos == 0 || !IsIdentChar(s[pos-1]))
-//                && (pos+n >= s.size() || !IsIdentChar(s[pos+n])).
-template <size_t N>
-static inline bool IsWordAt(const std::string& s, size_t pos, const char (&w)[N]) {
-    if (pos + (N - 1) > s.size()) return false;
-    if (__builtin_memcmp(s.data() + pos, w, N - 1) != 0) return false;
-    if (pos > 0 && IsIdentChar(s[pos - 1], false)) return false;
-    size_t j = pos + (N - 1);
-    if (j < s.size() && IsIdentChar(s[j], false)) return false;
-    return true;
-}
-// Bỏ comment // /* */, giữ nguyên string "..." (hiếm trong shader, vẫn xử lý đúng).
-static std::string StripComments(const std::string& s) {
-    std::string o;
-    bool line = false, block = false, str = false;
-    for (size_t i = 0; i < s.size(); ++i) {
-        char c = s[i], n = i + 1 < s.size() ? s[i + 1] : 0;
-        if (line) { if (c == '\n') { line = false; o += c; } continue; }
-        if (block) { if (c == '*' && n == '/') { block = false; ++i; } continue; }
-        if (str) { o += c; if (c == '"') str = false; continue; }
-        if (c == '"') { str = true; o += c; continue; }
-        if (c == '/' && n == '/') { line = true; continue; }
-        if (c == '/' && n == '*') { block = true; ++i; continue; }
-        o += c;
-    }
-    return o;
-}
-// Tách statement cấp depth 0 theo ';' (giữ nguyên index để thay thế).
-struct Stmt { std::string text; size_t start, end; }; // end = sau ';'
-static std::vector<Stmt> SplitTopLevel(const std::string& s) {
-    std::vector<Stmt> out;
-    int depth = 0;
-    size_t start = 0;
-    bool str = false;
-    for (size_t i = 0; i < s.size(); ++i) {
-        char c = s[i];
-        if (str) { if (c == '"') str = false; continue; }
-        if (c == '"') { str = true; continue; }
-        if (c == '{') ++depth;
-        else if (c == '}') { --depth; }
-        else if (c == ';' && depth == 0) {
-            out.push_back({s.substr(start, i - start + 1), start, i + 1});
-            start = i + 1;
-        }
-    }
-    // Đuôi file sau ';' cuối (thường là thân main) — không được bỏ rơi.
-    if (start < s.size()) {
-        std::string tail = s.substr(start);
-        bool blank = true;
-        for (char c : tail)
-            if (!isspace((unsigned char)c)) { blank = false; break; }
-        if (!blank) out.push_back({tail, start, s.size()});
-    }
-    return out;
-}
 // P6g image helpers (file-scope, dùng ở parser + rewrite + emission).
 // Kind từ tên kiểu GLSL ('2' 2D, 'A' 2DArray, 'C' Cube, '3' 3D; 0 = 1D/Rect/Buffer/MS).
 static char ImageKind(const std::string& t) {
@@ -270,7 +195,6 @@ static std::string ExtractDeclaratorInit(const std::string& crest, const std::st
 }
 // Đếm số phần tử initializer của mảng unsized `vec3[](...)` / `{...}`.
 // 0 = không nhận diện được (caller fail rõ thay vì bịa size).
-static std::vector<std::string> SplitCallArgs(const std::string& s);
 static int CountInitElems(const std::string& initRaw) {
     std::string init = Trim(initRaw);
     if (init.empty()) return 0;
@@ -3664,29 +3588,6 @@ static std::set<std::string> HelperVecReturns(const std::string& restGLSL) {
     return out;
 }
 // Tách args call theo dấu phẩy depth 0 (ngoặc tròn).
-static std::vector<std::string> SplitCallArgs(const std::string& s) {
-    std::vector<std::string> out;
-    int d = 0, ad = 0;
-    size_t s0 = 0;
-    for (size_t k = 0; k <= s.size(); ++k) {
-        char ch = k < s.size() ? s[k] : ',';
-        if (ch == '(') ++d;
-        else if (ch == ')') --d;
-        else if (ch == '<') {
-            // MSL texture3d<float, access::write> — dấu phẩy trong template KHÔNG
-            // phải phân cách param (image param helper, Photon lpv).
-            size_t w = k;
-            while (w > 0 && IsIdentChar(s[w - 1], false)) --w;
-            std::string word = s.substr(w, k - w);
-            if (word.rfind("texture", 0) == 0 || word.rfind("depth", 0) == 0) ++ad;
-        } else if (ch == '>' && ad > 0) --ad;
-        else if (ch == ',' && d == 0 && ad == 0) {
-            out.push_back(Trim(s.substr(s0, k - s0)));
-            s0 = k + 1;
-        }
-    }
-    return out;
-}
 // Tên param cuối trong khai báo param (`const vec3 &x[4]` → x).
 static std::string ParamBaseName(const std::string& p) {
     std::string t = Trim(p);
@@ -6236,8 +6137,9 @@ static bool RewriteClipDistance(std::string& body, const std::string& dest,
             return false;
         }
         if (idx != 0) {
-            err = "gl_ClipDistance[" + std::to_string(idx) +
-                  "] chưa hỗ trợ (Metal chỉ 1 clip_distance)";
+            err = "GL chỉ hỗ trợ 1 clip distance trên Metal (gl_ClipDistance[" +
+                  std::to_string(idx) +
+                  "]; Metal chỉ có một [[clip_distance]], mảng bị compiler từ chối)";
             return false;
         }
         out += body.substr(i, p - i);
@@ -8567,7 +8469,10 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
     // true khi #version khai báo profile "compatibility".
     bool glslCompatProfile = false;
 
-    std::string src = StripComments(glsl);
+    // Pass mức NGUỒN: chuẩn hoá các dạng GLSL mà parser của converter không
+    // chấp nhận (uniform struct array, `invariant`, SSBO unsized-array…).
+    // Xem include/tglmt/GLSLBuiltins.h.
+    std::string src = tglmt::gl::RunGLSLSourcePasses(StripComments(glsl));
     RenameCxxOnlyKeywords(src);
     // Tiền xử lý: #version, #define/#undef (object-like + function-like),
     // #ifdef/#ifndef/#else/#endif, #line (bỏ), #pragma/#extension (bỏ), precision (bỏ).
@@ -10807,6 +10712,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
     // Local (không thêm vào public struct) — detect trước, emit param ở assembly.
     bool useStencilRef = false, useSampleID = false, useSamplePos = false;
     bool useBaseInstance = false, useFragDepth = false, useSampleMask = false;
+    bool useBaseVertex = false; // gl_BaseVertex → tham số vertex [[base_vertex]]
     std::string fragDepthQualifier = "any"; // ARB_conservative_depth
     // P6f compute thread-position params (chỉ emit param khi body dùng — probe thật).
     bool useGlobalID = false, useLocalID = false, useWorkGroupID = false;
@@ -10844,10 +10750,20 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
             useBaseInstance = true;
             mpVary.emplace_back("gl_BaseInstance", "tglmt_baseInstance");
         }
-        // gl_DrawID: Metal Intel không có [[draw_index]] (probe: unknown attr) →
-        // fail trung thực tại convert thay vì lỗi MSL mơ hồ ở link.
-        if (body.find("gl_DrawID") != std::string::npos)
-            return fail("gl_DrawID ngoài subset (Metal không có [[draw_index]])");
+        // gl_BaseVertex: MSL [[base_vertex]] HỢP LỆ làm THAM SỐ HÀM vertex
+        // (probe: compile OK), KHÔNG hợp lệ trong [[stage_in]] (probe: reject)
+        // ⇒ emit thành tham số riêng — giống tglmt_baseInstance. GLSL 4.60
+        // §7.1.1 (PDF p.143-145); OpenGL 4.6 §11.1.3.9 (glspec46.core.pdf p.426).
+        if (body.find("gl_BaseVertex") != std::string::npos ||
+            rest.find("gl_BaseVertex") != std::string::npos) {
+            useBaseVertex = true;
+            mpVary.emplace_back("gl_BaseVertex", "tglmt_baseVertex");
+        }
+        // gl_DrawID: Metal KHÔNG có [[draw_index]] cho vertex function (probe:
+        // "unknown attribute 'draw_index' ignored" + "invalid type ... for input
+        // declaration") ⇒ giá trị do CPU cấp qua uniform `tglmt_DrawID`
+        // (pass "final" trong glsl_builtins_final.cpp). GLSL 4.60 §7.1.1
+        // (PDF p.143-145); OpenGL 4.6 §11.1.3.9 (glspec46.core.pdf p.426).
     } else if (R.isCompute) {
         // P6f compute: gl_*ID → kernel thread-position params (probe Metal thật OK).
         // GLSL barrier() → MSL threadgroup_barrier (shared+device visibility).
@@ -11100,6 +11016,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
     if (R.isVertex) {
         if (R.usesVertexID) mpShared.emplace_back("gl_VertexID", "tglmt_vertexID");
         if (R.usesInstanceID) mpShared.emplace_back("gl_InstanceID", "tglmt_instanceID");
+        if (useBaseVertex) mpShared.emplace_back("gl_BaseVertex", "tglmt_baseVertex");
     } else if (!R.isCompute && !R.isTessControl && !R.isTessEval) {
         if (R.usesFragCoord) mpShared.emplace_back("gl_FragCoord", "tglmt_fragCoord");
         if (R.usesPointCoord) mpShared.emplace_back("gl_PointCoord", "tglmt_pointCoord");
@@ -11981,6 +11898,7 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
         } else if (R.isVertex) {
             if (R.usesVertexID) entryBuiltins.emplace_back("tglmt_vertexID", "uint");
             if (R.usesInstanceID) entryBuiltins.emplace_back("tglmt_instanceID", "uint");
+            if (useBaseVertex) entryBuiltins.emplace_back("tglmt_baseVertex", "uint");
         } else if (!R.isCompute && !R.isTessControl && !R.isTessEval) {
             if (R.usesFragCoord) entryBuiltins.emplace_back("tglmt_fragCoord", "float4");
             if (R.usesPointCoord) entryBuiltins.emplace_back("tglmt_pointCoord", "float2");
@@ -12013,9 +11931,78 @@ GLSLConvertResult ConvertGLSLtoMSL(const std::string& glsl, uint32_t stage,
         rest = helpersMSL;
     }
 
+    std::string mslPreludeExtra;
+    // Location tạm cho biến khai báo thêm bởi pass built-in (linker gán lại
+    // số thật sau). Bắt đầu sau mọi location tạm đã cấp trước đó.
+    int nextBuiltinTempLoc = 900;
+    for (auto& v : ins) nextBuiltinTempLoc = std::max(nextBuiltinTempLoc, v.location + 1);
+    for (auto& v : outs) nextBuiltinTempLoc = std::max(nextBuiltinTempLoc, v.location + 1);
+    // ==== PASS DỊCH BUILT-IN GLSL (tự đăng ký, xem GLSLBuiltins.h) ====
+    // Chạy SAU các pass viết lại có sẵn (tên built-in GLSL còn nguyên vì
+    // RewriteIdents chỉ đổi tên định danh của APP, không đụng built-in).
+    // Điểm gắn DUY NHẤT nằm ở đây ⇒ các file built-in mới không phải sửa
+    // file này (tránh xung đột khi nhiều người làm song song).
+    {
+        std::string builtinExtra;
+        tglmt::gl::GLSLBuiltinCtx bctx;
+        bctx.body = &body;
+        bctx.helpers = &rest;
+        bctx.mslExtra = &builtinExtra;
+        bctx.mp = &mp;
+        bctx.inputs = &ins;
+        bctx.outputs = &outs;
+        bctx.uniforms = &uniforms;
+        bctx.nextTempLocation = &nextBuiltinTempLoc;
+        bctx.isVertex = R.isVertex;
+        bctx.isFragment = (!R.isVertex && !R.isCompute && !R.isTessControl && !R.isTessEval);
+        bctx.isCompute = R.isCompute;
+        bctx.isTessControl = R.isTessControl;
+        bctx.isTessEval = R.isTessEval;
+        bctx.isGeometry = (stage == 0x8DD9u);
+        tglmt::gl::RunGLSLBuiltinPasses(bctx);
+        // Pass built-in có thể THÊM uniform (gl_ModelViewMatrix, gl_Fog…)
+        // ⇒ phải TÍNH LẠI layout uniform, nếu không struct TGLMTUniforms sẽ
+        // lớn hơn buffer mà backend cấp ⇒ Metal từ chối buffer.
+        {
+            size_t off = 0;
+            for (auto& u : uniforms) {
+                if (u.isSampler) continue;
+                if (u.glslType == "sampler2D" || u.glslType == "sampler2DShadow" ||
+                    u.glslType == "samplerCube" || u.glslType == "sampler2DArray")
+                    continue;
+                size_t al = MSLAlign(u.mslType);
+                size_t sz = MSLSize(u.mslType);
+                if (!sz) continue;  // kiểu lạ ⇒ đã fail ở layout đầu tiên
+                off = (off + al - 1) & ~(al - 1);
+                u.uniformOffset = off;
+                if (u.arraySize > 0) {
+                    size_t stride = (sz + al - 1) & ~(al - 1);
+                    u.uniformSize = stride * (size_t)u.arraySize;
+                    off += u.uniformSize;
+                } else {
+                    u.uniformSize = sz;
+                    off += sz;
+                }
+            }
+            R.uniformBufferSize = (off + 15) & ~((size_t)15);
+        }
+        // Pass built-in có thể THÊM uniform (gl_DrawID/gl_NumSamples/…) — đồng bộ
+        // lại R.uniforms để link reflection thấy chúng (backend điền giá trị mỗi
+        // draw qua pr.uniformLayout, như uniform user). Offset/size đã được tính
+        // lại ở khối trên; MSL của shader không đổi (struct emit dùng `uniforms`).
+        R.uniforms = uniforms;
+        if (!builtinExtra.empty()) {
+            // Nối khối MSL thêm vào prelude (trước các struct).
+            std::ostringstream pre;
+            pre << builtinExtra;
+            mslPreludeExtra = pre.str();
+        }
+    }
+
     // Sinh MSL
     std::ostringstream msl_out;
     msl_out << "#include <metal_stdlib>\nusing namespace metal;\n";
+    if (!mslPreludeExtra.empty()) msl_out << mslPreludeExtra;
     for (auto& nm : irisInject) msl_out << "constant int " << nm << " = 0;\n";
     // GLSL nâng ngầm int→float ở builtin (sign(int), length(ivec2), max(float,int)).
     // MSL có overload float + half → int lưỡng lự = "ambiguous". Template/overload
@@ -12739,6 +12726,10 @@ inline uint4 tglmt_ldu(TGLMTAttrDesc d, uint vid, uint iid,
                    "  int tglmt_instanceID = int(tglmt_draw.baseInstance + tglmt_inst);\n"
                    "  int tglmt_baseInstance = int(tglmt_draw.baseInstance);\n"
                    "  TGLMT_VInCap _in = {};\n";
+        // VS prepass (tess/XFB) chạy như kernel compute ⇒ không có tham số
+        // [[base_vertex]]; giá trị = baseVertex của draw gốc (TGLMTDrawInfo).
+        if (useBaseVertex)
+            msl_out << "  int tglmt_baseVertex = tglmt_draw.baseVertex;\n";
         auto Swz = [](const std::string& t) -> const char* {
             if (t == "float2" || t == "int2" || t == "uint2") return "xy";
             if (t == "float3" || t == "int3" || t == "uint3") return "xyz";
@@ -12811,6 +12802,7 @@ inline uint4 tglmt_ldu(TGLMTAttrDesc d, uint vid, uint iid,
         if (R.usesVertexID) msl_out << ",\n    uint tglmt_vertexID [[vertex_id]]";
         if (R.usesInstanceID) msl_out << ",\n    uint tglmt_instanceID [[instance_id]]";
         if (useBaseInstance) msl_out << ",\n    uint tglmt_baseInstance [[base_instance]]";
+        if (useBaseVertex) msl_out << ",\n    uint tglmt_baseVertex [[base_vertex]]";
         msl_out << texParams << ") {\n  TGLMT_VOut _out = {};\n" << attrShimDecl << body << "\n"
                 << matVaryOutCopy << kZConv << "\n  return _out;\n}\n";
     } else if (R.isCompute) {

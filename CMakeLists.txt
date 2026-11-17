@@ -116,10 +116,18 @@ if(TGLMT_BUILD_TESTS)
   add_library(tglmt_test_pch OBJECT EXCLUDE_FROM_ALL tests/pch_stub.cpp)
   target_precompile_headers(tglmt_test_pch PRIVATE
     <tglmt/gl46.h> <tglmt/Context.h>)
+  # Link test với OBJECT library `tglmt_objs` (không phải archive tĩnh
+  # `tglmt`) — lld sẽ LOẠI các object chỉ chứa static-init registration của
+  # các built-in pass (src/gl/glsl_builtins_*.cpp) vì không có symbol nào được
+  # tham chiếu ⇒ mọi pass là NO-OP trong binary test ⇒ test sai (đỏ oan / xanh
+  # giả). `tglmt_objs` là OBJECT library nên mọi object đều được đưa vào link.
   foreach(T ${TGLMT_TESTS})
     get_filename_component(NAME ${T} NAME_WE)
     add_executable(${NAME} ${T})
-    target_link_libraries(${NAME} PRIVATE tglmt)
+    target_link_libraries(${NAME} PRIVATE tglmt_objs)
+    if(APPLE AND TGLMT_APPLE_METAL)
+      target_link_libraries(${NAME} PRIVATE "-framework Metal" "-framework Foundation" "-framework QuartzCore")
+    endif()
     target_precompile_headers(${NAME} REUSE_FROM tglmt_test_pch)
     target_include_directories(${NAME} PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     target_compile_definitions(${NAME} PRIVATE

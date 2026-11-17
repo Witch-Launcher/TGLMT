@@ -5,6 +5,90 @@ Mọi khẳng định phải có bằng chứng `file:line`, test ID, output th�
 
 ---
 
+## Session 2026-11-16 — FULL GLSL
+
+Mục tiêu: **GLSL đầy đủ** (OpenGL Desktop 1.0–4.6 ⇒ GLSL 110 → 460), giữ nguyên
+behavior OpenGL Desktop sau khi compile, đo được bằng **cổng convert + biên dịch
+Metal thật**.
+
+### Đã làm
+
+**1. Hạ tầng đo + cổng (verify được):**
+- `tests/shaders/glsl_coverage_cases.h` — bảng case dùng chung; mỗi case yêu cầu
+  converter không báo lỗi **và** MSL biên dịch được bằng `xcrun -sdk macosx metal -c`
+  (000+ case).
+- `tools/glsl_probe.cpp` — công cụ chẩn đoán in danh sách gap.
+- `tools/gen_glsl_builtin_funcs.py` → `tests/shaders/glsl_builtin_funcs.inc`
+  — 155 case built-in **function** (§8 GLSL 4.60), sinh tự động.
+- `tests/shaders/test_glsl_coverage.cpp` — **CTest gate** (PASS).
+
+**2. Kiến trúc "built-in pass tự đăng ký"** (để nhiều nhóm làm song song, không
+sửa `glsl_to_msl.cpp` — file ~13k dòng):
+- `include/tglmt/GLSLBuiltins.h` (+ `GLSLTextUtil.h`)
+- `src/gl/glsl_builtins_registry.cpp` — registry tự đăng ký qua static init
+  (id sort ⇒ deterministic).
+- `glsl_to_msl.cpp`: 1 điểm gắn `RunGLSLBuiltinPasses()` (sau các pass sẵn có)
+  + recompute lại uniform layout (uniform được thêm bởi pass) + `RunGLSLSourcePasses()`
+  trước parse.
+
+**3. Các nhóm built-in đã implement:**
+
+| Nhóm | File | Nội dung |
+|---|---|---|
+| fn_math | `glsl_builtins_fn_math.cpp` | modf/frexp/roundEven, pack/unpack, matrixCompMult, outerProduct, not, uaddCarry/usubBorrow/umulExtended/imulExtended, mix(bool), bitcast |
+| fn_texture | `glsl_builtins_fn_texture.cpp` | textureProj, textureProjOffset, textureProjLod, textureGatherOffsets, noise1..4, interpolateAt*, atomic counter + SSBO/UBO atomicLoad/Store, legacy texture2D*/Cube/3D |
+| modern_io | `glsl_builtins_modern_io.cpp` | gl_SampleMask/MaskIn, gl_FragDepth, gl_Layer, gl_ViewportIndex, gl_PrimitiveID |
+| legacy | `glsl_builtins_legacy.cpp` | GLSL 1.20 built-ins: gl_FrontColor/BackColor/SecondaryColor, gl_FogFragCoord, gl_ClipVertex, gl_TexCoord[N] (vec4), gl_ModelViewMatrix/ProjectionMatrix/ModelViewProjectionMatrix/NormalMatrix/TextureMatrix[8], gl_Fog, gl_ClipPlane |
+| lang | `glsl_builtins_lang.cpp` | half/f16vec, `flat` varying int, uniform array của struct (source pass), invariant (source pass), SSBO unsized-array (source pass), vec2→vec4 assignment |
+| final | `glsl_builtins_final.cpp` | gl_BaseVertex ([[base_vertex]]), gl_DrawID (CPU uniform), gl_NumSamples (CPU uniform), gl_ClipDistance[1] (honest error), TCS `gl_out` block |
+
+**4. Kết quả đo:**
+- **GLSL coverage probe: 0 → 324/324** (convert + Metal compile thật).
+  4 N/A: 3 GS case (kiểm tra ở `tests/unit/test_geometry_emulation.cpp` — có ca pixel)
+  + 1 giới hạn phần cứng (Metal chỉ 1 `[[clip_distance]]`).
+- **CTest: 214/214 PASS** (trước: 208 — thêm test coverage + builtin tests).
+- **Minecraft corpus (79 shader): MSL byte-identical** so với khi bắt đầu
+  tối ưu dịch shader.
+- `tools/gen_coverage_report.py` sinh `reports/API_COVERAGE_REPORT.md`:
+  core 5830/5830, compatibility 12446/12446 (**100%, 0 stub**).
+
+**5. CMake:** tests link `tglmt_objs` (OBJECT library) thay vì archive tĩnh
+`tglmt` — lld loại các object chỉ có static-init registration của builtin pass ⇒
+pass là no-op trong binary test. Runtime library không bị ảnh hưởng.
+
+**6. Phụ thuộc backend còn lại (chỉ directive — chưa làm):**
+- `gl_DrawID`: CPU phải ghi uniform `tglmt_DrawID` theo MultiDraw ordinal
+  (`src/gl/gl_draw.cpp:482-493` thread `order` qua `EmitDraw` → `AppleDrawGL`;
+  vòng nạp VS uniform trong `AppleDrawGL` ghi `e.loc >= 0` cho tên
+  `tglmt_DrawID`; draw đơn = 0).
+- `gl_NumSamples`: vòng nạp uniform FS: nếu `e.name == "tglmt_NumSamples"`
+  ghi `target->sampleCount()`.
+- `gl_BaseVertex`: `AppleMetalBridge.mm` truyền `baseVertex:` thật vào
+  `drawIndexedPrimitives` (thay `baseVertex:0`), và nếu program dùng
+  `[[base_vertex]]` thì đi qua đường không-idxRewrite.
+
+### NOT_VERIFIED
+- Chưa chạy trên Apple A11 thật (toàn bộ test là `REFERENCE_ONLY`/Null).
+- Corpus Minecraft MSL: byte-identical bằng cổng thủ công (dump diff), không phải
+  bằng pixel thật trên thiết bị.
+- gl_DrawID/gl_NumSamples: converter path compile OK; giá trị chưa đúng khi chạy
+  MultiDraw/fbo không đủ samples (chờ backend).
+
+### Blocker còn lại (phần khác — xem prompt cho phiên kế)
+- GLU chưa có (`glu*`).
+- Extensions: 76 extension có hàm thật chưa implement.
+- T0.7 `tglmtGetProcAddress` trả NULL cho extension chưa advertise.
+- Accumulation buffer chưa có implementation thật (chỉ có state).
+- GS còn: layered rendering (`gl_Layer` trong GS), XFB+GS, `invocations > 1`.
+- gl_FogCoord per-vertex; gl_FrontColor… trong helper fn.
+- gl_ClipDistance[1]: giới hạn phần cứng (documented, không fix được).
+
+### Bước tiếp theo
+1. Viết prompt cho phiên kế (GLU + tất cả phần còn lại) — xem báo cáo cuối.
+2. Commit trạng thái GLSL đầy đủ.
+
+---
+
 ## Session 2026-11-15 — Compatibility Profile 100 % + GS emulation + GLSL cũ + tối ưu dịch shader
 
 ### Bối cảnh
