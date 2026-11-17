@@ -66,6 +66,15 @@ Context::Context(const std::string& backend) : backendName(backend) {
     // Đếm command buffer để biết GPU còn frame nào đang bay (thay cho
     // commitAndWait mỗi frame — xem Context::ThrottleGpu).
     if (device) device->setCommandBufferCounters(&cbCommitted, &cbCompleted);
+    // Dựng gate mask mặc định (4.6 Core, khớp glMajor/glMinor/glProfile/
+    // glVersionSlot mặc định). KHÔNG có bước này thì mọi Context tạo trực tiếp
+    // (Renderer/GLFWShim, fallback context, tests) có glGateMask toàn 0 ⇒
+    // extern "C" wrapper nào cũng ghi GL_INVALID_OPERATION và bỏ qua lời gọi ⇒
+    // LWJGL thấy glGetError()!=0, majorVersion=0 ⇒
+    // "There is no OpenGL context current in the current thread".
+    // tglmtCreateContextAttribs gọi lại hàm này với version/profile thật sau
+    // khi tạo context — hàm idempotent (dựng lại mask từ đầu) nên không hỏng gì.
+    SetVersionProfile(glMajor, glMinor, glProfile, glContextFlags);
 }
 Context::~Context() {
     // Deferred IR owns an open MTLRenderCommandEncoder until a flush point.

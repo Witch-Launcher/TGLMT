@@ -20,6 +20,10 @@ Trạng thái: `[ ]` chưa làm · `[~]` đang làm · `[x]` xong (có test PASS
 - [x] **T0.4** Version-gate mọi entry point ở lớp C ABI
   → `src/gl/gl_c_exports.cpp` (sinh), `src/core/VersionGate.cpp`
   → test `test_context_version` PASS.
+  → **Fix 2026-11-17**: Context tạo trực tiếp (Renderer/GLFWShim) không dựng
+  mask ⇒ mọi lời gọi bị `GL_INVALID_OPERATION` (crash LWJGL/Minecraft).
+  Constructor dựng mask mặc định (4.6 Core). Test
+  `test_regression_default_context_gate` PASS (215/215 ctest).
 - [x] **T0.5** Public C ABI header (`gl_c_api.h`) + `getProcAddress` đầy đủ,
   gate theo version/profile.
 - [x] **T0.6** `glGetString(GL_VERSION)` / `GL_MAJOR_VERSION` / `GL_MINOR_VERSION` /

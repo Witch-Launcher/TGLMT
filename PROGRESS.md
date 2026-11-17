@@ -5,6 +5,52 @@ Mọi khẳng định phải có bằng chứng `file:line`, test ID, output th�
 
 ---
 
+## Session 2026-11-17 — Fix crash Minecraft/LWJGL "There is no OpenGL context current in the current thread"
+
+### Triệu chứng (bằng chứng người dùng cung cấp)
+- `crash-2026-11-17_14.27.15-client.txt`: `java.lang.IllegalStateException: There is no
+  OpenGL context current in the current thread.` tại `org.lwjgl.opengl.GL.createCapabilities`
+  (GlDevice.<init> ← Minecraft.<init>), device iPhone 8 Plus jailbroken iOS 16.7.16,
+  launcher Witch 0.0.5, libtglmt.dylib backend `apple`.
+- `latestlog.txt`: `[TGLMT] glerr#1..#4 code=0x502 <- _ZN5tglmt9GateCheckEi <-
+  glGetError/glGetIntegerv/glGetString` ngay sau `[TGLMT] context OK` — đúng chuỗi
+  lời gọi đầu tiên của LWJGL `createCapabilities`.
+
+### Nguyên nhân gốc (đã kiểm chứng bằng test thất bại trước khi sửa)
+- Lớp version-gate nằm ở **extern "C" wrapper** (`src/gl/gl_c_exports.cpp`, sinh tự động);
+  nó chặn mọi lời gọi khi bit của entry trong `Context::glGateMask` = 0.
+- `Context` tạo **trực tiếp** (`new Context(backend)` — đường `Renderer::Init` ←
+  `GLFWShim::CreateWindow` ← `TGLMT_CreateWindow` mà launcher dùng) **không bao giờ**
+  gọi `SetVersionProfile` ⇒ `glGateMask` giữ initializer `{0}` (`include/tglmt/Context.h:661`)
+  ⇒ mọi entry bị chặn, `glGetIntegerv(GL_MAJOR_VERSION)` không ghi data (version = 0),
+  `glGetError()` trả 0 nhưng error queue có `0x502` ⇒ LWJGL ném IllegalStateException.
+  Lớp C++ nội bộ `tglmt::gl::` không gate nên toàn bộ test cũ (gọi qua namespace đó)
+  không phát hiện được; `tglmtCreateContextAttribs` (đường versioned C ABI) thì đúng —
+  nên `test_context_version` vẫn PASS.
+- Đây **cũng** giải thích NV-12/MD-17 (`glBindBuffer` sinh `GL_INVALID_OPERATION` trong
+  `bench_runtime`, `Context ctx(backend)` trực tiếp tại `benchmarks/runtime/bench_runtime.cpp:116`).
+
+### Fix
+- `src/core/Context.cpp` — constructor `Context::Context(backend)` gọi
+  `SetVersionProfile(glMajor, glMinor, glProfile, glContextFlags)` SAU khi tạo device
+  ⇒ dựng gate mask mặc định (4.6 Core, đúng với default member initializers
+  `include/tglmt/Context.h:650-656`, giờ khớp comment "Mặc định = 4.6 Core Profile").
+  `tglmtCreateContextAttribs` gọi lại hàm này với (version, profile) thật — idempotent.
+
+### Kiểm chứng (output thật)
+- Test mới `tests/regression/test_regression_default_context_gate.cpp` (gọi PUBLIC
+  C ABI, tái tạo đúng chuỗi glGetError/glGetIntegerv/glGetString của LWJGL + fallback
+  context + ghi đè 2.1 Legacy): **FAIL trước fix** (in đúng `glerr#… code=0x502 …` như
+  device log), **PASS sau fix**.
+- `ctest -j8`: **215/215 PASS** (trước fix 214 test; +1 test mới).
+- `build-ios-pkg` (Release, iPhoneOS SDK, TGLMT_APPLE_METAL=ON) build OK — dylib
+  cho launcher link lại từ source đã sửa.
+- **Lưu ý cho launcher:** artifact `Witch.app/Frameworks/libtglmt.dylib` trong log
+  được build TRƯỚC fix — phải build lại/thay dylib rồi mới test lại trên A11.
+- NOT_VERIFIED: chưa chạy lại trên iPhone 8 Plus thật (log do người dùng cung cấp).
+
+---
+
 ## Session 2026-11-16 — FULL GLSL
 
 Mục tiêu: **GLSL đầy đủ** (OpenGL Desktop 1.0–4.6 ⇒ GLSL 110 → 460), giữ nguyên
