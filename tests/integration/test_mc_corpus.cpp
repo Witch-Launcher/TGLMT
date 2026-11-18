@@ -177,6 +177,7 @@ int main() {
         if (it != vsCache.end()) return it->second;
         std::string src = InlineImports(vsMap[name], incDir);
         if (variant) src = definesPrefix(collectMacros(src)) + src;
+    else if (src.find("PORTAL_LAYERS") != std::string::npos) src = "#define PORTAL_LAYERS 16\n" + src;
         GLuint sh = glCreateShader(0x8B31);
         const char* p = src.c_str();
         glShaderSource(sh, 1, &p, nullptr);
@@ -200,6 +201,7 @@ int main() {
         if (it != fsCache.end()) return it->second;
         std::string src = InlineImports(fsMap[name], incDir);
         if (variant) src = definesPrefix(collectMacros(src)) + src;
+    else if (src.find("PORTAL_LAYERS") != std::string::npos) src = "#define PORTAL_LAYERS 16\n" + src;
         GLuint sh = glCreateShader(0x8B30);
         const char* p = src.c_str();
         glShaderSource(sh, 1, &p, nullptr);
@@ -296,6 +298,8 @@ int main() {
         auto macros = collectMacros(base);
         for (int variant = 0; variant <= (macros.empty() ? 0 : 1); ++variant) {
             std::string src = variant ? definesPrefix(macros) + base : base;
+        if (!variant && src.find("PORTAL_LAYERS") != std::string::npos)
+            src = "#define PORTAL_LAYERS 16\n" + src;
             GLuint sh = glCreateShader(0x8B30);
             const char* p = src.c_str();
             glShaderSource(sh, 1, &p, nullptr);

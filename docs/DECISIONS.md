@@ -309,3 +309,52 @@ Foundation QuartzCore`. Runtime shared library không bị ảnh hưởng.
 
 **Bằng chứng:** CMakeLists.txt thay đổi; test `test_glsl_coverage` chuyển từ
 "đỏ oan" sang PASS thật sau sửa.
+
+
+## D-013 — GLSL frontend/backend chuyển sang glslang + SPIRV-Cross (user override A1/A2)
+
+**Ngày:** 2026-11-18. **Trạng thái:** chốt (user directive, thay ADR-001 trong
+`docs/compiler/ADR/ADR-001-glsl-frontend.md`).
+
+**Bối cảnh.** User yêu cầu nguyên văn: *"chúng ta đổi kế hoạch sang dùng
+https://github.com/KhronosGroup/glslang.git + https://github.com/KhronosGroup/SPIRV-Cross.git
+để dịch GLSLang sang Metal iOS thay vì tự viết nhé! Bạn dùng Gitnodules để trên
+Github cũng dùng repo nhé"*. Quyết định này override A1/A2 ở phần GLSL (không
+phải override lệnh cấm Mesa/Zink/MoltenVK/ANGLE).
+
+**Quyết định.**
+1. Vendor bằng git submodule (shallow): `third_party/glslang`
+   (`9dbe42fa448cb2ac35845f4a39244e4aa1f775ad`) và `third_party/SPIRV-Cross`
+   (`57e4efcc84112abcd426dc5ec248b5339bee04f2`); `.gitmodules` nằm trong repo.
+2. CMake option `TGLMT_GLSLANG_SPIRV_CROSS` (mặc định ON): build `glslang`,
+   `glslang-default-resource-limits`, `spirv-cross-msl/core/glsl`; link vào
+   `tglmt_objs`, `tglmt`, `tglmt_shared`.
+3. Backend `src/compiler/backend/glslang/GlslangBackend.cpp`
+   (`CreateGlslangCompiler()`) thay frontend tự viết cho đường dịch GLSL:
+   glslang parse/link/mapIO (`EShClientOpenGL`, SPIR-V 1.0) → SPIRV-Cross MSL 2.0.
+4. Static `libtglmt.a` trên Apple được **merge** các archive glslang/SPIRV-Cross
+   (`libtool -static` trong POST_BUILD) để app chỉ cần link một file.
+5. Converter cũ `src/gl/glsl_to_msl.cpp` tiếp tục là đường render (D-011) cho
+   tới khi glslang path có pixel/differential trên A11; shadow/validation dùng
+   glslang khi env `TGLMT_GLSLANG_SHADOW=1` (kèm `TGLMT_NEW_COMPILER_SHADOW=1`).
+
+**Bằng chứng.**
+- `tests/integration/test_glslang_spirv_cross_corpus.cpp`: 79/79 shader corpus
+  emit MSL và `xcrun -sdk macosx metal -c` chấp nhận 79/79.
+- `tests/unit/test_glslang_stage_io.cpp`: link time gán location theo tên cho
+  varying, VS output == FS input kể cả khi thứ tự khai báo khác / có output
+  không dùng.
+- `test_mc_corpus` với `TGLMT_NEW_COMPILER_SHADOW=1 TGLMT_GLSLANG_SHADOW=1`:
+  PASS, không còn shadow diagnostic.
+- iOS: `build-iphoneos` build PASS; link thử executable arm64 iOS 16 chỉ với
+  `libtglmt.a` (16.4 MB, đã merge) PASS.
+
+**Hệ quả/NOT_VERIFIED.** Chưa chạy glslang path trên A11/iOS thật; chưa có
+pixel/differential; GLSL desktop legacy (1.x compatibility) chưa verify qua
+glslang; chưa quyết định ngày mặc định thay converter cũ.
+
+**Bằng chứng:** `CMakeLists.txt`, `.gitmodules`, `third_party/glslang`,
+`third_party/SPIRV-Cross`, `src/compiler/backend/glslang/GlslangBackend.cpp`,
+`include/tglmt/compiler/backend/glslang/GlslangBackend.h`,
+`tests/integration/test_glslang_spirv_cross_corpus.cpp`,
+`tests/unit/test_glslang_stage_io.cpp`.

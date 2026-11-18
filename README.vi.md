@@ -94,3 +94,5 @@ python3 tools/gen_docs_site.py
 
 Trình sinh là nơi duy nhất định nghĩa danh sách trang; `docs/index.html` chỉ là mẫu
 giao diện. Xem [Bắt đầu](docs/vi/getting-started.md) để biết quy trình tái sinh.
+
+```Lý do tôi vẫn giữ file AGENTS.md sau khi commit là để những ai muốn đóng góp mà không có kĩ năng cũng có thể làm được việc này. ```

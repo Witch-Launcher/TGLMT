@@ -9,6 +9,7 @@ option(TGLMT_APPLE_METAL "Biên dịch AppleMetalBridge.mm (chỉ macOS/iOS)" OF
 option(TGLMT_BUILD_TESTS "Build tests" ON)
 option(TGLMT_BUILD_SHARED "Build tglmt.dylib shared cho launcher render" ON)
 option(TGLMT_FORCE_DIAG "Chẩn đoán luôn-on (máy thật; TGLMT_DIAG=1 không set được từ launcher)" OFF)
+option(TGLMT_GLSLANG_SPIRV_CROSS "Dùng glslang + SPIRV-Cross để dịch GLSL → MSL" ON)
 if(TGLMT_FORCE_DIAG)
   add_compile_definitions(TGLMT_FORCE_DIAG=1)
 endif()
@@ -48,9 +49,36 @@ endif()
 configure_file(cmake/tglmt_buildinfo.h.in ${CMAKE_BINARY_DIR}/generated/tglmt_buildinfo.h @ONLY)
 include_directories(${CMAKE_BINARY_DIR}/generated)
 
+set(TGLMT_GLSLANG_LIBS "")
+if(TGLMT_GLSLANG_SPIRV_CROSS)
+  set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
+  set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+  set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+  set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+  set(ENABLE_PCH OFF CACHE BOOL "" FORCE)
+  set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
+  add_subdirectory(third_party/glslang EXCLUDE_FROM_ALL)
+
+  set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
+  set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+  set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
+  set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
+  add_subdirectory(third_party/SPIRV-Cross EXCLUDE_FROM_ALL)
+
+  list(APPEND TGLMT_GLSLANG_LIBS glslang glslang-default-resource-limits spirv-cross-msl)
+endif()
+
 file(GLOB TGLMT_CORE CONFIGURE_DEPENDS src/core/*.cpp)
 file(GLOB TGLMT_GL CONFIGURE_DEPENDS src/gl/*.cpp)
 list(FILTER TGLMT_GL EXCLUDE REGEX ".*AppleMetalBridge.*")
+file(GLOB TGLMT_COMPILER CONFIGURE_DEPENDS src/compiler/*.cpp)
+file(GLOB TGLMT_COMPILER_IR CONFIGURE_DEPENDS src/compiler/ir/*.cpp)
+file(GLOB TGLMT_COMPILER_PASSES CONFIGURE_DEPENDS src/compiler/passes/*.cpp)
+file(GLOB TGLMT_COMPILER_BACKEND CONFIGURE_DEPENDS src/compiler/backend/metal/*.cpp)
+if(TGLMT_GLSLANG_SPIRV_CROSS)
+  file(GLOB TGLMT_COMPILER_BACKEND_GLSLANG CONFIGURE_DEPENDS src/compiler/backend/glslang/*.cpp)
+  list(APPEND TGLMT_COMPILER_BACKEND ${TGLMT_COMPILER_BACKEND_GLSLANG})
+endif()
 
 set(TGLMT_METAL src/metal/NullMetalBackend.cpp)
 if(TGLMT_APPLE_METAL AND APPLE)
@@ -65,8 +93,11 @@ endif()
 # từng target với cùng danh sách source → MỖI file .cpp biên dịch HAI LẦN
 # (một cho tglmt static, một cho tglmt_shared) → build sạch tốn ~2× thời gian.
 # Giờ biên dịch 1 lần, link ra 2 target.
-add_library(tglmt_objs OBJECT ${TGLMT_CORE} ${TGLMT_GL} ${TGLMT_METAL})
+add_library(tglmt_objs OBJECT ${TGLMT_CORE} ${TGLMT_GL} ${TGLMT_METAL} ${TGLMT_COMPILER} ${TGLMT_COMPILER_IR} ${TGLMT_COMPILER_PASSES} ${TGLMT_COMPILER_BACKEND})
 target_include_directories(tglmt_objs PUBLIC include)
+if(TGLMT_GLSLANG_SPIRV_CROSS)
+  target_link_libraries(tglmt_objs PUBLIC ${TGLMT_GLSLANG_LIBS})
+endif()
 set_target_properties(tglmt_objs PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # glsl_to_msl.cpp biên dịch -O3 mất ~29s (file này có MỘT hàm ConvertGLSLtoMSL
@@ -79,6 +110,17 @@ set_source_files_properties(src/gl/glsl_to_msl.cpp PROPERTIES COMPILE_OPTIONS "-
 
 add_library(tglmt STATIC $<TARGET_OBJECTS:tglmt_objs>)
 target_include_directories(tglmt PUBLIC include)
+if(TGLMT_GLSLANG_SPIRV_CROSS)
+  target_link_libraries(tglmt PUBLIC ${TGLMT_GLSLANG_LIBS})
+  if(APPLE)
+    add_custom_command(TARGET tglmt POST_BUILD
+      COMMAND libtool -static -o ${CMAKE_CURRENT_BINARY_DIR}/libtglmt_merged.a
+              $<TARGET_FILE:tglmt> $<TARGET_FILE:glslang> $<TARGET_FILE:glslang-default-resource-limits> $<TARGET_FILE:spirv-cross-msl> $<TARGET_FILE:spirv-cross-core> $<TARGET_FILE:spirv-cross-glsl>
+      COMMAND ${CMAKE_COMMAND} -E rename ${CMAKE_CURRENT_BINARY_DIR}/libtglmt_merged.a
+              $<TARGET_FILE:tglmt>
+      VERBATIM)
+  endif()
+endif()
 
 if(APPLE AND TGLMT_APPLE_METAL)
   target_link_libraries(tglmt PUBLIC "-framework Metal" "-framework Foundation" "-framework QuartzCore")
@@ -89,6 +131,9 @@ endif()
 if(TGLMT_BUILD_SHARED)
   add_library(tglmt_shared SHARED $<TARGET_OBJECTS:tglmt_objs>)
   target_include_directories(tglmt_shared PUBLIC include)
+  if(TGLMT_GLSLANG_SPIRV_CROSS)
+    target_link_libraries(tglmt_shared PRIVATE ${TGLMT_GLSLANG_LIBS})
+  endif()
   set_target_properties(tglmt_shared PROPERTIES
     OUTPUT_NAME tglmt
     VERSION ${PROJECT_VERSION}
@@ -139,6 +184,11 @@ if(TGLMT_BUILD_TESTS)
     # mạnh nhất của repo (blend, msaa, raster, rop, spirv chain, tess...).
     add_test(NAME ${NAME} COMMAND ${NAME} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
   endforeach()
+
+  if(TARGET test_mc_corpus)
+    set_tests_properties(test_mc_corpus PROPERTIES
+      ENVIRONMENT "TGLMT_NEW_COMPILER_SHADOW=1")
+  endif()
 
   # Diagnostic runtime probe for known static gaps (not a CTest gate).
   add_executable(truth_probe tests/truth/probe_gaps.cpp)

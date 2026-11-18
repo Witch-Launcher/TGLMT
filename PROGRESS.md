@@ -3,6 +3,311 @@
 Trạng thái công việc. **Cập nhật cuối mỗi session** (đọc `AGENTS.md` §3).
 Mọi khẳng định phải có bằng chứng `file:line`, test ID, output thật.
 
+## Session 2026-11-18c — GLSL→MSL bằng glslang + SPIRV-Cross (git submodules)
+
+### Quyết định và dependency
+- User directive: đổi từ frontend tự viết sang **glslang + SPIRV-Cross**, dùng
+  git submodule. Ghi nhận `docs/DECISIONS.md` **D-013**, `AGENTS.md` A11,
+  `docs/compiler/ADR/ADR-007-glslang-spirv-cross.md` (supersedes ADR-001).
+- Submodule shallow: `third_party/glslang` @ `9dbe42fa448cb2ac35845f4a39244e4aa1f775ad`,
+  `third_party/SPIRV-Cross` @ `57e4efcc84112abcd426dc5ec248b5339bee04f2`;
+  `.gitmodules` đã có.
+- `CMakeLists.txt`: option `TGLMT_GLSLANG_SPIRV_CROSS` (ON) + `glslang`,
+  `glslang-default-resource-limits`, `spirv-cross-msl/core/glsl`; include path
+  lấy từ target glslang. Static `libtglmt.a` trên Apple merge archive bằng
+  `libtool -static` POST_BUILD (self-contained, không cần app link thêm lib).
+
+### Backend mới (`src/compiler/backend/glslang/GlslangBackend.cpp`)
+- `CreateGlslangCompiler()`: `TShader` (EShClientOpenGL, target OpenGL 4.50,
+  SPIR-V 1.0) → parse → `TProgram::link` → `mapIO` → `GlslangToSpv` →
+  `spirv_cross::CompilerMSL` (MSL 2.0) → MSL; reflection từ
+  `get_shader_resources()`; diagnostics `GLS-001/002/003`.
+- Chuẩn hóa source trước parse (tương thích preprocessor thực tế):
+  - dời `#define`/`#extension` trước `#version` xuống sau `#version`;
+  - bỏ `#version` lặp từ `#moj_import` đã inline;
+  - dedupe uniform/buffer block và function body trùng hệt (import lặp).
+- Giữ SPIR-V trong `ShaderCompileResult::spirv`; `linkProgram` hợp nhất tên
+  varying VS-output + FS-input, gán location theo tên (không theo thứ tự khai
+  báo) rồi **emit lại MSL** cho cả stage. `ProgramLinkResult::stages` trả stage
+  đã re-emit. Điều này sửa lỗi VS/FS khai báo varying khác thứ tự hoặc VS có
+  output không dùng → location vẫn khớp.
+
+### Test mới / chạy thật
+| Test | Kết quả |
+|---|---|
+| `tests/integration/test_glslang_spirv_cross_corpus.cpp` | 79/79 shader emit MSL và `xcrun -sdk macosx metal -c` PASS (16.37s, 8 worker) |
+| `tests/unit/test_glslang_stage_io.cpp` | PASS; varying lệch thứ tự + `aUnused` output: location VS output == FS input sau link |
+| `test_mc_corpus` với `TGLMT_NEW_COMPILER_SHADOW=1 TGLMT_GLSLANG_SHADOW=1` | PASS (`pairs=35 ok=35 variants=40 linkFail=0`), không còn shadow diagnostic |
+| `test_compiler_msl_metal_corpus` (frontend tự viết) | 79/79 PASS (14.60s) |
+| `test_compiler_new_pipeline_corpus` | 79 file / 158 biến thể PASS |
+| `test_compiler_link_interface` | PASS |
+
+- Shadow chọn backend bằng env `TGLMT_GLSLANG_SHADOW=1` (`src/gl/gl_shader.cpp`
+  `MakeShadowCompiler()`), vẫn cần `TGLMT_NEW_COMPILER_SHADOW=1`.
+- iOS: `cmake -S . -B build-iphoneos -DCMAKE_TOOLCHAIN_FILE=apps/aquarium/ios_toolchain.cmake
+  -DTGLMT_BUILD_TESTS=OFF` + build PASS; `build-iphoneos/libtglmt.a` = 16.4 MB
+  (đã merge glslang/SPIRV-Cross); link thử executable arm64 iOS 16 chỉ với
+  `libtglmt.a` + Metal/Foundation/QuartzCore → PASS. Trước đó phát hiện host
+  đang lấy header glslang từ `/usr/local/include` → đổi sang `#include <SPIRV/GlslangToSpv.h>`
+  để dùng đúng submodule (iOS đã fail nếu không đổi).
+
+### Đĩa / full test
+- Build-work từng đầy đĩa do ~227 test binary × ~25 MB. Đã build từng target
+  rồi `strip -x` ngay (giữ object/CMake cache), sau đó chạy full:
+  **227/227 PASS, 190.77s serial** (`ctest --test-dir build-work`), gồm
+  `test_glslang_spirv_cross_corpus` 6.79s và toàn bộ `test_mc_*` 17/17.
+- Đĩa sau test: ~1.1 GB trống (31 GB, 97% used) — cần dọn trước build sạch
+  tiếp theo.
+
+### NOT_VERIFIED
+- Chưa chạy glslang path trên **A11/iOS 16 thật**; chưa có pixel/differential.
+- Chưa verify GLSL legacy/compatibility (`#version 120`…) qua glslang +
+  SPIRV-Cross; mới đo corpus Minecraft 330 core.
+- Converter cũ vẫn là đường render (D-011); chưa chuyển mặc định sang glslang.
+
+---
+
+## Session 2026-11-18b — MSL backend thật từ structured IR + shadow link + tối ưu lexer
+
+### MSL backend thật (structured IR → MSL)
+- `src/compiler/backend/metal/MSLBackend.cpp` viết lại: emit từ `IRExpr/IRStmt` (không còn skeleton), entry point VS/FS/compute, helper functon nhận thêm uniform/storage/sampler/image params (`extraArgs`), mutable global → entry local + `thread T&` param, local rename theo scope (`tglmt_l_*`) để tránh GLSL cho phép biến trùng tên hàm (`transparency.fsh`), cast numeric theo kiểu biểu thức (binary/ternary/assign/ctor/arg), matrix resize helper `tglmt_matCxR_from_matSxR` (MSL không có `float4x4(float2x2)`), `radians`/`degrees` helper (MSL không có builtin), vertex attribute qua `TglmtVSIn [[stage_in]] [[attribute(n)]]` (MSL từ chối attribute trực tiếp trên tham số).
+- `src/compiler/ir/AstToIR.cpp`: dedupe struct/resource/function (corpus import lặp `projection.glsl`); `src/compiler/Semantic.cpp`: function trùng signature vẫn được check body (trước đó return sớm làm thiếu `exprTypes` → emit sai kiểu).
+- `include/tglmt/compiler/ShaderIR.h`: `Type` copyable (clone `Member` unique_ptr) + `operator==`; `ShaderCompileResult.stage`.
+- `src/compiler/Compiler.cpp`: fill `inputs/outputs/uniforms/samplers/images` từ IR; `RealCompiler::linkProgram` kiểm tra interface VS→FS (`LNK-001` thiếu output, `LNK-002` sai kiểu).
+
+### Test mới (PASS)
+- `tests/integration/test_compiler_msl_metal_corpus.cpp` — 79/79 shader corpus emit MSL và **`xcrun -sdk macosx metal -c` chấp nhận 79/79**; chạy 8 worker song song (25.54s → **6.21s**). Nhãn môi trường: `OTHER_GPU` (macOS Metal toolchain), **không** phải A11.
+- `tests/unit/test_compiler_link_interface.cpp` — interface khớp PASS; sai kiểu ⇒ `LNK-002`; thiếu output ⇒ `LNK-001`.
+- Shadow link trong GL lifecycle: `src/gl/gl_shader.cpp` `ShadowValidateLink()` + `include/tglmt/ShadowCompiler.h`, gọi ở `src/gl/gl_program.cpp` khi env `TGLMT_NEW_COMPILER_SHADOW=1`. `test_mc_corpus` (có env): **0 shadow link failure**.
+
+### Tối ưu thời gian biên dịch (đo bằng `/tmp/bench_compiler.cpp`, corpus 79 shader, 5 lần ổn định)
+| Pha | Trước | Sau |
+|---|---|---|
+| preprocess | 5.5ms | ~6ms |
+| lex | **461.8ms** | **~42ms** |
+| parse | 19.3ms | ~16ms |
+| semantic | 70.3ms | ~62–73ms (reserve `exprTypes`) |
+| ast→ir | 8.8ms | ~8–10ms |
+| passes | 0.3ms | 0.3ms |
+| MSL emit | 11.6ms | ~11–13ms |
+| **tổng corpus** | **577.6ms** (median 5.37ms/shader) | **~148ms** (median ~1.89ms/shader) — **3.9×** |
+
+- Nguyên nhân chính: `Lexer::locationAt()` quét từ đầu source cho **mỗi token** ⇒ O(n²). Thay bằng line-start index + `upper_bound` (`src/compiler/Lexer.cpp`), reserve token vector; keyword so sánh `string_view` (bớt 1 cấp allocation).
+- iOS build guard: `MSLBackend::hasMetal/compileToMetallib` chỉ dùng `system`/`popen`/xcrun khi `TARGET_OS_OSX`; iOS trả diagnostic `MTL-004` (dùng runtime Metal library), verify bằng `xcrun --sdk iphoneos clang++ ... -c MSLBackend.cpp` → rc=0.
+- `ctest` serial: **225/225 PASS, 115.30s** (trước 243.76s cùng ngày khi MSL test chạy tuần tự; phần lớn chênh lệch do test MSL song song + tải máy).
+- Chưa tối ưu semantic sâu hơn (62–73ms) và chưa cache metallib runtime.
+
+### NOT_VERIFIED
+- Chưa chạy MSL mới trên **A11/iOS 16 thật** (chỉ `xcrun metal` macOS = `OTHER_GPU`); pixel/differential chưa có.
+- Pass ConstantFolding/DCE/Canonicalization/LayoutLowering vẫn là đệm; layout std140 tổng quát chưa lower (mới đúng cho corpus).
+
+---
+
+## Session 2026-11-18 — Corpus Minecraft 79/79 qua pipeline mới + shadow validation trong GL lifecycle
+
+### Môi trường và baseline (đã verify)
+- macOS 15.7.7 (Darwin 24.6.0), Xcode 26.3, cmake/clang/xcrun metal. Nhánh `main`, HEAD `bc528d5` (không commit/push).
+- Build: `cmake -S . -B build-work -DCMAKE_BUILD_TYPE=Debug -DTGLMT_APPLE_METAL=ON` → OK. Backend Null.
+- `ctest --timeout 600` (serial): **223/223 PASS**, 85.72 sec. `ctest -j8` có flaky riêng `test_glsl_coverage`/`test_glsl_builtin_modern_io` (fail dưới tải, chạy riêng PASS) — sẽ mở issue.
+- Đã xoá file rác `x.h` (untracked, nội dung `int x;`). Dọn `/`: `~/Library/Caches/vscode-cpptools` (3.2G), antigravity ShipIt (613M), Firefox/Spotify cache → trống 1.4GB → 5.6GB.
+
+### Fix để đạt 79/79 corpus (`tests/corpus/mc-26.1.2-shaders`)
+- Lexer: skip **nhiều comment liên tiếp** trong `tokenize()` (trước đó chỉ skip 1 lần → comment thứ 2 bị tokenize thành `Slash`/`Ident`) — `src/compiler/Lexer.cpp:411`; token riêng cho `&&`/`||`/`^^` (`AmpAmp`/`BarBar`/`CaretCaret`) — `Lexer.cpp:332`.
+- Parser: thêm `parseShift` (`<<`/`>>`) — `Parser.cpp:813`; logical dùng `AmpAmp`/`BarBar` + `parseLogicalXor` — `Parser.cpp:699,712`; qualifier mở rộng (`const`/`attribute`/`varying`/`shared`/`readonly`/...) trước và sau `layout`; instance name của interface block — `Parser.cpp:294`; array constructor `T[](args)`/`T[N](args)`; for-init declaration — `Parser.cpp:620`; postfix `++`/`--`.
+- AST (`include/tglmt/compiler/AST.h`): thêm `loopInitDecl`, `ctorIsArray`/`ctorArraySize`, `blockInstanceName`.
+- Semantic (`src/compiler/Semantic.cpp`): implicit numeric conversion đúng GLSL §4.1.10 (int→uint/float/double, ivecN→uvecN/vecN, float→double) trong `RankConversion` — `Semantic.cpp:67-83`; `checkBinary` promote ivecN/int→vecN/float khi operand kia là float và xử lý matrix/vector (`asFloatVec`); **sampler type tracking** `samplerDim`/`samplerScalar`/`isShadow` trong `ResolvedType` + so sánh + parse suffix (`Semantic.h`, `Semantic.cpp:48,211+`); overload `textureProj`, `textureLod/textureGrad(sampler2D)`, `texelFetch(isamplerBuffer,int)→ivec4`, `texelFetch` 2D/2DArray i/u; dedicated `texture` sampler2D/cube/3D/2DArray; function trùng signature y hệt (import lặp `projection.glsl`) được coi như prototype (không còn SEM-001/SEM-008); swizzle/`structFields_`/interface instance đã xử lý từ trước.
+- Không đổi MSL backend (vẫn skeleton).
+
+### Test mới (PASS)
+- `tests/integration/test_compiler_new_pipeline_corpus.cpp` — compile 79 file (`core/`+`post/`) × 2 biến thể (base + all-on, prepend `PORTAL_LAYERS=16` như Iris) qua `tglmt::compiler::CreateCompiler()`; in diagnostics kèm `line`. **PASS 1.82s**, CTest #10. Kỳ vọng `files>=70`.
+- `tests/unit/test_semantic.cpp:98` — đổi ca "pow2(ivec3) phải fail" → "pow2(bvec3) phải fail": GLSL §4.1.10 cho phép implicit `ivec3→vec3` nên `pow2(ivec3)` hợp lệ (test cũ khẳng định sai spec).
+- `tests/integration/test_mc_corpus.cpp:180,204,301` — base variant prepend `#define PORTAL_LAYERS 16` (Iris luôn define runtime cho portal program), giữ all-on như cũ.
+
+### Shadow validation trong GL lifecycle (chưa đổi đường render)
+- `src/gl/gl_shader.cpp:35` `ShadowValidateCompile()` + gate env `TGLMT_NEW_COMPILER_SHADOW=1` (`gl_shader.cpp:18`), gọi **sau khi converter cũ compile OK** — `gl_shader.cpp:142`; chỉ ghi stderr `[TGLMT shadow]`, không ảnh hưởng `compiled`/`infoLog`/MSL.
+- `CMakeLists.txt`: `set_tests_properties(test_mc_corpus ENVIRONMENT "TGLMT_NEW_COMPILER_SHADOW=1")` → CTest chạy shadow thật.
+- Kết quả `test_mc_corpus` có shadow: `pairs=35 ok=35 variants=40 convertFail=0 linkFail=0 post=9/9` — **0 shadow failure**.
+- **Đã nối** `linkProgram` shadow ở session tiếp theo (xem mục 2026-11-18b ngay trên).
+
+### NOT_VERIFIED (mới)
+- Chưa chạy Apple A11 / pixel thật (giữ nguyên).
+- MSL backend vẫn skeleton (uniform struct rỗng, `main` trả dummy) ⇒ output pipeline mới **chưa render được**; shadow chỉ kiểm tra frontend→IR→backend build.
+- Passes ConstantFolding/DCE/Canonicalization/LayoutLowering vẫn đệm (chưa sinh IR thật).
+- Shadow link VS/FS interface chưa kiểm tra; swap/discard/geometry/tess/compute semantics chưa đối chiếu pixel.
+
+### Bước tiếp theo
+1. MSL backend thật (emit biến/giá trị/điều khiển/texture/UBO theo IR) + `xcrun metal -c` trên corpus.
+2. Link shadow (`ProgramLinkRequest` từ kết quả shadow compile, kiểm tra VS/FS varying/texture/buffer) + bật trong `glLinkProgram`.
+3. Implement chi tiết passes (constant folding SSA, DCE, canonicalization, layout lowering).
+4. Đo benchmark A8 (runtime MSL vs precompile+cache) sau khi pixel test đúng.
+5. Chạy pixel differential trên máy Mac (OTHER_GPU) và iPhone A11 khi có thiết bị.
+
+---
+
+## Session 2026-11-17 — Compiler pipeline mới: preprocessor + parser + semantic + IR + passes + MSL backend + Compiler wiring (tất cả PASS)
+
+### Môi trường và baseline (đã verify)
+- macOS 15.7.7 (Darwin 24.6.0), Xcode 26.3 (build 17C529), cmake, clang, xcrun metal có sẵn.
+- Nhánh `main`, HEAD `bc528d5`. Dirty: `AGENTS.md`, `PROGRESS.md`, `TODO.md`, `CMakeLists.txt`; `x.h` untracked.
+- Build: `cmake -S . -B build-work -DCMAKE_BUILD_TYPE=Debug -DTGLMT_APPLE_METAL=ON` → OK.
+- `ctest -j8`: **222/222 PASS**, thời gian ~12-98 sec tùy suite. Nhãn môi trường `OTHER_GPU`/`REFERENCE_ONLY` (không có thiết bị iOS/A11).
+- Disk: `/` còn ~2.1GB, `/Volumes/project` còn ~4.3GB → reuse `build-work`, không tạo build dir mới.
+
+### Mã nguồn compiler mới (src/compiler/, include/tglmt/compiler/)
+- `include/tglmt/compiler/ir/IR.h` — Typed IR: IRType (Scalar/Vector/Matrix/Array/Struct/Sampler/Image/AtomicCounter/Void), IRValue, IROp (số học, so sánh, logic, convert, vector, matrix, call, control flow, texture/image/atomic/memory/gep), IRInstruction, IRBasicBlock, IRFunction, IRModule (resources: uniforms/samplers/images/atomicCounters/storageBlocks/inputs/outputs, stage I/O, tess/compute), IRVerifyResult + verifyModule/verifyFunction/verifyBlock.
+- `include/tglmt/compiler/ir/AstToIR.h` + `src/compiler/ir/AstToIR.cpp` — Chuyển AST (đã semantic) sang IRModule: AstType→IRType, biểu thức (literal/identifier/binary/unary/call/constructor/member/swizzle/index/ternary) → SSA instruction, lenh (block/declaration/expression/return/discard/if) → instruction, resources (uniform/bien toan cuc) → IRResource, hàm → IRFunction.
+- `include/tglmt/compiler/passes/Pass.h` — Base pass: PassResult (OK/Error/Skipped), PassInfo, Pass::run/applicable.
+- `include/tglmt/compiler/passes/ConstantFolding.h` + `src/compiler/passes/ConstantFolding.cpp` — Pass constant folding (đang đệm OK, chưa sinh instruction hằng).
+- `include/tglmt/compiler/passes/DCE.h` + `src/compiler/passes/DCE.cpp` — Pass Dead Code Elimination (đang đệm OK).
+- `include/tglmt/compiler/passes/Canonicalization.h` + `src/compiler/passes/Canonicalization.cpp` — Pass canonicalization (switch→if, for→while, normalize).
+- `include/tglmt/compiler/passes/LayoutLowering.h` + `src/compiler/passes/LayoutLowering.cpp` — Pass layout lowering (descriptor set/slot, location remap).
+- `include/tglmt/compiler/backend/metal/MSLBackend.h` + `src/compiler/backend/metal/MSLBackend.cpp` — MSL backend: emitMSL (uniform struct, entry point vertex/fragment/compute), compileToMetallib (xcrun metal -c), build (IR→MSL→metallib), typeName/storageQualifier/interpolationQualifier/escapeMSL, hasMetal (xcrun check).
+- `src/compiler/Compiler.cpp` — `RealCompiler` thay `StubCompiler`: pipeline đầy đủ preprocess (Preprocessor) → lex (Lexer) → parse (Parser+AST) → semantic (SemanticAnalyzer) → AST→IR → passes (ConstantFolding, DCE, Canonicalization, LayoutLowering, verify sau mỗi pass) → MSL backend (MSLBackend, emitSourceOnly). `linkProgram` gộp diagnostics từ stages. `CreateCompiler()` trả `RealCompiler`.
+- `include/tglmt/compiler/Lexer.h` + `src/compiler/Lexer.cpp` — lexer GLSL (xong trước, test pass).
+- `include/tglmt/compiler/Preprocessor.h` + `src/compiler/Preprocessor.cpp` — preprocessor chuẩn (xong trước, test pass).
+- `include/tglmt/compiler/AST.h` + `src/compiler/Parser.cpp` — parser/AST GLSL (xong trước, test pass).
+- `include/tglmt/compiler/Semantic.h` + `src/compiler/Semantic.cpp` — semantic/type-checker/overload (xong trước, test pass, đã fix bug `pow2(ivec3)` fail rõ SEM-008).
+- `include/tglmt/compiler/ShaderIR.h` — IR core: SourceLocation/Span, Diagnostic, Type, Variable, Function, ShaderStage, GlslProfile, GLSLVersion, ShaderCompileResult, ProgramLinkResult, Compiler interface + `CreateCompiler()` factory.
+- CMakeLists.txt: thêm `TGLMT_COMPILER_IR`, `TGLMT_COMPILER_PASSES`, `TGLMT_COMPILER_BACKEND` globs vào `tglmt_objs`.
+- **Quy tắc AGENTS.md §2/#6 tuân thủ:** không comment trong source mới (đã strip tất cả `//` và `/* */`).
+
+### Test mới (tất cả PASS)
+- `tests/unit/test_lexer.cpp` — **PASS**.
+- `tests/unit/test_preprocessor.cpp` — **PASS**.
+- `tests/unit/test_parser.cpp` — **PASS**.
+- `tests/unit/test_semantic.cpp` — **PASS** (đã fix `pow2(ivec3)` → SEM-008 no viable overload, SEM-009 init type mismatch).
+- `tests/regression/test_regression_shaderpack_return_type.cpp` — **PASS**.
+- `tests/regression/test_regression_shaderpack_iris_entity.cpp` — **PASS**.
+- `tests/regression/test_regression_shaderpack_helper_overload.cpp` — **PASS**.
+- `ctest -j8`: **222/222 PASS** (0 fail, 0 skip). Không regression.
+
+### NOT_VERIFIED (chưa làm trong phiên này)
+- Chưa chạy trên Apple A11 thật (iPhone 8/X, iOS 16).
+- Compiler mới chưa nối vào `glCompileShader`/`glLinkProgram` (vẫn dùng converter cũ `src/gl/glsl_to_msl.cpp` qua GL dispatch). `CreateCompiler()` trả `RealCompiler` nhưng GL lifecycle chưa gọi nó.
+- Passes (ConstantFolding, DCE, Canonicalization, LayoutLowering) hiện tại đệm `PassResult::OK` chưa sinh IR thật — cần implement chi tiết.
+- Minecraft/Iris shaderpack pixel test chưa chạy trên Metal thật.
+
+### Bước tiếp theo
+1. Implement chi tiết passes: ConstantFolding (tính hằng số SSA), DCE (xóa instruction không dùng), Canonicalization (switch→if, for→while), LayoutLowering (assign buffer/texture/sampler slot, location remap).
+2. Nối `CreateCompiler()` thật vào `glCompileShader`/`glLinkProgram` (`src/gl/gl_shader.cpp`, `src/gl/gl_program.cpp`), giữ converter cũ làm fallback (D-011).
+3. Sửa shaderpack regressions (pow2, iris_Entity, dayBlend) qua pipeline mới + Metal compile thật.
+4. Mở rộng test (corpus, differential, pixel) + Minecraft/Iris shaderpack.
+5. Tối ưu hiệu năng sau khi đúng (A8 theo benchmark, không trước khi regression đúng).
+
+---
+
+## Session 2026-11-17 — Phase 0 reconnaissance + nền tảng compiler mới + regression tests
+
+### Môi trường và baseline (đã verify)
+- macOS 15.7.7 (Darwin 24.6.0), Xcode 26.3 (build 17C529), cmake, clang, xcrun metal có sẵn.
+- Nhánh `main`, HEAD `bc528d5`, đồng bộ `origin/main`. Dirty: `AGENTS.md`, `PROGRESS.md`, `TODO.md`; `x.h` untracked.
+- Build: `cmake -S . -B build-work -DCMAKE_BUILD_TYPE=Debug -DTGLMT_APPLE_METAL=ON` → OK.
+- `ctest -j8` baseline: **215/215 PASS**, thời gian 58.36 sec. Nhãn môi trường `OTHER_GPU`/`REFERENCE_ONLY` (không có thiết bị iOS/A11).
+- Xem `docs/audit/BASELINE.md` cho chi tiết toolchain/build/test.
+
+### Tài liệu audit mới (docs/audit/)
+- `REPOSITORY_MAP.md` — bản đồ module (include, src/core, src/gl, src/metal, tests, tools, docs).
+- `BASELINE.md` — môi trường, branch/HEAD, build, ctest baseline, trạng thái kiến trúc, ISS-001..ISS-004, NOT_VERIFIED.
+- `OPEN_ISSUES.md` — 17 issue (P0×4, P1×6, P2×5, P3×1) với ID, severity, file/symbol, bằng chứng, cách tái hiện, ảnh hưởng, nguyên nhân gốc, test cần-add, trạng thái. ISS-001 là nguyên nhân gốc chung (string rewriter không AST/type system).
+- `FEATURE_INVENTORY.md` — ma trận OpenGL 1.0–4.6 × Core/Compat từ `data/version_inventory.json` (1048 lệnh: Core 657, Compat 1048), trạng thái nhóm chức năng, GLSL version matrix, extension.
+
+### Kiến trúc compiler mới (ADR, docs/compiler/ADR/)
+- `ADR-001-glsl-frontend.md` — chọn custom AST frontend + typed IR + MSL backend (không glslang/SPIR-V làm đường chính), lý do A1/A2, GLSL desktop vs Vulkan semantic, migration giữ converter cũ làm fallback (D-011).
+- `ADR-002-primary-ir.md` — typed IR nội bộ làm primary IR, SPIR-V chỉ cross-check/tùy chọn.
+- `ADR-003-msl-backend.md` — MSL backend riêng từ IR nội bộ, SPIRV-Cross chỉ cross-check.
+- `ADR-004-resource-binding-abi.md` — mapping GL location/binding → Metal slot (attribute, varying, fragment output, UBO/SSBO/image/atomic/sampler).
+- `ADR-005-double-int64.md` — double/int64 UNSUPPORTED trong shader compile, fail rõ không silent cast.
+- `ADR-006-geometry-tessellation-emulation.md` — GS compute-kernel emulation (giữ D-008), gap chưa hỗ trợ fail rõ tại link.
+
+### Mã nguồn compiler mới (src/compiler/, include/tglmt/compiler/)
+- `include/tglmt/compiler/ShaderIR.h` — IR core: SourceLocation/Span, Diagnostic, Type, Variable, Function, ShaderStage, GlslProfile, GLSLVersion, ShaderCompileResult, ProgramLinkResult, Compiler interface + `CreateCompiler()` factory.
+- `include/tglmt/compiler/Lexer.h` + `src/compiler/Lexer.cpp` — lexer GLSL với source location (file/line/column/offset), từ khóa GLSL + built-in gl_*, numeric literal (int/uint/float/double/hex), comment (line/block), chuỗi, EOF, lỗi lex.
+- `src/compiler/Compiler.cpp` — `CreateCompiler()` trả `StubCompiler` (lỗi trung thực `TGLMT-COMPILER-0001/0002`, không silent success) làm integration point trong giai đoạn migration.
+- CMakeLists.txt: thêm `file(GLOB TGLMT_COMPILER src/compiler/*.cpp)` vào `tglmt_objs`.
+
+### Test mới (tất cả PASS, ctest 219/219)
+- `tests/unit/test_lexer.cpp` — tokenization, ident/keyword/punctuation, numeric literal, comment bỏ qua, unterminated string lỗi, source location, EOF. **PASS**.
+- `tests/regression/test_regression_shaderpack_return_type.cpp` — pow2 overload (vec3 → float3, int literal → int). **PASS**.
+- `tests/regression/test_regression_shaderpack_iris_entity.cpp` — iris_Entity active attribute, location, forceUnsignedAttr (uint class), MSL TGLMT_VIn có field. **PASS**.
+- `tests/regression/test_regression_shaderpack_helper_overload.cpp` — dayBlend 3-param OK, 2-param overload OK, 1-param fail rõ arity. **PASS**.
+- `ctest -j8`: **219/219 PASS** (215 cũ + 4 mới), 0 fail, 0 skip. Không regression.
+
+### NOT_VERIFIED (chưa làm trong phiên này)
+- Chưa chạy trên Apple A11 thật (iPhone 8/X, iOS 16).
+- Compiler mới cònStub: frontend (preprocessor/parser/AST), semantic/type-checker, passes, IR verifier, MSL backend chưa triển khai.
+- glCompileShader/glLinkProgram vẫn dùng converter cũ (`src/gl/glsl_to_msl.cpp`).
+- Minecraft/Iris shaderpack pixel test chưa chạy trên Metal thật.
+
+### Bước tiếp theo (Milestone B/C)
+1. Triển khai preprocessor + parser + AST (`src/compiler/Preprocessor.*`, `AST.*`).
+2. Semantic analysis / type-checker / overload resolver (`src/compiler/Semantic.*`).
+3. Typed IR + verifier + passes (`src/compiler/ir/`, `src/compiler/passes/`).
+4. MSL backend (`src/compiler/backend/metal/`) + compile bằng `xcrun metal -c`.
+5. Nối `CreateCompiler()` thật vào `glCompileShader`/`glLinkProgram` (`src/gl/gl_shader.cpp`, `src/gl/gl_program.cpp`).
+6. Audit OpenGL API 1.0–4.6 + version/profile/capability consistency (ISS-006..ISS-016).
+
+---
+
+### Kết luận từ log người dùng
+
+- `latestlog 2.txt:596-597`: context tạo thành công, backend `apple`; Minecraft
+  chạy và render. Dòng 607 báo chưa chọn pack ở thời điểm khởi động, nhưng sau đó
+  log ghi người dùng chọn shaderpack và Iris bắt đầu tạo pipeline.
+- `latestlog 2.txt:1957`: `ComplementaryReimagined_r5.9.3` bị Metal từ chối MSL:
+  hàm trả `int` nhưng `return pow2(x) * float3(x)` trả `float3`. Đây là lỗi output
+  MSL đã xác nhận. Chưa có source GLSL gốc nên chưa xác định được chính xác pass
+  nào làm sai hoặc input shader có hợp lệ không.
+- `latestlog 2.txt:2294` và `2812`: các pack BSL/MakeUp gặp MSL gọi
+  `_in.iris_Entity` trong khi struct `TGLMT_VIn` không khai báo field đó. Lỗi
+  stage input không nhất quán đã xác nhận; source pack để tái hiện chính xác chưa
+  có trong repo.
+- `latestlog 2.txt:2508`: `E-LITE` bị converter từ chối với
+  `helper dayBlend sai arity (co 3)`. Sinh từ helper-call analysis của TGLMT;
+  chưa kết luận là false positive khi chưa có source sau preprocess.
+- Việc thêm `gl*` API không sửa các lỗi trên: `src/gl/gl_shader.cpp:89-93` gọi
+  converter text và đặt compile status theo kết quả đó; `src/gl/gl_program.cpp:1691-1704`
+  cùng `src/metal/AppleMetalBridge.mm:1783-1802` mới gọi compiler Metal lúc link.
+  Converter hiện phân tích helper arity (`src/gl/glsl_to_msl.cpp:7486-7490`,
+  `7736-7740`) và lọc input bằng quét text (`11500-11573`) trước khi sinh
+  `TGLMT_VIn` (`12234-12241`). API inventory do đó không đo được độ đúng GLSL.
+- `docs/GLSL_460_COMPILER.md` mô tả converter dạng rewrite text, không có AST/type
+  system; log thực tế xác nhận rủi ro đó. Test curated `test_glsl_coverage` không
+  thay thế shaderpack corpus hay kiểm chứng pixel; GS được test ở harness riêng.
+
+### Thay đổi tài liệu
+
+- `AGENTS.md`: thêm yêu cầu riêng cho đúng semantics shader, regression trước/sau
+  fix, đo build và thời gian shader runtime; `wc -l` xác nhận 175 dòng (≤200).
+- `docs/prompts/TGLMT_GLSL_SHADER_RELIABILITY.md`: prompt có kiến trúc hiện tại,
+  lỗi quan sát được, hướng thiết kế frontend nội bộ, test gates, đo lường và tiêu
+  chí không tuyên bố quá bằng chứng.
+- `TODO.md`: thêm ba lỗi shaderpack và công việc tái hiện/sửa còn mở.
+
+### Kiểm chứng thực tế
+
+- Build target `test_glsl_coverage`: `/usr/bin/time -p` báo `real 82.17` giây;
+  CMake regenerate và biên dịch lại dependencies trong build directory có sẵn.
+  Đây là baseline build target của phiên này, không phải so sánh trước/sau tối ưu.
+- Chạy `build-work/test_glsl_coverage`: output thật `324/324 GLSL feature hoat dong
+  (4 N/A - xem test_geometry_emulation)`. Đây là curated feature probe, không phải
+  bằng chứng 100% GLSL hay bằng chứng các pack trong log đã sửa.
+- Test ID `test_glsl_coverage`: PASS.
+- Bộ CTest `glsl|shader|converter`: sau khi cho phép Metal compiler ghi module
+  cache ngoài sandbox, output thật `100% tests passed out of 19`, total 54.89 sec.
+  Test ID trong bộ: 19 mục, tất cả PASS. Lần chạy sandbox đầu tiên bị chặn ghi
+  `~/.cache/clang`, không phải kết quả compiler shader; đã rerun được phép.
+- Không sửa source compiler trong phiên này; không có regression test mới cho ba
+  lỗi trên. Shaderpack compile/render sau fix và hành vi A11 hiện
+  `NOT_VERIFIED` vì chưa có source pack trong repo và chưa build/cài bản fix.
+
+### Bước tiếp theo
+
+1. Lấy source shader gốc hoặc tạo minimal reproduction cho từng lỗi; thêm tests
+   trước khi đụng `glsl_to_msl.cpp`/linker/backend.
+2. Sửa pha gây lỗi, xác nhận test đỏ trước và xanh sau, chạy lại shader suite.
+3. Đo cùng build/corpus trước-sau và kiểm tra pixel/render trên A11; cập nhật
+   `docs/GLSL_460_COMPILER.md` cùng ma trận coverage từ kết quả sinh tự động.
+
 ---
 
 ## Session 2026-11-17 — Fix crash Minecraft/LWJGL "There is no OpenGL context current in the current thread"

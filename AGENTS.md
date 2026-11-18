@@ -16,13 +16,22 @@ cứng: **Apple A11**, iPhone 8/X, iOS tối đa 16). Mục tiêu hiện tại:
 Artifact: `libtglmt.dylib` (dùng hiện tại qua `dlopen`/`dlsym`) + `.xcframework`
 (sẽ làm ở §15.2 của đặc tả). Không phân phối qua App Store.
 
-## 2. Quy tắc kiến trúc đã CHỐT (không tự ý đổi)
+## 2. Quy tắc làm việc
+
+Viết test trước rồi mới bắt đầu làm.
+Làm thật kĩ, không qua loa, không fix để qua test mà phải fix thật, hoạt động được thật.
+Làm việc một cách chuyên nghiệp, có quy tắc, không đoán mò, cái nào không biết hãy tìm trên Internet và đọc docs thực tế.
+Phải giữ nguyên hành vi OpenGL, GLSL,... Đã thiết kế sau khi biên dịch sang Metal iOS.
+Sau khi làm xong toàn bộ những gì được giao hãy chạy test xem thời gian biên dịch và tối ưu chúng xuống mức thấp nhất có thể đạt được. Sau khi tối ưu vẫn phải giữ đùng hành vi của OpenGL, GLSL,... Đã thiết kế.
+Làm phải trắc trắn nếu không trắc trắn hãy đi tìm kĩ điểm tạo nên cái không trắc trắn ấy đến khi trắc trắn, tránh sai xót
+
+## 3. Quy tắc kiến trúc đã CHỐT (không tự ý đổi)
 
 | # | Quyết định |
 |---|---|
 | A1 | Dịch thẳng OpenGL 1.0–4.6 → Metal trong **một tầng**. KHÔNG dùng Mesa / Zink / MoltenVK / ANGLE / state tracker / GLSL→NIR của bên thứ ba. |
 | A2 | Không có lớp trung gian OpenGL-implementation khác. IR/ABI nội bộ của TGLMT được phép (chi tiết hiện thực nội bộ). |
-| A3 | **GLU: CÓ** trong phạm vi. **GLUT: KHÔNG** (thư viện tiện ích, không phải OpenGL API). |
+| A3 | **GLU: CÓ** trong phạm vi. **GLUT: CÓ** (thư viện tiện ích). |
 | A4 | Đóng gói CẢ `.dylib` LẪN `.xcframework`. |
 | A5 | Phạm vi chỉ là **OpenGL Desktop**. OpenGL ES / ESSL **không** thuộc phạm vi, không phải phương án thay thế. |
 | A6 | Geometry shader **BẮT BUỘC phải emulation**. Không được kết luận `HARDWARE_LIMITED` cho GS chỉ vì Metal không có GS stage. |
@@ -30,10 +39,11 @@ Artifact: `libtglmt.dylib` (dùng hiện tại qua `dlopen`/`dlsym`) + `.xcframe
 | A8 | Shader compile: runtime MSL vs precompile+cache — quyết định theo **số đo benchmark**, không theo giả định. |
 | A9 | Reference cho differential testing: Minecraft, game OpenGL thật, và test do AI tự viết theo spec. **Không cần** Mesa. |
 | A10 | Chỉ những gì thực sự là OpenGL mới vào phạm vi (kể cả GLU). |
+| A11 | (User override 2026-11-18) GLSL→MSL dùng **glslang + SPIRV-Cross** (git submodule) thay cho frontend tự viết. A1/A2 vẫn cấm Mesa/Zink/MoltenVK/ANGLE; glslang/SPIRV-Cross là ngoại lệ duy nhất cho đường dịch GLSL. Chi tiết: `docs/DECISIONS.md` D-013. |
 
 Chi tiết + bằng chứng: `docs/DECISIONS.md`.
 
-## 3. Quy trình nhiều session
+## 4. Quy trình nhiều session
 
 **Đầu session**
 1. Đọc `AGENTS.md`, `PROGRESS.md`, `TODO.md`.
@@ -54,7 +64,7 @@ Chi tiết + bằng chứng: `docs/DECISIONS.md`.
 - Agent phải trả về: bằng chứng `file:line`, test ID, output thật. Báo cáo chung
   chung bị từ chối.
 
-## 4. Chuẩn C++ / build
+## 5. Chuẩn C++ / build
 
 - C++17 (`set(CMAKE_CXX_STANDARD 17)`). Không dùng C++20.
 - Metal layer: Objective-C++ (`.mm`), ARC (`-fobjc-arc`), hoặc metal-cpp (nếu A7
@@ -63,8 +73,9 @@ Chi tiết + bằng chứng: `docs/DECISIONS.md`.
   ranh giới thư viện.
 - Current context lưu theo **thread** (`thread_local`).
 - Deployment target tối thiểu: **iOS 16.0** (A11 không chạy được iOS 17+).
-- Build:
+- Build (clone mới phải init submodule glslang + SPIRV-Cross):
   ```bash
+  git submodule update --init --depth 1
   cmake -S . -B build-work -DCMAKE_BUILD_TYPE=Debug
   cmake --build build-work -j8
   cd build-work && ctest -j8
@@ -72,7 +83,7 @@ Chi tiết + bằng chứng: `docs/DECISIONS.md`.
 - `TGLMT_APPLE_METAL=ON` mới bật backend Metal thật (mặc định OFF ⇒ Null
   backend, đủ cho test state machine).
 
-## 5. File sinh tự động — KHÔNG SỬA TAY
+## 6. File sinh tự động — KHÔNG SỬA TAY
 
 | File sinh | Bằng |
 |---|---|
@@ -89,7 +100,7 @@ Thứ tự regenerate: `gen_gl_headers.py` → `gen_version_inventory.py` →
 **Nguồn chân lý duy nhất cho API/enum:** `docs/khronos/gl.xml` (Khronos
 OpenGL-Registry, vendored). Không hardcode prototype/enum trong tay.
 
-## 6. Quy tắc báo cáo (bắt buộc)
+## 7. Quy tắc báo cáo (bắt buộc)
 
 - Mọi con số trong báo cáo phải do **script sinh ra** từ inventory/kết quả
   test, không viết tay.
@@ -110,7 +121,7 @@ OpenGL-Registry, vendored). Không hardcode prototype/enum trong tay.
   `HARDWARE_LIMITED`. Phải kèm capability query + các phương án emulation đã
   xét.
 
-## 7. Nhãn môi trường chạy
+## 8. Nhãn môi trường chạy
 
 | Nhãn | Nghĩa |
 |---|---|
@@ -120,7 +131,7 @@ OpenGL-Registry, vendored). Không hardcode prototype/enum trong tay.
 | `REFERENCE_ONLY` | chỉ chạy trên reference backend, chưa chạy Metal |
 | `NONE` | chưa xác minh ở đâu cả |
 
-## 8. Kiểm thử
+## 9. Kiểm thử
 
 - Framework: CTest + `tests/test_util.h` (`TGLMT_CHECK` — KHÔNG dùng `assert()`,
   vì `NDEBUG` xoá biểu thức trong build Release ⇒ test "xanh giả").
@@ -131,7 +142,7 @@ OpenGL-Registry, vendored). Không hardcode prototype/enum trong tay.
 - Test phải **tự kiểm tra giá trị**, không chỉ "gọi không crash".
 - Mọi lỗi phải được tự phân tích, không đẩy cho người dùng.
 
-## 9. Cạm bẫy đã biết (đừng phát lại)
+## 10. Cạm bẫy đã biết (đừng phát lại)
 
 1. **Error queue là FIFO.** Trước khi kiểm tra "lời gọi này sinh lỗi gì" phải
    xoá hết lỗi cũ (`while (glGetError() != 0) {}`).
@@ -145,3 +156,31 @@ OpenGL-Registry, vendored). Không hardcode prototype/enum trong tay.
    đừng giữ con trỏ qua một lời gọi `glGetString` khác.
 5. `kGlProfileMax` trong `include/tglmt/GlProfile.h` phải ≥ số hàm sinh được
    (hiện 1049). `tools/gen_c_exports.py` sẽ fail nếu vượt.
+
+## 11. GLSL, shader correctness và hiệu năng
+
+- API inventory chỉ đo bề mặt `gl*`; không chứng minh GLSL compile/link hay pixel
+  đúng. Báo cáo API và shader phải tách riêng.
+- Với lỗi shader, lần theo đủ chuỗi: source/preprocess → parse/semantic → IR/rewrites
+  → MSL → Metal library → GL program link/reflection → pipeline → draw/pixel. Ghi
+  chính xác lỗi nằm ở pha nào; không gộp mọi lỗi thành “thiếu API”.
+- Đọc shader/log gốc nếu có. Tạo regression tối thiểu trước khi sửa; xác nhận test
+  tái hiện FAIL trước fix, PASS sau fix. Test phải kiểm tra compile/link status,
+  info log, reflection hoặc kết quả pixel phù hợp, không chỉ gọi API.
+- Dùng `TGLMT_CHECK`, đăng ký test trong CTest, chạy đúng test mới và suite liên
+  quan. Nếu thiếu shaderpack/device/reference, tiếp tục bằng ca tối thiểu và ghi
+  đúng phần còn `NOT_VERIFIED`; không suy diễn là đã sửa lỗi thực tế.
+- Phạm vi shader là GLSL Desktop theo version/profile được context hỗ trợ. ESSL
+  không thay thế GLSL Desktop. Xử lý `#version`, profile và `#extension` theo spec;
+  chỉ advertise extension khi hành vi của nó đã được triển khai và xác minh.
+- Ưu tiên đối chiếu với spec và reference/pixel. “MSL biên dịch được” chỉ chứng
+  minh cú pháp/backend chấp nhận, không chứng minh hành vi GLSL được giữ nguyên.
+- Trước tối ưu, đo baseline riêng cho C++ build và shader runtime (dịch, Metal
+  library, link/pipeline), trên corpus ghi rõ. Báo median/p95, cache lạnh/ấm,
+  máy/OS/toolchain và lệnh chạy. Đo lại cùng cấu hình sau thay đổi.
+- Tối ưu chỉ sau khi regression đúng. Tối ưu thuần tốc độ phải giữ output MSL
+  byte-identical; nếu sửa semantics khiến output đổi, phải chứng minh bằng test
+  spec/differential/pixel. Không chọn cache hay precompile trước benchmark.
+- Không tuyên bố “100%” từ một corpus nhỏ hoặc feature smoke test. Ghi phiên bản,
+  stage, profile, extension, test và môi trường đã chạy; phần thiếu là `MISSING`,
+  chưa chạy là `NOT_VERIFIED`, lỗi là `INCORRECT`/`FAIL` phù hợp.

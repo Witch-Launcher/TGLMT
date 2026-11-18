@@ -94,3 +94,5 @@ python3 tools/gen_docs_site.py
 
 The generator owns the page manifest; `docs/index.html` is only the site template.
 See [Getting Started](docs/en/getting-started.md) for the regeneration workflow.
+
+```The reason I kept AGENTS.md file after the commit is so that anyone who wants to contribute—even those without any specific skills—can still take part in this work.```
